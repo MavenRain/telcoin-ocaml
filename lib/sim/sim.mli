@@ -11,18 +11,30 @@
     {!Tn_consensus.Node.event.Timer_fired} delivered to the same node after the
     armed span — and drives a time-ordered event queue until a horizon is reached.
 
-    {b Determinism.} The only source of jitter is per-message network latency,
-    drawn from a single {!Tn_std.Prng} stream seeded from the {!config}. Events at
-    the same delivery time are ordered by a monotonic scheduling counter, so a run
-    is a pure function of its seed: the same seed replays the same schedule and the
-    same committed output. A divergence in the committed sub-DAGs across honest
-    nodes, or a {!Tn_consensus.Node.error}, is therefore a real safety bug rather
-    than a flake — which is exactly what {!agreement} and {!error} report.
+    {b Determinism.} The sources of jitter are per-message network latency and,
+    when the network is lossy, per-message drop coins — each drawn from its own
+    {!Tn_std.Prng} stream derived from the {!config} seed (the drop stream is
+    scattered clear of the latency stream, and is untouched when loss is off).
+    Events at the same delivery time are ordered by a monotonic scheduling counter,
+    so a run is a pure function of its seed and config: the same inputs replay the
+    same schedule and the same committed output. A divergence in the committed
+    sub-DAGs across honest nodes, or a {!Tn_consensus.Node.error}, is therefore a
+    real safety bug rather than a flake — which is exactly what {!agreement} and
+    {!error} report.
 
-    {b Honest slice.} Every node follows the protocol and the network is fully
-    connected and reliable; there are no Byzantine or dropped-message models yet.
-    Parent certificates a peer needs to vote are offered on the vote request
-    (resolved from the set of certificates broadcast so far), and a
+    {b Fault model.} By default every node follows the protocol and the network
+    is fully connected and reliable. Two optional, honest-node-preserving faults
+    are available on {!config} for the property tests: [crashed] authorities are
+    {e crash-stopped} — silent from time zero, never proposing, voting, or
+    certifying — and [drop_permille] makes each network message independently lost
+    with that per-mille probability (timers are local and never drop). Both are
+    off by default, and with both off a run is byte-for-byte identical to the
+    reliable slice. Neither models {e Byzantine} behaviour (equivocation, forged
+    votes): a crash-stop node withholds messages but never sends a conflicting
+    one, so consensus safety must hold — the honest survivors still agree — and
+    the interesting failure mode is degraded liveness, not a fork. Parent
+    certificates a peer needs to vote are offered on the vote request (resolved
+    from the set of certificates broadcast so far), and a
     {!Tn_consensus.Node.command.Send_missing_parents} is answered from that same
     resolvable set — the shell's stand-in for the fetch protocol a later
     networking chunk will add. *)
@@ -45,12 +57,24 @@ val config :
   horizon:Units.Duration.t ->
   max_steps:int ->
   seed:int64 ->
+  ?crashed:Authority_id.t list ->
+  ?drop_permille:int ->
+  unit ->
   config
 (** Every message crossing the network is delayed by a uniform draw in
     [\[min_latency, max_latency\]]. {!run} stops once the next event's delivery
     time would exceed [horizon] (timers re-arm forever, so a horizon is what makes
     a run finite), or once [max_steps] events have been delivered (a safety fuse
-    against a zero-latency cascade), whichever comes first. *)
+    against a zero-latency cascade), whichever comes first.
+
+    [crashed] (default none) lists crash-stopped authorities — they are built into
+    the committee but never run, so the live committee is the remaining members.
+    [drop_permille] (default [0], clamped to [\[0, 1000\]]) is the per-message loss
+    probability in parts per thousand. See the {e fault model} note above; with
+    the defaults the run is the reliable honest slice. When some authorities are
+    [crashed], {!agreement} — which ranges over the whole committee — collapses to
+    [Agree 0] because a silent node commits nothing; test the survivors' agreement
+    with {!For_testing.agree_of_logs} over their logs alone. *)
 
 val create :
   committee:Committee.t ->
@@ -62,8 +86,10 @@ val create :
   t
 (** Build one {!Tn_consensus.Node} per committee authority (each signing with the
     key [secret_key] returns for its id), seed the resolvable certificate set with
-    the committee's genesis certificates, and schedule every node's startup
-    commands (the round-1 proposal and its armed timers) at time zero. *)
+    the committee's genesis certificates, and schedule every {e live} node's
+    startup commands (the round-1 proposal and its armed timers) at time zero. A
+    [crashed] authority's node is still built, but its startup commands are dropped
+    here, so it is silent from time zero. *)
 
 val run : t -> t
 (** Drive the event queue to the horizon: repeatedly deliver the earliest pending

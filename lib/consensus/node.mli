@@ -10,14 +10,18 @@
     every intra-node channel collapses into direct function composition, leaving
     only true message crossings as {!event}s in and {!command}s out.
 
-    {b Errors are for invariant breaks only.} Every {!error} is a DAG insertion
-    failure — two conflicting certificates for one slot, or a certificate whose
-    parents are absent. Reaching one means the honest-quorum assumption or the
-    node's own routing broke, so consensus safety is already lost; that is worth a
-    hard stop. Everything a Byzantine peer can do within the protocol — an invalid
-    vote, an equivocating {e header}, a certificate below the GC round, a vote for
-    a superseded proposal — is protocol-normal: it produces a command or a no-op,
-    never an error. *)
+    {b Errors are for invariant breaks only.} A {!Certificate_equivocation} — two
+    conflicting certificates for one slot — is always an error: safety is already
+    lost, so a hard stop is right. A {!Missing_parent} / {!Missing_parent_round},
+    by contrast, is fatal only on the {e strict} spine, which just our own freshly
+    formed certificate self-inserts through — there an absent parent means the
+    node's own routing broke. A certificate arriving from {e outside} before its
+    ancestors are synced (offered on a vote request, or gossiped while an ancestor
+    was lost) is protocol-normal catch-up: it is dropped, never fatal (Rust buffers
+    and fetches; the slice has no fetcher yet). Everything else a Byzantine peer can
+    do within the protocol — an invalid vote, an equivocating {e header}, a
+    certificate below the GC round, a vote for a superseded proposal — is likewise
+    a command or a no-op, never an error. *)
 
 open Tn_types
 open Tn_vertex

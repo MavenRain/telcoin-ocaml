@@ -149,16 +149,18 @@ let insert_certificates t ~now certs =
         (insert_certificate t ~now cert))
     (Ok (t, [])) certs
 
-(* Parents a peer attaches to a vote request are a catch-up convenience, not the
-   causally-ordered gossip spine: a node several rounds behind is offered a
-   round-(r-1) certificate whose own parents it has not yet synced. Inserting
-   that through the plain spine would surface [Missing_parent]/[Missing_parent_round]
-   as a fatal invariant-break error and halt an honest node on a protocol-normal
-   message. Rust buffers such a certificate and fetches its ancestors; the slice
-   has no fetcher yet, so it drops the unplaceable certificate and lets the voter
-   fall back to a missing-parents response. An {e equivocating} certificate stays
-   an invariant break whatever its source. *)
-let insert_offered_parent t ~now cert =
+(* A certificate this node receives before it has synced that certificate's own
+   parents is protocol-normal, not an invariant break. This happens two ways: a
+   node several rounds behind is offered a round-(r-1) certificate on a vote
+   request, or a gossiped certificate arrives while an ancestor's delivery was
+   lost (only reachable once the shell models message loss). Inserting either
+   through the plain spine would surface [Missing_parent]/[Missing_parent_round]
+   as a fatal error and halt an honest node on a message a real network drops
+   routinely. Rust buffers such a certificate and fetches its ancestors; the slice
+   has no fetcher yet, so it drops the unplaceable certificate — the voter falls
+   back to a missing-parents response, and gossip re-delivers on a later round. An
+   {e equivocating} certificate stays an invariant break whatever its source. *)
+let insert_certificate_tolerant t ~now cert =
   Result.fold
     (insert_certificate t ~now cert)
     ~ok:(fun r -> Ok r)
@@ -172,7 +174,7 @@ let insert_offered_parents t ~now certs =
       let* t, cmds = acc in
       Result.map
         (fun (t, cmds') -> (t, cmds @ cmds'))
-        (insert_offered_parent t ~now cert))
+        (insert_certificate_tolerant t ~now cert))
     (Ok (t, [])) certs
 
 (* Vote on a peer's header. Offered parents are inserted first (a
@@ -228,7 +230,10 @@ let step t ~now = function
   | Vote_request { from_; header; parents } ->
       handle_vote_request t ~now ~from_ ~header ~parents
   | Vote_received v -> handle_vote_received t ~now v
-  | Certificate_received c -> insert_certificate t ~now c
+  (* Gossip ingress tolerates an unsynced ancestor (protocol-normal under message
+     loss); only our own formed certificate self-inserts through the strict spine,
+     where an absent parent would mean our own routing broke. *)
+  | Certificate_received c -> insert_certificate_tolerant t ~now c
 
 let create ~committee ~secret_key ~self_id ~proposer_config ~sub_dags_per_schedule
     ~gc_depth ~now =

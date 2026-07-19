@@ -25,15 +25,20 @@ type config = {
   horizon : int;
   max_steps : int;
   seed : int64;
+  crashed : Authority_id.Set.t;
+  drop_permille : int;
 }
 
-let config ~min_latency ~max_latency ~horizon ~max_steps ~seed =
+let config ~min_latency ~max_latency ~horizon ~max_steps ~seed ?(crashed = [])
+    ?(drop_permille = 0) () =
   {
     lo = Units.Duration.to_ms min_latency;
     hi = Units.Duration.to_ms max_latency;
     horizon = Units.Duration.to_ms horizon;
     max_steps;
     seed;
+    crashed = Authority_id.Set.of_list crashed;
+    drop_permille = Int.max 0 (Int.min 1000 drop_permille);
   }
 
 type scheduled = { target : Authority_id.t; event : Node.event }
@@ -46,10 +51,13 @@ type t = {
   clock : int;
   seq : int;
   prng : Prng.t;
+  drop_prng : Prng.t;
   lo : int;
   hi : int;
   horizon : int;
   max_steps : int;
+  crashed : Authority_id.Set.t;
+  drop_permille : int;
   output : Sub_dag.t list Authority_id.Map.t;
   steps : int;
   err : (Authority_id.t * Node.error) option;
@@ -80,9 +88,23 @@ let schedule t ~delay ~target ~event =
     seq = t.seq + 1;
   }
 
+(* A network message crossing to [target]. With a lossy network the message is
+   dropped with probability [drop_permille / 1000], drawn from a private stream
+   ([drop_prng]) that is distinct from the latency stream and untouched when
+   [drop_permille = 0] — so an honest, reliable run (the default) draws latencies
+   in exactly the same order and replays byte-for-byte. Timers are local, not
+   network crossings, so they route through [schedule] directly and never drop. *)
 let unicast t ~target ~event =
-  let delay, prng = Prng.int_in t.prng ~lo:t.lo ~hi:t.hi in
-  schedule { t with prng } ~delay ~target ~event
+  if t.drop_permille = 0 then
+    let delay, prng = Prng.int_in t.prng ~lo:t.lo ~hi:t.hi in
+    schedule { t with prng } ~delay ~target ~event
+  else
+    let coin, drop_prng = Prng.int_in t.drop_prng ~lo:0 ~hi:999 in
+    let t = { t with drop_prng } in
+    if coin < t.drop_permille then t
+    else
+      let delay, prng = Prng.int_in t.prng ~lo:t.lo ~hi:t.hi in
+      schedule { t with prng } ~delay ~target ~event
 
 let broadcast t ~src ~event =
   List.fold_left
@@ -129,6 +151,8 @@ let interpret t ~src (cmd : Node.command) =
 (* ---- delivery and the event loop ---- *)
 
 let deliver t ~target ~event =
+  if Authority_id.Set.mem target t.crashed then t
+  else
   Option.fold ~none:t
     ~some:(fun node ->
       Result.fold
@@ -189,18 +213,32 @@ let create ~committee ~secret_key ~proposer_config ~sub_dags_per_schedule ~gc_de
       clock = 0;
       seq = 0;
       prng = Prng.of_seed config.seed;
+      (* A second stream for the drop coin, so it never perturbs the latency
+         schedule (and is only consumed when the network is lossy). Its seed is
+         the config seed pushed once through the SplitMix64 output mix (after a
+         non-gamma xor), which scatters it clear of the latency stream's state
+         orbit — a plain [seed xor gamma] would, for seeds disjoint from gamma,
+         land exactly one step along that orbit and alias the latency draws. *)
+      drop_prng =
+        Prng.of_seed
+          (fst (Prng.next_int64 (Prng.of_seed (Int64.logxor config.seed 0xD1B54A32D192ED03L))));
       lo = config.lo;
       hi = config.hi;
       horizon = config.horizon;
       max_steps = config.max_steps;
+      crashed = config.crashed;
+      drop_permille = config.drop_permille;
       output = Authority_id.Map.empty;
       steps = 0;
       err = None;
     }
   in
+  (* A crash-stopped authority never runs: its startup proposal and timers are
+     dropped here, and {!deliver} makes it silent to every later event. *)
   List.fold_left
     (fun t (id, cmds) ->
-      List.fold_left (fun t cmd -> interpret t ~src:id cmd) t cmds)
+      if Authority_id.Set.mem id t.crashed then t
+      else List.fold_left (fun t cmd -> interpret t ~src:id cmd) t cmds)
     t0 startups
 
 (* ---- observability ---- *)

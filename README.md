@@ -79,16 +79,22 @@ dune build      # builds all libraries
 dune test       # runs all test suites
 ```
 
-Current suite: **102 checks green** — 24 BCS golden-vector conformance checks,
+Current suite: **108 checks green** — 24 BCS golden-vector conformance checks,
 12 foundation cases (crypto, scalars, committee threshold table), 9
 vertex/certificate cases (the full assembly rejection matrix), 36 consensus
 cases (vote and parent aggregators, the DAG equivocation / parent /
 garbage-collection invariants from the Rust `dag_state_tests`, the Bullshark
-`bullshark_tests` scenarios, and the proposer/voter/node machines), and 6
+`bullshark_tests` scenarios, and the proposer/voter/node machines), 6
 end-to-end simulator cases (an honest committee reaches consensus, all nodes
 agree on the committed prefix, the committed leaders follow the round-robin
 schedule, a seed replays identically, a larger committee also commits, and the
-agreement oracle detects a constructed fork).
+agreement oracle detects a constructed fork), and 6 randomised property tests
+(qcheck) that hold over hundreds of seed-driven runs: an honest committee is
+always safe and live; committed logs advance in round and never regress in
+timestamp; the committed leader schedule is invariant to delivery timing;
+committed output is invariant to `gc_depth`; crash faults up to `f` preserve
+safety and liveness while `f+1` still preserves safety; and message loss never
+breaks safety.
 
 The committee threshold tests pin the exact Narwhal table against the Rust node:
 size 4 → quorum 3 / validity 2; 7 → 5 / 3; 10 → 7 / 4.
@@ -98,8 +104,8 @@ size 4 → quorum 3 / validity 2; 7 → 5 / 3; 10 → 7 / 4.
 A simulated committee reaching consensus and emitting ordered output, runnable
 as `dune exec bin/tn_sim.exe -- --validators 4 --seed 7 --until-s 60` (all flags
 optional; defaults are a 4-validator, seed-42, 20 s honest run). The latency band
-lives on `Sim.config`. **Milestone 1 is complete:** steps 1–12 below are done;
-13–14 remain. This plan
+lives on `Sim.config`. **Milestone 1 is complete:** steps 1–13 below are done;
+14 remains. This plan
 was produced and adversarially reviewed by a multi-agent architecture pass; the
 HIGH-severity traps it surfaced are noted.
 
@@ -126,8 +132,12 @@ HIGH-severity traps it surfaced are noted.
 12. ✅ `bin/tn_sim` — the runnable vertical slice (all nodes commit an identical
     round-robin leader sequence; exits non-zero on any invariant break or
     disagreement)
-13. ⏳ property tests (qcheck) — agreement, monotone timestamps, causal-delivery
-    invariance, GC-equivalence on long runs
+13. ✅ property tests (qcheck) — over hundreds of randomised seed-driven runs:
+    safety and liveness, round/timestamp monotonicity, leader-schedule invariance
+    to delivery timing, GC-equivalence. `Sim.config` gained an
+    honest-node-preserving **fault model** (crash-stop authorities and per-message
+    loss) so the suite also proves crash tolerance up to `f` and safety under
+    message loss; with the faults off a run is byte-for-byte the reliable slice
 14. ⏳ post-slice ledger — real crypto spike, golden vectors from a Rust harness,
     pending-certificate manager, Eio shell
 

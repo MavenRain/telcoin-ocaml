@@ -45,7 +45,7 @@ let run ?(horizon = 20_000) ?(seed = 42L) n =
   let committee, sk_of = setup n in
   let cfg =
     Sim.config ~min_latency:(dur 5) ~max_latency:(dur 50) ~horizon:(dur horizon)
-      ~max_steps:1_000_000 ~seed
+      ~max_steps:1_000_000 ~seed ()
   in
   Sim.create ~committee ~secret_key:sk_of ~proposer_config:Proposer.default_config
     ~sub_dags_per_schedule:100 ~gc_depth:50 ~config:cfg

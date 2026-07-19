@@ -84,7 +84,7 @@ let () =
   let committee, sk_of = build size in
   let cfg =
     Sim.config ~min_latency:(dur 5) ~max_latency:(dur 50)
-      ~horizon:(dur (until_s * 1000)) ~max_steps:1_000_000 ~seed
+      ~horizon:(dur (until_s * 1000)) ~max_steps:1_000_000 ~seed ()
   in
   let sim =
     Sim.create ~committee ~secret_key:sk_of ~proposer_config:Proposer.default_config
