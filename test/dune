@@ -1,5 +1,5 @@
 (tests
  (names test_bcs test_types test_vertex test_consensus test_primary test_sim
-   test_properties test_recovery test_execution test_state)
+   test_properties test_recovery test_execution test_state test_evm)
  (libraries tn_std tn_codec tn_types tn_crypto tn_vertex tn_consensus tn_sim
-   tn_execution tn_state alcotest qcheck))
+   tn_execution tn_state tn_evm zarith alcotest qcheck))
