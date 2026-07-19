@@ -23,19 +23,32 @@
       digests are re-queued to the front of the FIFO so those batches are
       proposed again, exactly like the Rust [process_committed_headers] re-queue.
 
-    {b Deliberate slice simplifications} (both live in the liveness/timing domain
-    the deterministic simulator controls, and neither affects safety):
+    Two further Rust behaviours are ported here (they were deferred in the
+    vertical slice and land with this timing chunk; both need the leader
+    schedule, which the proposer now holds and the node refreshes after every
+    commit):
 
-    - The min/max delays are uniform. Rust shortens them when this node leads the
-      next even round (min to zero, max halved); that leader-fast-path is deferred
-      with the timing chunk, keeping the proposer independent of the schedule.
-    - The [advance_round] readiness gate is dropped. Rust withholds an early
-      (pre-max-timeout) proposal until [ready] holds — a leader certificate is
-      present on an even round, or enough leader votes on an odd round — which
-      needs the schedule. The slice proposes on a held parent quorum plus the min
-      timer or a full batch, so it is strictly more eager. This is liveness-only:
-      it can propose a round sooner than Rust, never later, and the Bullshark
-      commit rule's safety is unaffected. It is deferred with the leader-fast-path.
+    - {b the leader fast path}. When this node is the anticipated leader of the
+      round it is about to build (an even round), it shortens its own header
+      spacing so its proposal is likelier to be committed: the max delay is
+      halved and the min delay collapses to zero. Every other round takes the
+      full configured delays. The shortened delays are chosen at re-arm time,
+      under the current timer generation, so a stale {!Timer_fired} is still
+      discarded exactly as before.
+    - {b the [advance_round] readiness gate}. An early proposal — one fired
+      before the max deadline, on a full batch or the min timer — is withheld
+      until the round is {e ready} to advance: on an even round the round's own
+      leader certificate must be present in the held parents, on an odd round the
+      votes on the previous leader must have settled (f+1 for it, or a 2f+1
+      quorum against). The max-delay deadline overrides the gate, so liveness is
+      unchanged — a round always eventually proposes — but a node no longer races
+      ahead of the leader it is meant to certify. The gate is recomputed only
+      when parents are processed (Rust's [process_parents]) and cleared on every
+      proposal.
+
+    {b Deliberate slice simplification that remains} (liveness/timing domain the
+    simulator controls, safety-neutral):
+
     - The equivocation guard (re-emit of a stored header for a round already
       proposed) is unreachable in forward operation, where the round only ever
       advances, so {!step} needs no error result. It becomes reachable through
@@ -98,13 +111,22 @@ val create :
   config:config ->
   committee:Committee.t ->
   authority:Authority_id.t ->
+  schedule:Leader_schedule.t ->
   genesis:Certificate.t list ->
   now:Units.Timestamp.t ->
   t * action list
-(** A proposer seeded with the genesis certificates as its round-0 parents. The
-    returned actions are the immediate round-1 proposal: at startup both timers
-    are already expired (Rust's first interval tick is immediate), so with a
-    non-empty parent set the machine proposes at once. *)
+(** A proposer seeded with the genesis certificates as its round-0 parents and
+    the current leader [schedule] (read for the fast-path delays and the
+    readiness gate). The returned actions are the immediate round-1 proposal: at
+    startup both timers are already expired (Rust's first interval tick is
+    immediate) and the readiness gate starts open (Rust's [advance_round = true]
+    default), so with a non-empty parent set the machine proposes at once. *)
+
+val update_schedule : t -> Leader_schedule.t -> t
+(** Install a new leader schedule — the node calls this after a commit that may
+    have changed the swap table, mirroring Rust's shared
+    [Arc<RwLock<LeaderSchedule>>] the proposer reads live. Affects only the
+    fast-path delays and the readiness gate; no header is built here. *)
 
 val step : t -> now:Units.Timestamp.t -> input -> t * action list
 (** Advance the machine. The returned state must be used in place of the argument
@@ -115,6 +137,7 @@ val recover :
   config:config ->
   committee:Committee.t ->
   authority:Authority_id.t ->
+  schedule:Leader_schedule.t ->
   genesis:Certificate.t list ->
   now:Units.Timestamp.t ->
   recovered_round:Round.t ->

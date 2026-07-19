@@ -45,6 +45,12 @@ module Timestamp : sig
   val of_sec : int64 -> t option
   val to_sec : t -> int64
   val max : t -> t -> t
+
+  val add_secs : t -> int -> t
+  (** Add a whole-second offset, saturating at the maximum representable
+      timestamp — the header-drift tolerance window [now + tolerance]. A
+      non-positive offset leaves the timestamp unchanged. Total. *)
+
   val equal : t -> t -> bool
   val compare : t -> t -> int
   val to_string : t -> string
@@ -59,6 +65,11 @@ module Duration : sig
   val of_ms : int -> t option
   val to_ms : t -> int
   val add : t -> t -> t
+
+  val half : t -> t
+  (** Truncating halving — Rust's [max_header_delay / 2] on the proposer's
+      leader fast path. Total. *)
+
   val compare : t -> t -> int
 end
 

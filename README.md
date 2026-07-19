@@ -79,22 +79,25 @@ dune build      # builds all libraries
 dune test       # runs all test suites
 ```
 
-Current suite: **108 checks green** — 24 BCS golden-vector conformance checks,
-12 foundation cases (crypto, scalars, committee threshold table), 9
-vertex/certificate cases (the full assembly rejection matrix), 36 consensus
-cases (vote and parent aggregators, the DAG equivocation / parent /
-garbage-collection invariants from the Rust `dag_state_tests`, the Bullshark
-`bullshark_tests` scenarios, and the proposer/voter/node machines), 6
-end-to-end simulator cases (an honest committee reaches consensus, all nodes
-agree on the committed prefix, the committed leaders follow the round-robin
-schedule, a seed replays identically, a larger committee also commits, and the
-agreement oracle detects a constructed fork), and 6 randomised property tests
-(qcheck) that hold over hundreds of seed-driven runs: an honest committee is
-always safe and live; committed logs advance in round and never regress in
-timestamp; the committed leader schedule is invariant to delivery timing;
-committed output is invariant to `gc_depth`; crash faults up to `f` preserve
-safety and liveness while `f+1` still preserves safety; and message loss never
-breaks safety.
+Current suite: **100 test cases green** (as `dune test` reports) plus 24 BCS
+golden-vector conformance checks (a standalone runner) — 12 foundation cases
+(crypto, scalars, committee threshold table), 9 vertex/certificate cases (the
+full assembly rejection matrix), 36 consensus cases (vote and parent aggregators, the
+DAG equivocation / parent / garbage-collection invariants from the Rust
+`dag_state_tests`, and the Bullshark `bullshark_tests` scenarios), 19 primary
+cases (the proposer/voter/node machines, including the leader fast path, the
+`advance_round` readiness gate, the header drift-tolerance window, and the
+forward-jump max-timer re-arm from the timing chunk), 6 end-to-end simulator
+cases (an honest committee reaches
+consensus, all nodes agree on the committed prefix, the committed leaders follow
+the round-robin schedule, a seed replays identically, a larger committee also
+commits, and the agreement oracle detects a constructed fork), 6 randomised
+property tests (qcheck) that hold over hundreds of seed-driven runs (an honest
+committee is always safe and live; committed logs advance in round and never
+regress in timestamp; the committed leader schedule is invariant to delivery
+timing; committed output is invariant to `gc_depth`; crash faults up to `f`
+preserve safety and liveness while `f+1` still preserves safety; and message loss
+never breaks safety), and 12 recovery cases (the storage/recovery seam).
 
 The committee threshold tests pin the exact Narwhal table against the Rust node:
 size 4 → quorum 3 / validity 2; 7 → 5 / 3; 10 → 7 / 4.
@@ -104,8 +107,8 @@ size 4 → quorum 3 / validity 2; 7 → 5 / 3; 10 → 7 / 4.
 A simulated committee reaching consensus and emitting ordered output, runnable
 as `dune exec bin/tn_sim.exe -- --validators 4 --seed 7 --until-s 60` (all flags
 optional; defaults are a 4-validator, seed-42, 20 s honest run). The latency band
-lives on `Sim.config`. **Milestone 1 is complete:** steps 1–13 below are done;
-14 remains. This plan
+lives on `Sim.config`. **Milestone 1 is complete** (steps 1–13), and two
+post-slice chunks have since landed (14 recovery/storage, 15 timing). This plan
 was produced and adversarially reviewed by a multi-agent architecture pass; the
 HIGH-severity traps it surfaced are noted.
 
@@ -138,8 +141,27 @@ HIGH-severity traps it surfaced are noted.
     honest-node-preserving **fault model** (crash-stop authorities and per-message
     loss) so the suite also proves crash tolerance up to `f` and safety under
     message loss; with the faults off a run is byte-for-byte the reliable slice
-14. ⏳ post-slice ledger — real crypto spike, golden vectors from a Rust harness,
-    pending-certificate manager, Eio shell
+
+**Post-slice chunks landed (beyond Milestone 1):**
+
+14. ✅ recovery/storage seam — `ConsensusState::new_from_store` (`Bullshark.of_store`),
+    `LeaderSchedule::from_store`, parent-check-disabled `Dag.insert_recovered`,
+    proposer `LastProposed` re-emit and voter `VoteInfo` restore, `Node.snapshot`/
+    `recover`; a coordinated restart reconstructs the frontier parent quorum and
+    resumes without re-gossip
+15. ✅ timing chunk — the proposer **leader fast path** (halved max / zero min
+    header delay when this node leads the next even round) and the **`advance_round`
+    readiness gate** (an early proposal waits for the round's leader certificate on
+    even rounds, or settled leader votes on odd rounds; the max deadline overrides,
+    so liveness is unchanged), plus the voter **drift-tolerance window** (accept a
+    header stamped up to `max_header_time_drift_tolerance` seconds ahead). The
+    honest slice stays deterministic; the leader fast path lets more rounds commit
+    within the same horizon (the demo prefix grows 19 → 23)
+
+**Still planned:** real crypto spike + golden vectors from a Rust harness; the
+pending-certificate fetcher (buffer-and-fetch on a missing parent — needs the
+network layer); `tn_execution` (Noop, then an OCaml EVM); the Eio shell; codec/
+crypto byte-compat alignment.
 
 ## OCaml ecosystem for the full-node goal
 

@@ -78,11 +78,14 @@ type reject_reason =
       (** The header's [created_at] precedes a parent's, which would break the
           committed-sub-DAG timestamp monotonicity. *)
   | Future_timestamp
-      (** The header claims a [created_at] ahead of this node's clock. The slice
-          uses a strict bound; the Rust drift-tolerance window (accept up to
-          [now + max_header_time_drift_tolerance]) is deferred with the timing
-          chunk. Unreachable in the deterministic simulator, where a proposer
-          clamps [created_at] to its own [now], never ahead of a later voter. *)
+      (** The header claims a [created_at] more than the drift tolerance ahead of
+          this node's clock. A header within [now + max_header_time_drift_tolerance]
+          (whole seconds; the tolerance defaults to 1, matching Rust) is accepted
+          — Rust waits out the small difference and then votes, which a pure
+          machine collapses to an immediate accept. Unreachable in the honest
+          deterministic simulator, where a proposer clamps [created_at] to its own
+          [now] and delivery never runs the clock backwards, so a voter's [now]
+          never trails a header's stamp. *)
   | Already_voted_higher
       (** This node has already voted for this author at a strictly higher
           round; the stale request is dropped. *)

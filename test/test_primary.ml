@@ -85,11 +85,30 @@ let pconfig ?(threshold = 1) () =
   Proposer.config ~min_header_delay:(dur 500) ~max_header_delay:(dur 1000)
     ~header_batch_threshold:threshold ~max_batches_per_header:1000
 
+let sched committee =
+  Leader_schedule.create committee ~threshold:Leader_schedule.Threshold.default
+
 let find_header actions =
   List.find_map (function Proposer.Broadcast_header h -> Some h | _ -> None) actions
 
 let arm_gens actions =
   List.filter_map (function Proposer.Arm_timer { gen; _ } -> Some gen | _ -> None) actions
+
+let min_after actions =
+  List.find_map
+    (function
+      | Proposer.Arm_timer { kind = Proposer.Min_delay; after; _ } ->
+          Some (Units.Duration.to_ms after)
+      | _ -> None)
+    actions
+
+let max_after actions =
+  List.find_map
+    (function
+      | Proposer.Arm_timer { kind = Proposer.Max_delay; after; _ } ->
+          Some (Units.Duration.to_ms after)
+      | _ -> None)
+    actions
 
 (* ---- proposer ---- *)
 
@@ -97,7 +116,7 @@ let test_proposer_empty_round1 () =
   let committee, _ = setup 4 in
   let _, actions =
     Proposer.create ~config:(pconfig ()) ~committee ~authority:(id_at committee 0)
-      ~genesis:(Certificate.genesis committee) ~now:(ts 0)
+      ~schedule:(sched committee) ~genesis:(Certificate.genesis committee) ~now:(ts 0)
   in
   match find_header actions with
   | Some h ->
@@ -110,10 +129,14 @@ let test_proposer_empty_round1 () =
 
 let test_proposer_proposes_on_quorum_and_timer () =
   let committee, sk_of = setup 4 in
-  let self = id_at committee 0 in
+  (* Authority 3 leads no round below 8, so the leader fast path never fires in
+     this window and the min timer is the sole early trigger — the mechanic this
+     case pins. (Authority 0 leads round 2, which would collapse its min delay to
+     zero and propose the moment the quorum arrived.) *)
+  let self = id_at committee 3 in
   let p, create_acts =
     Proposer.create ~config:(pconfig ~threshold:100 ()) ~committee ~authority:self
-      ~genesis:(Certificate.genesis committee) ~now:(ts 0)
+      ~schedule:(sched committee) ~genesis:(Certificate.genesis committee) ~now:(ts 0)
   in
   let gen = first (arm_gens create_acts) in
   (* a round-1 quorum arrives as the parents for round 2 *)
@@ -136,10 +159,12 @@ let test_proposer_proposes_on_quorum_and_timer () =
 
 let test_proposer_stale_timer_discarded () =
   let committee, sk_of = setup 4 in
-  let self = id_at committee 0 in
+  (* A non-leader in this round window, so the generation-counter mechanic is
+     tested in isolation from the leader fast path (see the case above). *)
+  let self = id_at committee 3 in
   let p, create_acts =
     Proposer.create ~config:(pconfig ~threshold:100 ()) ~committee ~authority:self
-      ~genesis:(Certificate.genesis committee) ~now:(ts 0)
+      ~schedule:(sched committee) ~genesis:(Certificate.genesis committee) ~now:(ts 0)
   in
   let gen1 = first (arm_gens create_acts) in
   (* advance to round 2, which re-arms the timers under a fresh generation *)
@@ -189,7 +214,7 @@ let test_proposer_requeues_skipped () =
   let self = id_at committee 0 in
   let p, _ =
     Proposer.create ~config:(pconfig ~threshold:1 ()) ~committee ~authority:self
-      ~genesis:(Certificate.genesis committee) ~now:(ts 0)
+      ~schedule:(sched committee) ~genesis:(Certificate.genesis committee) ~now:(ts 0)
   in
   let ba = batch "batch-A" and bb = batch "batch-B" and bc = batch "batch-C" in
   (* round 1->2 carries batch A, 2->3 carries B, 3->4 carries C *)
@@ -212,6 +237,127 @@ let test_proposer_requeues_skipped () =
     (List.exists (Digests.Batch_digest.equal ba) queued);
   Alcotest.(check bool) "the committed round-3 batch is not re-queued" false
     (List.exists (Digests.Batch_digest.equal bb) queued)
+
+(* The leader fast path: proposing the round before one's own leader round
+   collapses the min delay to zero and halves the max, so the anticipated leader
+   proposes sooner and is likelier to be committed. A non-leader keeps the full
+   configured delays. Both are read off the startup proposal's armed timers. *)
+let test_proposer_leader_fast_path () =
+  let committee, _ = setup 4 in
+  (* authority 0 leads round 2, so its round-1 proposal is on the fast path *)
+  let _, la =
+    Proposer.create ~config:(pconfig ()) ~committee ~authority:(id_at committee 0)
+      ~schedule:(sched committee) ~genesis:(Certificate.genesis committee) ~now:(ts 0)
+  in
+  Alcotest.(check (option int)) "the leader's min delay collapses to zero" (Some 0)
+    (min_after la);
+  Alcotest.(check (option int)) "the leader's max delay is halved" (Some 500)
+    (max_after la);
+  (* authority 3 leads no round below 8, so it keeps the full delays *)
+  let _, fa =
+    Proposer.create ~config:(pconfig ()) ~committee ~authority:(id_at committee 3)
+      ~schedule:(sched committee) ~genesis:(Certificate.genesis committee) ~now:(ts 0)
+  in
+  Alcotest.(check (option int)) "a non-leader keeps the full min delay" (Some 500)
+    (min_after fa);
+  Alcotest.(check (option int)) "a non-leader keeps the full max delay" (Some 1000)
+    (max_after fa)
+
+(* The readiness gate: on an even round the round's own leader certificate must
+   be among the held parents before an early (pre-max-timeout) proposal fires.
+   A quorum that excludes the leader leaves the gate closed, so neither the
+   quorum itself nor the min timer proposes; only the max deadline overrides. *)
+let test_proposer_gate_withholds_early_propose () =
+  let committee, sk_of = setup 4 in
+  let self = id_at committee 3 in
+  let leader2 = id_at committee 0 in
+  let p, boot =
+    Proposer.create ~config:(pconfig ~threshold:100 ()) ~committee ~authority:self
+      ~schedule:(sched committee) ~genesis:(Certificate.genesis committee) ~now:(ts 0)
+  in
+  let g1 = first (arm_gens boot) in
+  (* advance to round 2 via a full round-1 quorum and the min timer *)
+  let r1 = round_certs committee sk_of ~round:1 ~parents:(genesis_digests committee) in
+  let p, _ = Proposer.step p ~now:(ts 1) (Proposer.Parents { certs = r1; round = r 1 }) in
+  let p, acts2 =
+    Proposer.step p ~now:(ts 2) (Proposer.Timer_fired { kind = Proposer.Min_delay; gen = g1 })
+  in
+  Alcotest.(check int) "advanced to round 2" 2 (Round.to_int (Proposer.round p));
+  let g2 = first (arm_gens acts2) in
+  (* a round-2 quorum (2f+1 = 3) that EXCLUDES the round-2 leader (authority 0) *)
+  let non_leaders =
+    List.filter (fun id -> not (Authority_id.equal id leader2)) (ids committee)
+  in
+  let r2 =
+    List.map
+      (fun author ->
+        certify committee sk_of
+          (a_header committee ~author ~round:2 ~parents:(List.map Certificate.digest r1) ()))
+      non_leaders
+  in
+  let p, held = Proposer.step p ~now:(ts 3) (Proposer.Parents { certs = r2; round = r 2 }) in
+  Alcotest.(check bool) "a quorum missing the leader does not itself propose" true
+    (Option.is_none (find_header held));
+  let p, on_min =
+    Proposer.step p ~now:(ts 4) (Proposer.Timer_fired { kind = Proposer.Min_delay; gen = g2 })
+  in
+  Alcotest.(check bool) "the min timer cannot override the readiness gate" true
+    (Option.is_none (find_header on_min));
+  let _, on_max =
+    Proposer.step p ~now:(ts 5) (Proposer.Timer_fired { kind = Proposer.Max_delay; gen = g2 })
+  in
+  Alcotest.(check bool) "the max deadline overrides the gate and proposes round 3" true
+    (match find_header on_max with Some h -> Round.to_int (Header.round h) = 3 | None -> false)
+
+(* A forward round jump re-arms the max timer under a fresh generation, so the
+   stale timer from the last proposal is discarded rather than firing the
+   max-override proposal at the old, earlier deadline. This matters precisely
+   because the readiness gate withholds the min-lapse proposal when the jumped-to
+   round's leader is absent from the quorum — otherwise the stale timer would
+   force a proposal up to a full max delay before it should. *)
+let test_proposer_forward_jump_rearms_max () =
+  let committee, sk_of = setup 4 in
+  let self = id_at committee 3 in
+  let leader4 = id_at committee 1 in
+  let p, boot =
+    Proposer.create ~config:(pconfig ~threshold:100 ()) ~committee ~authority:self
+      ~schedule:(sched committee) ~genesis:(Certificate.genesis committee) ~now:(ts 0)
+  in
+  let g_old = first (arm_gens boot) in
+  (* a forward jump from round 1 to a round-4 quorum that EXCLUDES the round-4
+     leader, so the readiness gate stays closed and the min lapse cannot propose *)
+  let r3 = round_certs committee sk_of ~round:3 ~parents:(genesis_digests committee) in
+  let non_leaders =
+    List.filter (fun id -> not (Authority_id.equal id leader4)) (ids committee)
+  in
+  let r4 =
+    List.map
+      (fun author ->
+        certify committee sk_of
+          (a_header committee ~author ~round:4 ~parents:(List.map Certificate.digest r3) ()))
+      non_leaders
+  in
+  let p, jump = Proposer.step p ~now:(ts 1) (Proposer.Parents { certs = r4; round = r 4 }) in
+  Alcotest.(check int) "the jump advances to round 4" 4 (Round.to_int (Proposer.round p));
+  Alcotest.(check bool) "the gate is closed, so the jump does not itself propose" true
+    (Option.is_none (find_header jump));
+  Alcotest.(check bool) "the jump re-arms the max timer" true (Option.is_some (max_after jump));
+  Alcotest.(check bool) "and re-arms only the max, not the min" true
+    (Option.is_none (min_after jump));
+  let g_new = first (arm_gens jump) in
+  Alcotest.(check bool) "under a fresh generation" true (g_new <> g_old);
+  (* the stale pre-jump max timer is now discarded, not honored *)
+  let p, stale =
+    Proposer.step p ~now:(ts 2) (Proposer.Timer_fired { kind = Proposer.Max_delay; gen = g_old })
+  in
+  Alcotest.(check bool) "the pre-jump max timer no longer proposes" true
+    (Option.is_none (find_header stale));
+  (* the re-armed max timer fires the override proposal at the correct deadline *)
+  let _, live =
+    Proposer.step p ~now:(ts 3) (Proposer.Timer_fired { kind = Proposer.Max_delay; gen = g_new })
+  in
+  Alcotest.(check bool) "the re-armed max timer proposes round 5 via the override" true
+    (match find_header live with Some h -> Round.to_int (Header.round h) = 5 | None -> false)
 
 (* ---- voter ---- *)
 
@@ -307,6 +453,29 @@ let test_voter_rejects_round_zero () =
   Alcotest.(check bool) "a round-0 header is never voted on" true
     (match d with Voter.Reject Voter.Round_zero -> true | _ -> false)
 
+(* The drift-tolerance window. With the clock at 5s and the tolerance one second,
+   a header stamped 6s (exactly one second ahead) is within tolerance and voted;
+   one stamped 7s (two seconds ahead) is beyond it and rejected. This pins the
+   inclusive [now + tolerance] boundary and, together, the tolerance value. *)
+let test_voter_drift_tolerance () =
+  let committee, sk_of = setup 4 in
+  let self = id_at committee 0 and peer = id_at committee 1 in
+  let dag = Dag.create ~gc_depth:50 in
+  let within =
+    a_header committee ~author:peer ~round:1 ~created_at:6
+      ~parents:(genesis_digests committee) ()
+  in
+  let _, d_within = Voter.vote (voter_of committee sk_of ~self) ~dag ~now:(ts 5) within in
+  Alcotest.(check bool) "a header one second ahead is within tolerance and voted" true
+    (match d_within with Voter.Vote _ -> true | _ -> false);
+  let beyond =
+    a_header committee ~author:peer ~round:1 ~created_at:7
+      ~parents:(genesis_digests committee) ()
+  in
+  let _, d_beyond = Voter.vote (voter_of committee sk_of ~self) ~dag ~now:(ts 5) beyond in
+  Alcotest.(check bool) "a header two seconds ahead is beyond tolerance and rejected" true
+    (match d_beyond with Voter.Reject Voter.Future_timestamp -> true | _ -> false)
+
 (* ---- node ---- *)
 
 let node_create committee sk_of ~self =
@@ -398,6 +567,12 @@ let () =
           Alcotest.test_case "stale-generation timer discarded" `Quick
             test_proposer_stale_timer_discarded;
           Alcotest.test_case "re-queues skipped headers" `Quick test_proposer_requeues_skipped;
+          Alcotest.test_case "leader fast path shortens the delays" `Quick
+            test_proposer_leader_fast_path;
+          Alcotest.test_case "readiness gate withholds an early propose" `Quick
+            test_proposer_gate_withholds_early_propose;
+          Alcotest.test_case "forward jump re-arms the max timer" `Quick
+            test_proposer_forward_jump_rearms_max;
         ] );
       ( "voter",
         [
@@ -410,6 +585,8 @@ let () =
           Alcotest.test_case "requests missing parents" `Quick test_voter_needs_parents;
           Alcotest.test_case "rejects inquorate parents" `Quick test_voter_rejects_inquorate;
           Alcotest.test_case "rejects a round-0 header" `Quick test_voter_rejects_round_zero;
+          Alcotest.test_case "accepts within, rejects beyond drift tolerance" `Quick
+            test_voter_drift_tolerance;
         ] );
       ( "node",
         [

@@ -31,6 +31,18 @@ module Timestamp = struct
   let of_sec s = if Int64.compare s 0L >= 0 then Some s else None
   let to_sec t = t
   let max a b = if Int64.compare a b >= 0 then a else b
+
+  (* Add a whole-second offset, saturating at [Int64.max_int] so the result
+     stays a valid (non-negative) timestamp — the drift-tolerance window
+     [now + tolerance]. A negative offset is clamped to no change; the sole
+     caller passes a non-negative tolerance. *)
+  let add_secs t n =
+    if n <= 0 then t
+    else
+      let n64 = Int64.of_int n in
+      if Int64.compare t (Int64.sub Int64.max_int n64) > 0 then Int64.max_int
+      else Int64.add t n64
+
   let equal = Int64.equal
   let compare = Int64.compare
   let to_string = Int64.to_string
@@ -43,6 +55,11 @@ module Duration = struct
   let of_ms n = if n >= 0 then Some n else None
   let to_ms t = t
   let add = ( + )
+
+  (* Total: the representation is a non-negative int, so truncating division by
+     two stays in range and needs no smart constructor. *)
+  let half t = t / 2
+
   let compare = Int.compare
 end
 

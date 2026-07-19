@@ -297,8 +297,8 @@ let test_proposer_recover_reproposes () =
   let stored = a_header committee ~author:self ~round:5 ~parents:(List.map Certificate.digest r4) () in
   let p, boot =
     Proposer.recover ~config:(pconfig ()) ~committee ~authority:self
-      ~genesis:(Certificate.genesis committee) ~now:(ts 0) ~recovered_round:(r 4)
-      ~last_proposed:(Some stored)
+      ~schedule:(schedule_of committee) ~genesis:(Certificate.genesis committee)
+      ~now:(ts 0) ~recovered_round:(r 4) ~last_proposed:(Some stored)
   in
   Alcotest.(check bool) "recovery emits no proposal until parents arrive" true
     (List.for_all (function Proposer.Broadcast_header _ -> false | _ -> true) boot);
@@ -314,8 +314,8 @@ let test_proposer_recover_cold_is_create () =
   let self = id_at committee 0 in
   let _, boot =
     Proposer.recover ~config:(pconfig ()) ~committee ~authority:self
-      ~genesis:(Certificate.genesis committee) ~now:(ts 0) ~recovered_round:Round.genesis
-      ~last_proposed:None
+      ~schedule:(schedule_of committee) ~genesis:(Certificate.genesis committee)
+      ~now:(ts 0) ~recovered_round:Round.genesis ~last_proposed:None
   in
   Alcotest.(check bool) "a never-committed, never-proposed node cold-starts like create" true
     (List.exists

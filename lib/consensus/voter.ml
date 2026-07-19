@@ -20,6 +20,15 @@ type t = {
   last_votes : persisted Authority_id.Map.t;
 }
 
+(* Rust's [SyncConfig::max_header_time_drift_tolerance], a whole-second count
+   (its default is 1). A header stamped up to this many seconds ahead of our
+   clock is accepted rather than rejected, absorbing small clock drift between
+   honest nodes: Rust waits out the difference and then votes, so the pure
+   equivalent of that deferral is a plain accept. Rust makes it configurable per
+   node; the slice pins the default until a network-config record lands with the
+   networking chunk. *)
+let drift_tolerance_secs = 1
+
 let create ~committee ~secret_key ~self_id ~genesis =
   { committee; secret_key; self_id; genesis; last_votes = Authority_id.Map.empty }
 
@@ -148,7 +157,12 @@ let vote t ~dag ~now header =
     in
     let* () = check_vote_once t dag header header_digest in
     let* () = check_parents t dag header in
-    if Units.Timestamp.compare (Header.created_at header) now > 0 then
+    (* Reject only a header stamped beyond the drift-tolerance window; one
+       within [now + drift_tolerance_secs] is accepted (Rust waits out the
+       small difference then votes). The comparison is in whole seconds, the
+       header-timestamp domain. *)
+    let horizon = Units.Timestamp.add_secs now drift_tolerance_secs in
+    if Units.Timestamp.compare (Header.created_at header) horizon > 0 then
       Error (Reject Future_timestamp)
     else Ok ()
   in

@@ -92,10 +92,16 @@ let handle_outcome t ~now outcome =
       let sds = Nonempty.to_list sub_dags in
       let emit = List.map (fun sd -> Emit_committed sd) sds in
       let committed = committed_own_rounds sds t.self_id in
+      (* a commit may install a new leader swap table, so refresh the proposer's
+         schedule before it re-evaluates the fast-path delays and readiness gate,
+         mirroring Rust's shared [Arc<RwLock<LeaderSchedule>>] *)
+      let proposer =
+        Proposer.update_schedule t.proposer (Bullshark.schedule t.bullshark)
+      in
       (* the commit prunes and may re-queue the proposer's digests, which can
          cross the batch threshold and trigger an immediate proposal *)
       let proposer, actions =
-        Proposer.step t.proposer ~now (Proposer.Committed_headers { committed })
+        Proposer.step proposer ~now (Proposer.Committed_headers { committed })
       in
       let gc = Dag.gc_round (Bullshark.dag t.bullshark) in
       let parents =
@@ -242,8 +248,8 @@ let create ~committee ~secret_key ~self_id ~proposer_config ~sub_dags_per_schedu
     Leader_schedule.create committee ~threshold:Leader_schedule.Threshold.default
   in
   let proposer, actions =
-    Proposer.create ~config:proposer_config ~committee ~authority:self_id ~genesis
-      ~now
+    Proposer.create ~config:proposer_config ~committee ~authority:self_id
+      ~schedule ~genesis ~now
   in
   let voter = Voter.create ~committee ~secret_key ~self_id ~genesis in
   let bullshark =
@@ -302,7 +308,8 @@ let recover ~committee ~secret_key ~self_id ~proposer_config ~sub_dags_per_sched
          let recovered_round = Committed_log.last_committed_round committed in
          let proposer, boot =
            Proposer.recover ~config:proposer_config ~committee ~authority:self_id
-             ~genesis ~now ~recovered_round ~last_proposed:snap.last_proposed
+             ~schedule ~genesis ~now ~recovered_round
+             ~last_proposed:snap.last_proposed
          in
          let t =
            {
