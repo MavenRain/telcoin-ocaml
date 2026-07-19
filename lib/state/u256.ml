@@ -74,6 +74,19 @@ let of_int n =
            if shift >= Sys.int_size then '\000'
            else Char.chr ((n lsr shift) land 0xff)))
 
+(* Accumulate the bytes most significant first, refusing as soon as the next
+   digit would carry the value past [max_int]: [n * 256 + b <= max_int] exactly
+   when [n <= (max_int - b) / 256], so the guard is checked before the multiply
+   rather than after it, and nothing ever wraps. *)
+let to_int t =
+  List.fold_left
+    (fun acc i ->
+      Option.bind acc (fun n ->
+          let b = byte t i in
+          if n > (max_int - b) / 256 then None else Some ((n * 256) + b)))
+    (Some 0)
+    (List.init width (fun i -> i))
+
 let to_be_bytes t = t
 let of_be_bytes s = if String.length s = width then Some s else None
 

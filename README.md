@@ -65,6 +65,7 @@ tn_std ──► tn_codec ──► tn_crypto (virtual) ──► tn_types ─�
 | `tn_consensus` | DAG, Bullshark commit rule, proposer/voter/node machines | ✅ done + tested (parts 1–3) |
 | `tn_execution` | execution seam: the `Noop` engine folds committed sub-DAGs into the consensus chain (later an OCaml EVM) | ✅ done + tested |
 | `tn_state` | EVM execution-state foundation: `U256`, `Account`, `World_state`, and the value-transfer state transition | ✅ done + tested |
+| `tn_evm` | the EVM itself: `Alu` (total opcode arithmetic), and the interpreter machine — `Opcode`, `Stack`, `Memory`, `Gas`, `Code`, `Interpreter` | ✅ done + tested |
 | `tn_sim` + `bin/tn_sim` | discrete-event simulator + runnable slice | ✅ done + tested |
 
 See [`PORTING.md`](./PORTING.md) for the full Rust→OCaml module map.
@@ -184,11 +185,34 @@ are noted.
     uninhabited one. Pure and not yet wired into the running slice (it awaits batch
     payloads, which are networking-deferred)
 
-**Still planned:** real crypto spike + golden vectors from a Rust harness; the
+18. ✅ EVM arithmetic and logic unit (`tn_evm.Alu`) — the pure word operations
+    every arithmetic, comparison, bitwise and shift opcode dispatches to. The
+    raw arithmetic (wrapping multiply, binary long division, modular add and
+    multiply over the true 257- and 512-bit intermediates, exponentiation,
+    bitwise and shifts) was added to `U256`, which stays mathematically honest —
+    division by zero is `None`, not a silently defined value — and `Alu` layers
+    the EVM's *total* semantics over it, including the signed opcodes and the
+    `-2^255 / -1` overflow. Held to an independent zarith oracle by property test
+19. ✅ EVM interpreter (`tn_evm.Interpreter`) — the machine on top of the ALU: a
+    1024-word `Stack`, byte-addressed `Memory` with the quadratic expansion
+    price, `Gas` metering against revm's Cancun/Prague schedule, `Code` with
+    jump-destination analysis that steps over push data, and the dispatch loop
+    for the stack, memory, introspection and control-flow opcodes
+    (`PUSH0`–`PUSH32`, `DUP`, `SWAP`, `POP`, `MLOAD`/`MSTORE`/`MSTORE8`/`MSIZE`,
+    `PC`, `GAS`, `JUMP`/`JUMPI`/`JUMPDEST`, `STOP`, `RETURN`, `REVERT`,
+    `INVALID`) alongside the ALU opcodes. It runs any pure computation, and it is
+    **total**: every instruction that continues costs at least one gas, so a
+    finite allowance is itself the termination argument — no step limit, no
+    program that hangs it
+
+**Still planned:** the opcodes that reach outside the frame — storage
+(`SLOAD`/`SSTORE` and the account storage trie), the environment and context
+opcodes, calls, contract creation (which needs keccak) — and the block-execution
+layer that folds each committed sub-DAG's transactions through the state
+transition; all of them need batch payloads wired first, which is networking.
+Also: real crypto spike + golden vectors from a Rust harness; the
 pending-certificate fetcher (buffer-and-fetch on a missing parent — needs the
-network layer); the OCaml EVM interpreter on top of `tn_state` (gas metering,
-storage, contract code, the opcode set) behind the `tn_execution` seam, fed by
-batch payloads; the Eio shell; codec/crypto byte-compat alignment.
+network layer); the Eio shell; codec/crypto byte-compat alignment.
 
 ## OCaml ecosystem for the full-node goal
 

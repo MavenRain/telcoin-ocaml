@@ -30,6 +30,13 @@ val of_int : int -> t option
     over the naturals a native [int] can represent; larger literals enter through
     {!of_be_bytes} or {!of_hex}. *)
 
+val to_int : t -> int option
+(** The value as a native [int], [None] when it exceeds [max_int] — the partial
+    inverse of {!of_int}. The EVM interpreter converts memory offsets, lengths
+    and jump destinations with it: a word too large to be one of those addresses
+    a position no gas allowance could pay to reach, which the caller treats as
+    the failure it is. *)
+
 val to_be_bytes : t -> string
 (** The 32-byte big-endian encoding — the canonical wire form and the pre-image a
     later digest will hash. *)
