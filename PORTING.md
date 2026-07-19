@@ -54,13 +54,13 @@ consensus layer over a reth (Ethereum) execution client, tag context around
 | `Tn_vertex.Vote` | `Vote`/`VoteInfo` (`vote.rs`) | done | Signs the intent-wrapped header digest. |
 | `Tn_vertex.Certificate` | `Certificate` + `SignatureVerificationState` (`certificate.rs`) | done | Verified-by-construction. The 5-state enum collapses into the type; only genesis-vs-aggregate is retained. `signed_authorities` `RoaringBitmap` → `Authority_id.Set`. |
 
-## Consensus (`crates/consensus`) — planned
+## Consensus (`crates/consensus`) — part 1 done
 
 | OCaml module | Rust source | Status | Notes |
 |---|---|---|---|
-| `Tn_consensus.Vote_aggregator` | primary certifier vote path | planned | Pure fold, certifies at 2f+1; fresh per proposal. |
-| `Tn_consensus.Parent_aggregator` | primary parent collection | planned | Releases parent set at 2f+1. **Must not reset weight** (Rust re-fires on post-quorum stragglers). |
-| `Tn_consensus.Dag` | `ConsensusState` DAG (`bullshark`/`state`) | planned | `Round.Map` of `Authority_id.Map` of `Certificate.t`; equivocation guard, digest-keyed secondary index, GC horizon, round-1 genesis-parent rule. |
+| `Tn_consensus.Vote_aggregator` | `aggregators/votes.rs` (`VotesAggregator`) | done | Claims an author's slot on first sight (before validating, so a rejected vote burns the author for this header, matching Rust's `authorities_seen`), then validates (wrong header, non-member, bad signature); only accepted votes count toward quorum. `add` always returns the advanced state plus a result, and certifies via `Certificate.assemble` the moment accepted signers reach 2f+1. Fresh per proposal. Errors reported in `Certificate.error`. |
+| `Tn_consensus.Parent_aggregator` | `aggregators/certificates.rs` (`CertificatesAggregator`) | done | Per-round parent accumulator. A `seen` author set gives equivocation protection and a **weight that never resets** (only added to); a `pending` buffer holds certificates since the last release and is drained on each release, so each release carries the delta, matching Rust's `drain(..)`. Releases at 2f+1 and re-releases on every later straggler; a post-quorum duplicate author releases nothing. The proposer appends deltas, so a cumulative re-release would double-count parent stake there. |
+| `Tn_consensus.Dag` | `consensus/state.rs` (`ConsensusState` DAG half) | done | `Round.Map` of `Authority_id.Map` of `Certificate.t` plus a `Header_digest`-keyed secondary index. Equivocation guard (one certificate per (round, author); same digest idempotent), parent existence check with the round-1 genesis-parent skip (`round <= gc_round + 1`), GC horizon (`committed_round - gc_depth`, purge on `update`). Bullshark commit bookkeeping (`last_committed_sub_dag`, ordering) arrives in part 2. |
 | `Tn_consensus.Leader_schedule` | `LeaderSchedule`/`LeaderSwapTable` | planned | Slice: identity swap table. Full: ChaCha12 `StdRng` swap for a mixed fleet. |
 | `Tn_consensus.Sub_dag` | `CommittedSubDag` (`primary/output.rs`) | planned | Digest pre-image **must reserve** the reputation-scores field for retrofit. |
 | `Tn_consensus.Bullshark` | `bullshark.rs` (`process_certificate`, `commit_leader`, `order_leaders`, `linked`) | planned | The commit rule. Replay the Rust `bullshark_tests` scenarios. |
