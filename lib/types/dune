@@ -1,0 +1,4 @@
+(library
+ (name tn_types)
+ (public_name telcoin_ocaml.types)
+ (libraries tn_crypto tn_codec))

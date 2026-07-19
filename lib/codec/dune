@@ -1,0 +1,3 @@
+(library
+ (name tn_codec)
+ (public_name telcoin_ocaml.codec))

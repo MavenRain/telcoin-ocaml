@@ -1,0 +1,8 @@
+; The default implementation of the virtual tn_crypto library: a deterministic
+; forgeable stub for simulation. Provides tn_crypto.ml against the interface in
+; lib/crypto/tn_crypto.mli.
+(library
+ (name tn_crypto_stub)
+ (public_name telcoin_ocaml.crypto_stub)
+ (implements telcoin_ocaml.crypto)
+ (libraries digestif))

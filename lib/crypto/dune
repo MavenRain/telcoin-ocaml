@@ -1,0 +1,8 @@
+; Virtual library: declares the interface (tn_crypto.mli) with no
+; implementation. Exactly one implementation library (default
+; tn_crypto_stub) is linked per executable. See lib/crypto_stub/.
+(library
+ (name tn_crypto)
+ (public_name telcoin_ocaml.crypto)
+ (virtual_modules tn_crypto)
+ (default_implementation telcoin_ocaml.crypto_stub))

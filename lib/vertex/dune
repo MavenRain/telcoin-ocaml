@@ -1,0 +1,4 @@
+(library
+ (name tn_vertex)
+ (public_name telcoin_ocaml.vertex)
+ (libraries tn_crypto tn_codec tn_types))
