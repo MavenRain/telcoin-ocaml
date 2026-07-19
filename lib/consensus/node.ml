@@ -1,0 +1,259 @@
+open Tn_std
+open Tn_types
+open Tn_vertex
+
+type event =
+  | Our_digest of {
+      batch : Digests.Batch_digest.t;
+      worker_id : Units.Worker_id.t;
+    }
+  | Vote_request of {
+      from_ : Authority_id.t;
+      header : Header.t;
+      parents : Certificate.t list;
+    }
+  | Vote_received of Vote.t
+  | Certificate_received of Certificate.t
+  | Timer_fired of { kind : Proposer.timer_kind; gen : int }
+
+type command =
+  | Broadcast_header of Header.t
+  | Send_vote of { to_ : Authority_id.t; vote : Vote.t }
+  | Send_missing_parents of {
+      to_ : Authority_id.t;
+      digests : Digests.Header_digest.t list;
+    }
+  | Broadcast_certificate of Certificate.t
+  | Arm_timer of { kind : Proposer.timer_kind; after : Units.Duration.t; gen : int }
+  | Emit_committed of Sub_dag.t
+
+type error =
+  | Certificate_equivocation of Round.t * Authority_id.t
+  | Missing_parent of Digests.Header_digest.t
+  | Missing_parent_round of Round.t
+
+type t = {
+  self_id : Authority_id.t;
+  secret_key : Tn_crypto.Secret_key.t;
+  committee : Committee.t;
+  proposer : Proposer.t;
+  voter : Voter.t;
+  bullshark : Bullshark.t;
+  (* The in-flight vote collection on our own current header, if any. Replaced
+     wholesale on a new proposal, which cancels the previous collection. *)
+  votes : (Header.t * Vote_aggregator.t) option;
+  (* Per-round parent accumulators — the CertificatesAggregatorManager. Each
+     releases a 2f+1 delta to the proposer; garbage-collected below gc_round. *)
+  parents : Parent_aggregator.t Round.Map.t;
+}
+
+let ( let* ) = Result.bind
+let dag t = Bullshark.dag t.bullshark
+let last_committed t = Bullshark.last_sub_dag t.bullshark
+
+let map_dag_error = function
+  | Dag.Equivocation (r, a) -> Certificate_equivocation (r, a)
+  | Dag.Missing_parent d -> Missing_parent d
+  | Dag.Missing_parent_round r -> Missing_parent_round r
+
+(* Translate the proposer's actions into node commands. A broadcast header opens
+   a fresh vote collection primed with our own implicit self-vote. *)
+let apply_proposer_actions t actions =
+  List.fold_left
+    (fun (t, cmds) action ->
+      match action with
+      | Proposer.Ack_digest -> (t, cmds)
+      | Proposer.Arm_timer { kind; gen; after } ->
+          (t, cmds @ [ Arm_timer { kind; after; gen } ])
+      | Proposer.Broadcast_header header ->
+          let self_vote = Vote.sign t.secret_key ~voter:t.self_id header in
+          let agg, _ =
+            Vote_aggregator.add Vote_aggregator.empty t.committee header self_vote
+          in
+          ({ t with votes = Some (header, agg) }, cmds @ [ Broadcast_header header ]))
+    (t, []) actions
+
+(* The rounds at which our own headers were committed, across these sub-DAGs. *)
+let committed_own_rounds sub_dags self_id =
+  List.concat_map
+    (fun sd ->
+      Sub_dag.headers sd |> Nonempty.to_list
+      |> List.filter (fun h -> Authority_id.equal (Header.author h) self_id)
+      |> List.map Header.round)
+    sub_dags
+
+(* Emit committed sub-DAGs in order, tell the proposer which of our headers
+   committed (so it prunes and re-queues), and GC the parent aggregators the
+   advanced GC round has left behind. *)
+let handle_outcome t ~now outcome =
+  match outcome with
+  | Bullshark.No_commit _ -> (t, [])
+  | Bullshark.Committed sub_dags ->
+      let sds = Nonempty.to_list sub_dags in
+      let emit = List.map (fun sd -> Emit_committed sd) sds in
+      let committed = committed_own_rounds sds t.self_id in
+      (* the commit prunes and may re-queue the proposer's digests, which can
+         cross the batch threshold and trigger an immediate proposal *)
+      let proposer, actions =
+        Proposer.step t.proposer ~now (Proposer.Committed_headers { committed })
+      in
+      let gc = Dag.gc_round (Bullshark.dag t.bullshark) in
+      let parents =
+        Round.Map.filter (fun r _ -> Round.compare r gc > 0) t.parents
+      in
+      let t, propose_cmds = apply_proposer_actions { t with proposer; parents } actions in
+      (t, emit @ propose_cmds)
+
+(* Feed one accepted certificate to its round's parent aggregator; a released
+   quorum delta becomes the proposer's parents for the next round, which may
+   trigger the next proposal. Certificates at or below the GC round are ignored. *)
+let feed_parents t ~now cert =
+  let gc = Dag.gc_round (Bullshark.dag t.bullshark) in
+  let r = Certificate.round cert in
+  if Round.compare r gc <= 0 then (t, [])
+  else
+    let agg =
+      Option.value (Round.Map.find_opt r t.parents) ~default:Parent_aggregator.empty
+    in
+    let agg, release = Parent_aggregator.add agg t.committee cert in
+    let t = { t with parents = Round.Map.add r agg t.parents } in
+    Option.fold release ~none:(t, []) ~some:(fun delta ->
+        let certs = Nonempty.to_list delta in
+        let proposer, actions =
+          Proposer.step t.proposer ~now (Proposer.Parents { certs; round = r })
+        in
+        apply_proposer_actions { t with proposer } actions)
+
+(* The shared insertion spine, used by gossip, self-delivery of our own formed
+   certificate, and parents offered inside a vote request. Wrong-epoch and
+   below-GC certificates are protocol-normal no-ops; only a DAG invariant break
+   is an error. *)
+let insert_certificate t ~now cert =
+  if not (Units.Epoch.equal (Certificate.epoch cert) (Committee.epoch t.committee))
+  then Ok (t, [])
+  else
+    Bullshark.process_certificate t.bullshark cert
+    |> Result.map_error map_dag_error
+    |> Result.map (fun (bullshark, outcome) ->
+           let t = { t with bullshark } in
+           let t, commit_cmds = handle_outcome t ~now outcome in
+           let t, parent_cmds = feed_parents t ~now cert in
+           (t, commit_cmds @ parent_cmds))
+
+let insert_certificates t ~now certs =
+  List.fold_left
+    (fun acc cert ->
+      let* t, cmds = acc in
+      Result.map
+        (fun (t, cmds') -> (t, cmds @ cmds'))
+        (insert_certificate t ~now cert))
+    (Ok (t, [])) certs
+
+(* Parents a peer attaches to a vote request are a catch-up convenience, not the
+   causally-ordered gossip spine: a node several rounds behind is offered a
+   round-(r-1) certificate whose own parents it has not yet synced. Inserting
+   that through the plain spine would surface [Missing_parent]/[Missing_parent_round]
+   as a fatal invariant-break error and halt an honest node on a protocol-normal
+   message. Rust buffers such a certificate and fetches its ancestors; the slice
+   has no fetcher yet, so it drops the unplaceable certificate and lets the voter
+   fall back to a missing-parents response. An {e equivocating} certificate stays
+   an invariant break whatever its source. *)
+let insert_offered_parent t ~now cert =
+  Result.fold
+    (insert_certificate t ~now cert)
+    ~ok:(fun r -> Ok r)
+    ~error:(function
+      | Missing_parent _ | Missing_parent_round _ -> Ok (t, [])
+      | Certificate_equivocation _ as e -> Error e)
+
+let insert_offered_parents t ~now certs =
+  List.fold_left
+    (fun acc cert ->
+      let* t, cmds = acc in
+      Result.map
+        (fun (t, cmds') -> (t, cmds @ cmds'))
+        (insert_offered_parent t ~now cert))
+    (Ok (t, [])) certs
+
+(* Vote on a peer's header. Offered parents are inserted first (a
+   parent-carrying request can itself commit), then the voter decides against the
+   updated DAG. We never vote on our own header — the self-vote is implicit. *)
+let handle_vote_request t ~now ~from_ ~header ~parents =
+  if Authority_id.equal (Header.author header) t.self_id then Ok (t, [])
+  else
+    let* t, parent_cmds = insert_offered_parents t ~now parents in
+    let voter, decision = Voter.vote t.voter ~dag:(dag t) ~now header in
+    let t = { t with voter } in
+    let vote_cmds =
+      match decision with
+      | Voter.Vote v | Voter.Recast v -> [ Send_vote { to_ = from_; vote = v } ]
+      | Voter.Need_parents digests -> [ Send_missing_parents { to_ = from_; digests } ]
+      | Voter.Reject _ -> []
+    in
+    Ok (t, parent_cmds @ vote_cmds)
+
+(* A vote answering our own header. Only votes for the in-flight header count;
+   at quorum the certificate is formed, the collection cleared, the certificate
+   self-inserted (the same spine as gossip) and broadcast. *)
+let handle_vote_received t ~now v =
+  Option.fold t.votes ~none:(Ok (t, [])) ~some:(fun (header, agg) ->
+      if
+        not
+          (Digests.Header_digest.equal (Vote.header_digest v)
+             (Header.digest header))
+      then Ok (t, [])
+      else
+        let agg, result = Vote_aggregator.add agg t.committee header v in
+        let t = { t with votes = Some (header, agg) } in
+        Result.fold result
+          ~error:(fun _ -> Ok (t, []))
+          ~ok:(fun cert_opt ->
+            Option.fold cert_opt ~none:(Ok (t, [])) ~some:(fun cert ->
+                let t = { t with votes = None } in
+                Result.map
+                  (fun (t, cmds) -> (t, Broadcast_certificate cert :: cmds))
+                  (insert_certificate t ~now cert))))
+
+let step t ~now = function
+  | Our_digest { batch; worker_id } ->
+      let proposer, actions =
+        Proposer.step t.proposer ~now (Proposer.Our_digest { batch; worker_id })
+      in
+      Ok (apply_proposer_actions { t with proposer } actions)
+  | Timer_fired { kind; gen } ->
+      let proposer, actions =
+        Proposer.step t.proposer ~now (Proposer.Timer_fired { kind; gen })
+      in
+      Ok (apply_proposer_actions { t with proposer } actions)
+  | Vote_request { from_; header; parents } ->
+      handle_vote_request t ~now ~from_ ~header ~parents
+  | Vote_received v -> handle_vote_received t ~now v
+  | Certificate_received c -> insert_certificate t ~now c
+
+let create ~committee ~secret_key ~self_id ~proposer_config ~sub_dags_per_schedule
+    ~gc_depth ~now =
+  let genesis = Certificate.genesis committee in
+  let schedule =
+    Leader_schedule.create committee ~threshold:Leader_schedule.Threshold.default
+  in
+  let proposer, actions =
+    Proposer.create ~config:proposer_config ~committee ~authority:self_id ~genesis
+      ~now
+  in
+  let voter = Voter.create ~committee ~secret_key ~self_id ~genesis in
+  let bullshark =
+    Bullshark.create ~committee ~schedule ~sub_dags_per_schedule ~gc_depth
+  in
+  let t =
+    {
+      self_id;
+      secret_key;
+      committee;
+      proposer;
+      voter;
+      bullshark;
+      votes = None;
+      parents = Round.Map.empty;
+    }
+  in
+  apply_proposer_actions t actions
