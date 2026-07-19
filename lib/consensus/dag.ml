@@ -36,6 +36,13 @@ let error_to_string = function
 
 let ( let* ) = Result.bind
 
+(* The author's highest committed round, genesis if never committed — the
+   per-author dedup watermark. Used both by [try_insert]'s newly-relevant test
+   and by the commit rule when flattening a sub-DAG. *)
+let last_committed_round t author =
+  Authority_id.Map.find_opt author t.last_committed
+  |> Option.value ~default:Round.genesis
+
 let create ~gc_depth =
   {
     gc_depth;
@@ -98,10 +105,7 @@ let try_insert t certificate =
         (* Newly relevant iff strictly beyond this author's last committed round;
            the certificate is stored regardless, so parents of later rounds can
            still be verified against it. *)
-        let last =
-          Authority_id.Map.find_opt origin t.last_committed
-          |> Option.value ~default:Round.genesis
-        in
+        let last = last_committed_round t origin in
         Ok ({ t with certs; by_digest }, Round.compare round last > 0)
 
 let update t certificate =
@@ -134,3 +138,4 @@ let round_certificates t round =
 let rounds t = List.map fst (Round.Map.bindings t.certs)
 let committed_round t = t.committed_round
 let gc_round t = t.gc_round
+let gc_depth t = t.gc_depth

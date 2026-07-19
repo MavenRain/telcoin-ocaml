@@ -20,5 +20,11 @@ val schedule_index : t -> int
 val next : t -> t
 (** The next leader round (two rounds later). *)
 
+val prev : t -> t option
+(** Two rounds earlier, or [None] at round 2 — the step of the commit rule's
+    backwards leader scan. Top-anchored: stepping down from a leader round keeps
+    parity pinned to the leader, so the Rust [(a..=b).rev().step_by(2)]
+    anchor-at-the-top behaviour is automatic. *)
+
 val equal : t -> t -> bool
 val compare : t -> t -> int

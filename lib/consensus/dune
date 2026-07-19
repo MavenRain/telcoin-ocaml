@@ -1,4 +1,4 @@
 (library
  (name tn_consensus)
  (public_name telcoin_ocaml.consensus)
- (libraries tn_std tn_types tn_vertex))
+ (libraries tn_std tn_codec tn_crypto tn_types tn_vertex))

@@ -13,5 +13,10 @@ let next t =
      invariant is preserved without re-checking. *)
   Round.succ (Round.succ t)
 
+let prev t =
+  (* An even round > 2 is >= 4, so two rounds back is even and >= 2 — the
+     invariant holds and [of_round] accepts. Round 2 has no earlier leader. *)
+  if Round.to_int t <= 2 then None else of_round (Round.sub_saturating t 2)
+
 let equal = Round.equal
 let compare = Round.compare

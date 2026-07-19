@@ -45,6 +45,13 @@ val index_of : t -> Authority_id.t -> int option
 val nth : t -> int -> Authority.t option
 (** The authority at a bitmap position. Total: out-of-range yields [None]. *)
 
+val nth_mod : t -> int -> Authority.t
+(** The authority at [index mod size] of the id-sorted list. Total: a committee
+    holds at least two authorities by construction, so the reduced index always
+    resolves. This is the leader-election lookup ([(round / 2 - 1) mod size]
+    round-robin); the index reduction is Euclidean, so negative inputs are
+    handled even though the schedule only ever passes indices [>= 0]. *)
+
 val stake_of : t -> Authority_id.Set.t -> Units.Stake.t
 (** Total stake of the given members; non-members contribute nothing. *)
 

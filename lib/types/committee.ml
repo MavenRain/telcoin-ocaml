@@ -1,6 +1,8 @@
 type t = {
   epoch : Units.Epoch.t;
   sorted : Authority.t list; (* ascending Authority_id *)
+  first : Authority.t; (* head of [sorted]; the construction-provable witness
+                          that makes [nth_mod] total *)
   by_id : Authority.t Authority_id.Map.t;
   total : Units.Stake.t;
   quorum : Units.Stake.t;
@@ -32,26 +34,33 @@ let create ~epoch authorities =
           if Authority_id.Map.mem id map then Error Duplicate_public_key
           else Ok (Authority_id.Map.add id a map))
     in
-    Result.map
+    Result.bind
+      (List.fold_left add (Ok Authority_id.Map.empty) authorities)
       (fun by_id ->
         let sorted =
           Authority_id.Map.bindings by_id |> List.map snd
           |> List.sort Authority.compare
         in
-        let total =
-          List.fold_left
-            (fun acc a -> Units.Stake.add acc (Authority.voting_power a))
-            Units.Stake.zero sorted
-        in
-        let ts = Units.Stake.to_int total in
-        let quorum =
-          Units.Stake.of_int (quorum_of ts) |> Option.value ~default:total
-        in
-        let validity =
-          Units.Stake.of_int (validity_of ts) |> Option.value ~default:total
-        in
-        { epoch; sorted; by_id; total; quorum; validity })
-      (List.fold_left add (Ok Authority_id.Map.empty) authorities)
+        (* Reaching here means the [n >= 2] check passed and no duplicate
+           collapsed the map, so [sorted] has at least two elements; the empty
+           branch is dead and simply reports [Too_small] without fabricating an
+           authority. *)
+        match sorted with
+        | [] -> Error (Too_small 0)
+        | first :: _ ->
+            let total =
+              List.fold_left
+                (fun acc a -> Units.Stake.add acc (Authority.voting_power a))
+                Units.Stake.zero sorted
+            in
+            let ts = Units.Stake.to_int total in
+            let quorum =
+              Units.Stake.of_int (quorum_of ts) |> Option.value ~default:total
+            in
+            let validity =
+              Units.Stake.of_int (validity_of ts) |> Option.value ~default:total
+            in
+            Ok { epoch; sorted; first; by_id; total; quorum; validity })
 
 let epoch t = t.epoch
 let size t = List.length t.sorted
@@ -76,6 +85,11 @@ let index_of t id =
   found
 
 let nth t i = List.nth_opt t.sorted i
+
+let nth_mod t i =
+  let s = size t in
+  let idx = ((i mod s) + s) mod s in
+  List.nth_opt t.sorted idx |> Option.value ~default:t.first
 
 let stake_of t ids =
   List.fold_left

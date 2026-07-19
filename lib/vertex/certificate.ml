@@ -110,6 +110,13 @@ let round t = Header.round t.header
 let epoch t = Header.epoch t.header
 let origin t = Header.author t.header
 let signers t = t.signers
+
+let aggregate_signature t =
+  (* An exhaustive match on this module's own two-constructor sum, not on an
+     Option/Result. A committed leader sits at an even round >= 2 so its
+     certificate is never genesis; the [None] arm exists for totality. *)
+  match t.verification with Genesis -> None | Aggregated a -> Some a
+
 let is_genesis t = match t.verification with Genesis -> true | Aggregated _ -> false
 let equal a b = Digests.Header_digest.equal (digest a) (digest b)
 let compare a b = Digests.Header_digest.compare (digest a) (digest b)

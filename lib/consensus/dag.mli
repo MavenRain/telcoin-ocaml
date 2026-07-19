@@ -21,7 +21,14 @@
 
     A certificate only enters this store once it is a {!Tn_vertex.Certificate.t},
     which is itself proof a quorum signed it, so the DAG never re-checks
-    signatures. Its job is purely the structural shape of the graph. *)
+    signatures. Its job is purely the structural shape of the graph.
+
+    {b Reserved for the recovery chunk}: rebuilding this store from a persisted
+    certificate list (Rust's [try_insert_in_dag(.., false)]) needs a
+    parent-check-disabled insert, because the earliest rounds of a recovered
+    slice legitimately lack their parents. That [insert_recovered] is deferred
+    until a storage layer exists; every accessor a recovery path would read
+    ({!committed_round}, {!gc_round}, {!last_committed_round}) is already here. *)
 
 open Tn_types
 open Tn_vertex
@@ -87,3 +94,17 @@ val rounds : t -> Round.t list
 
 val committed_round : t -> Round.t
 val gc_round : t -> Round.t
+
+val gc_depth : t -> int
+(** The retention window this DAG was created with. The commit traversal
+    derives its {e leader-relative} GC bound from it ([leader_round - gc_depth],
+    saturating), which is deliberately distinct from the state-anchored
+    {!gc_round}: Rust computes both from the same [gc_depth] but different
+    anchors, and they must not be unified. *)
+
+val last_committed_round : t -> Authority_id.t -> Round.t
+(** The author's highest committed round, {!Tn_types.Round.genesis} if it has
+    never been committed — the per-author dedup watermark of the commit
+    traversal: a certificate at or below its author's watermark is already
+    ordered (or never will be) and is skipped when flattening a sub-DAG. Total:
+    an unknown author reads as genesis, matching Rust's [unwrap_or_default]. *)

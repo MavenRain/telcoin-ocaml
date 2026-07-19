@@ -42,6 +42,12 @@ val round : t -> Round.t
 val epoch : t -> Units.Epoch.t
 val origin : t -> Authority_id.t  (** The header's author. *)
 val signers : t -> Authority_id.Set.t
+
+val aggregate_signature : t -> Tn_crypto.Aggregate.t option
+(** The aggregated quorum signature this certificate was assembled from; [None]
+    exactly for genesis certificates, which are unsigned by protocol definition.
+    Feeds the committed sub-DAG's randomness value. *)
+
 val is_genesis : t -> bool
 
 val equal : t -> t -> bool
