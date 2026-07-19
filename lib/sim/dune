@@ -1,0 +1,4 @@
+(library
+ (name tn_sim)
+ (public_name telcoin_ocaml.sim)
+ (libraries tn_std tn_crypto tn_types tn_vertex tn_consensus))

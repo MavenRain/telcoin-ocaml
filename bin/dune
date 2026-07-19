@@ -1,0 +1,3 @@
+(executable
+ (name tn_sim)
+ (libraries tn_crypto tn_types tn_consensus tn_sim))
