@@ -42,6 +42,7 @@
 open Tn_types
 open Tn_vertex
 open Tn_consensus
+open Tn_execution
 
 type t
 (** A simulation: the committee's nodes, the pending event queue, the clock, and
@@ -103,6 +104,20 @@ val committed : t -> Authority_id.t -> Sub_dag.t list
 
 val commit_count : t -> Authority_id.t -> int
 (** [List.length (committed t authority)]. *)
+
+val executed : t -> Authority_id.t -> Consensus_block.t list
+(** The consensus-chain blocks [authority]'s committed output produces, in chain
+    order (block number one first). Each committed {!Tn_consensus.Sub_dag} folds
+    to one {!Tn_execution.Consensus_block} through the
+    {!Tn_execution.Engine.Noop} engine. Because that engine is a deterministic
+    fold and honest nodes share a committed prefix ({!agreement}), honest nodes'
+    chains coincide wherever their committed logs do. This is derived on demand
+    from {!committed} rather than run in the event loop, so it never perturbs the
+    run's determinism. Empty for a non-member or a node that committed nothing. *)
+
+val execution_tip : t -> Authority_id.t -> Consensus_block.t option
+(** The head of [authority]'s consensus chain — the last block of {!executed} —
+    or [None] if it has committed nothing. *)
 
 val error : t -> (Authority_id.t * Node.error) option
 (** The node and invariant-break error that halted the run, or [None] for a clean

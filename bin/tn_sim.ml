@@ -122,6 +122,20 @@ let () =
   (match members with
   | self :: _ ->
       Printf.printf "committed leader sequence (node 0):\n";
-      print_output sim self
+      print_output sim self;
+      (* The execution seam: node 0's committed output folded into the consensus
+         chain by the Noop engine. Each committed sub-DAG extends the chain by one
+         block; the tip is the head the execution layer would build on next. *)
+      let chain = Sim.executed sim self in
+      Printf.printf "consensus chain (node 0): %d blocks; tip %s\n"
+        (List.length chain)
+        (Option.fold ~none:"(none)"
+           ~some:(fun b ->
+             Printf.sprintf "#%s %s"
+               (Tn_execution.Consensus_block.Number.to_string
+                  (Tn_execution.Consensus_block.number b))
+               (Digests.Output_digest.to_hex
+                  (Tn_execution.Consensus_block.digest b)))
+           (Sim.execution_tip sim self))
   | [] -> ());
   exit (if (not fatal) && agreed then 0 else 1)

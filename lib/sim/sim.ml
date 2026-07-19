@@ -247,6 +247,29 @@ let committed t authority =
   List.rev (Option.value ~default:[] (Authority_id.Map.find_opt authority t.output))
 
 let commit_count t authority = List.length (committed t authority)
+
+(* Fold the Noop execution engine over an authority's committed output to form
+   its consensus chain. The engine cannot fail ([error] is uninhabited), so
+   [Nothing.absurd] discharges the impossible error branch of each step. This is
+   a pure function of the committed prefix, computed on demand here rather than
+   run in the event loop, so the honest run stays byte-for-byte deterministic. *)
+let executed t authority =
+  let _engine, blocks =
+    List.fold_left
+      (fun (engine, blocks) sd ->
+        Result.fold
+          ~ok:(fun (engine, block) -> (engine, block :: blocks))
+          ~error:Tn_execution.Nothing.absurd
+          (Tn_execution.Engine.Noop.execute engine sd))
+      (Tn_execution.Engine.Noop.genesis, [])
+      (committed t authority)
+  in
+  List.rev blocks
+
+(* The head of the chain is, by construction, the last block of {!executed} —
+   derived from it rather than re-folded, so the two cannot drift apart. *)
+let execution_tip t authority = List.nth_opt (List.rev (executed t authority)) 0
+
 let error t = t.err
 let elapsed t = Option.value ~default:Units.Duration.zero (Units.Duration.of_ms t.clock)
 let steps t = t.steps

@@ -1,0 +1,4 @@
+(library
+ (name tn_execution)
+ (public_name telcoin_ocaml.execution)
+ (libraries tn_codec tn_crypto tn_types tn_consensus))
