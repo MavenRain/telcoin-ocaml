@@ -23,12 +23,12 @@
     which is itself proof a quorum signed it, so the DAG never re-checks
     signatures. Its job is purely the structural shape of the graph.
 
-    {b Reserved for the recovery chunk}: rebuilding this store from a persisted
-    certificate list (Rust's [try_insert_in_dag(.., false)]) needs a
-    parent-check-disabled insert, because the earliest rounds of a recovered
-    slice legitimately lack their parents. That [insert_recovered] is deferred
-    until a storage layer exists; every accessor a recovery path would read
-    ({!committed_round}, {!gc_round}, {!last_committed_round}) is already here. *)
+    {b Recovery}: {!recover} rebuilds this store from a persisted certificate
+    slice (Rust's [construct_dag_from_cert_store]), folding each certificate in
+    through the parent-check-disabled {!insert_recovered} (Rust's
+    [try_insert_in_dag(.., false)]) — the earliest rounds of a recovered slice
+    legitimately lack their garbage-collected parents. {!all_certificates}
+    snapshots the live store for persistence. *)
 
 open Tn_types
 open Tn_vertex
@@ -70,6 +70,28 @@ val try_insert : t -> Certificate.t -> (t * bool, error) result
     - if a certificate is already stored for this (round, author) with a
       different digest, {!Equivocation} is returned; the same digest is a no-op. *)
 
+val insert_recovered : t -> Certificate.t -> (t * bool, error) result
+(** {!try_insert} with the parent-existence check disabled — Rust's
+    [try_insert_in_dag(.., false)]. The GC drop (round at or below the GC round
+    returns [false] without storing) and the equivocation guard still apply; a
+    certificate whose parents are absent is stored anyway, because a recovered
+    slice's earliest rounds have had their parents garbage-collected. Used only by
+    {!recover}. *)
+
+val recover :
+  gc_depth:int ->
+  last_committed_round:Round.t ->
+  last_committed:Round.t Authority_id.Map.t ->
+  certificates:Certificate.t list ->
+  (t, error) result
+(** Rebuild a DAG from persisted state — the certificate-store half of Rust's
+    [ConsensusState::new_from_store]. [last_committed_round] anchors the committed
+    round and the GC round ([last_committed_round - gc_depth], saturating);
+    [last_committed] seeds the per-author watermark map; [certificates] are folded
+    in through {!insert_recovered} in the given order (Rust folds the store's
+    ascending [(round, author)] order, which {!all_certificates} produces). A
+    genuine {!Equivocation} stops the rebuild, where Rust panics. *)
+
 val update : t -> Certificate.t -> t
 (** Record that [certificate] has been committed and garbage-collect. Advances
     the author's last committed round and the global committed round (both by
@@ -91,6 +113,11 @@ val round_certificates : t -> Round.t -> Certificate.t list
 
 val rounds : t -> Round.t list
 (** The rounds currently holding at least one certificate, ascending. *)
+
+val all_certificates : t -> Certificate.t list
+(** Every stored certificate, ascending by round then author id — the snapshot a
+    persistence layer records and {!recover} folds back. Post-GC by construction:
+    the store never holds a certificate at or below its GC round. *)
 
 val committed_round : t -> Round.t
 val gc_round : t -> Round.t

@@ -68,6 +68,32 @@ let create ~committee ~schedule ~sub_dags_per_schedule ~gc_depth =
     max_inserted = Round.genesis;
   }
 
+(* Reconstruct the commit state from persistence — Rust's
+   [ConsensusState::new_from_store]. The committed watermark, committed round, and
+   last committed sub-DAG derive from the log ([read_last_committed] /
+   [latest_consensus_header]); the DAG rebuilds from the certificate slice; and
+   the schedule is recovered separately (installed before this call, as Rust
+   installs the swap table before spawning consensus). [max_inserted] is
+   bookkeeping only, restored to the highest recovered certificate round. *)
+let of_store ~committee ~schedule ~sub_dags_per_schedule ~gc_depth ~certificates ~committed =
+  let last_committed = Committed_log.last_committed committed in
+  let last_committed_round = Committed_log.last_committed_round committed in
+  Dag.recover ~gc_depth ~last_committed_round ~last_committed ~certificates
+  |> Result.map (fun dag ->
+         let max_inserted =
+           List.fold_left
+             (fun acc c -> round_max acc (Certificate.round c))
+             Round.genesis certificates
+         in
+         {
+           committee;
+           schedule;
+           sub_dags_per_schedule = max 1 sub_dags_per_schedule;
+           dag;
+           last_sub_dag = Committed_log.latest committed;
+           max_inserted;
+         })
+
 (* Is there a parent-edge path from [leader] down to [prev] entirely through
    certificates currently in the DAG? The frontier starts at the leader and, for
    each round from [leader.round - 1] down to [prev.round], becomes the

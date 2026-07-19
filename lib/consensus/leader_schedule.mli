@@ -69,6 +69,14 @@ val note_final_scores :
     nothing (uniform scores give zero deviation), yet still counts as a schedule
     change, exactly as in Rust. *)
 
+val from_store : Committee.t -> threshold:Threshold.t -> Committed_log.t -> t
+(** Rebuild the schedule from the committed sub-DAG log — Rust's
+    [LeaderSchedule::from_store]. Takes the most recent commit whose reputation
+    scores are final and installs the swap table those scores build (exactly the
+    table the commit rule had installed at the last schedule boundary), so no
+    replay of intermediate commits is needed. A log with no final-scores commit
+    recovers to the round-robin schedule {!create} gives. *)
+
 val good_nodes : t -> Authority.t list
 (** Score-descending; empty when the current table swaps nothing. Observability
     for tests and logs. *)

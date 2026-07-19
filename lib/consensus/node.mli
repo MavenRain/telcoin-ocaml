@@ -91,6 +91,43 @@ val step : t -> now:Units.Timestamp.t -> event -> (t * command list, error) resu
 (** Advance the node by one event, yielding the outgoing commands or the
     invariant-break error that stops it. *)
 
+type persisted = {
+  certificates : Certificate.t list;
+      (** The DAG certificate slice — post-GC by construction. *)
+  last_proposed : Header.t option;  (** The proposer's [LastProposed] slot. *)
+  votes : (Authority_id.t * Voter.persisted) list;
+      (** The voter's per-author vote-once records. *)
+}
+(** The node-owned persisted state. The committed sub-DAG log is separate — it is
+    the node's {!Emit_committed} output, recorded by whatever consumes it. *)
+
+val snapshot : t -> persisted
+(** Extract the node-owned persisted state for storage. *)
+
+val recover :
+  committee:Committee.t ->
+  secret_key:Tn_crypto.Secret_key.t ->
+  self_id:Authority_id.t ->
+  proposer_config:Proposer.config ->
+  sub_dags_per_schedule:int ->
+  gc_depth:int ->
+  now:Units.Timestamp.t ->
+  persisted:persisted ->
+  committed:Committed_log.t ->
+  (t * command list, error) result
+(** Rebuild a node from persistence at restart — the composed port of Rust's node
+    recovery. [committed] is the persisted commit log (the {!Emit_committed}
+    stream): the leader schedule ({!Leader_schedule.from_store}), the committed
+    watermark, and the last committed sub-DAG all derive from it, while the DAG
+    rebuilds from [persisted.certificates]. [sub_dags_per_schedule], [gc_depth],
+    and [proposer_config] must match the pre-crash configuration (Rust reads them
+    from config, not the store). The returned commands are the resumed proposal:
+    for a node with a rebuilt DAG the parent quorum at the recovered frontier is
+    replayed so the proposer re-proposes at once — re-emitting the persisted header
+    or building the next round — while a node that never committed or proposed
+    (empty DAG, no stored header) returns the round-1 proposal, as {!create}. Fails
+    with the DAG's {!error} if the persisted certificate slice equivocates. *)
+
 val dag : t -> Dag.t
 (** The current DAG (committed certificates pruned by GC). Observability. *)
 

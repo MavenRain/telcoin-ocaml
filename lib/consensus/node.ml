@@ -262,3 +262,89 @@ let create ~committee ~secret_key ~self_id ~proposer_config ~sub_dags_per_schedu
     }
   in
   apply_proposer_actions t actions
+
+type persisted = {
+  certificates : Certificate.t list;
+  last_proposed : Header.t option;
+  votes : (Authority_id.t * Voter.persisted) list;
+}
+
+(* The node-owned persisted state: the DAG certificate slice (post-GC by
+   construction), the proposer's last-proposed header, and the voter's per-author
+   vote-once records. The committed sub-DAG log is not held here — it is the
+   node's output stream, persisted by whatever consumes {!Emit_committed}. *)
+let snapshot t =
+  {
+    certificates = Dag.all_certificates (Bullshark.dag t.bullshark);
+    last_proposed = Proposer.last_proposed t.proposer;
+    votes = Voter.snapshot t.voter;
+  }
+
+(* Rebuild a whole node from persistence — Rust's node recovery, composing
+   [ConsensusState::new_from_store] (the DAG and commit state), [from_store] (the
+   leader schedule), the [LastProposed] re-propose, and the [VoteInfo] vote-once
+   restore. The leader schedule is recovered first (installed before the commit
+   state, as Rust installs it before spawning consensus). Volatile machinery — the
+   in-flight vote collection and the parent aggregators — starts empty. *)
+let recover ~committee ~secret_key ~self_id ~proposer_config ~sub_dags_per_schedule
+    ~gc_depth ~now ~persisted:snap ~committed =
+  let genesis = Certificate.genesis committee in
+  let schedule =
+    Leader_schedule.from_store committee ~threshold:Leader_schedule.Threshold.default committed
+  in
+  Bullshark.of_store ~committee ~schedule ~sub_dags_per_schedule ~gc_depth
+    ~certificates:snap.certificates ~committed
+  |> Result.map_error map_dag_error
+  |> Result.map (fun bullshark ->
+         let voter =
+           Voter.recover ~committee ~secret_key ~self_id ~genesis ~votes:snap.votes
+         in
+         let recovered_round = Committed_log.last_committed_round committed in
+         let proposer, boot =
+           Proposer.recover ~config:proposer_config ~committee ~authority:self_id
+             ~genesis ~now ~recovered_round ~last_proposed:snap.last_proposed
+         in
+         let t =
+           {
+             self_id;
+             secret_key;
+             committee;
+             proposer;
+             voter;
+             bullshark;
+             votes = None;
+             parents = Round.Map.empty;
+           }
+         in
+         let t, boot_cmds = apply_proposer_actions t boot in
+         (* Reconstruct the parent quorum at the recovered frontier — Rust's
+            certificate-manager [recover_state]. Without it a restarted node holds
+            every certificate in its rebuilt DAG but its parent aggregators are
+            empty, so it never re-forms a quorum from certificates it already has
+            and cannot propose until the network re-gossips them — a whole
+            committee restarting together (a deployment or epoch roll) would stall.
+            Re-feeding the highest recovered round that carries a 2f+1 quorum
+            releases that quorum to the proposer, which advances to the frontier
+            and proposes the next round, re-emitting the persisted header verbatim
+            exactly when the frontier is the round below it (the in-flight header
+            was not yet certified) or building fresh otherwise. A node whose
+            in-flight proposal never reached a stored quorum (an empty recovered
+            DAG) has no frontier to resume from; re-proposing it on a bare timeout
+            (Rust's [should_repropose_header]) is deferred with the networking
+            chunk, where the network re-delivers the missing certificates. *)
+         let dag = Bullshark.dag bullshark in
+         let has_quorum r =
+           Dag.round_certificates dag r
+           |> List.map Certificate.origin
+           |> Authority_id.Set.of_list
+           |> Committee.stake_of committee
+           |> Committee.reaches_quorum committee
+         in
+         Dag.rounds dag |> List.rev |> List.find_opt has_quorum
+         |> Option.fold ~none:(t, boot_cmds) ~some:(fun r ->
+                List.fold_left
+                  (fun (t, cmds) cert ->
+                    let t, cmds' = feed_parents t ~now cert in
+                    (t, cmds @ cmds'))
+                  (t, boot_cmds)
+                  (Dag.round_certificates dag r)))

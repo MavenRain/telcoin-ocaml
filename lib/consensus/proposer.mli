@@ -36,10 +36,12 @@
       timer or a full batch, so it is strictly more eager. This is liveness-only:
       it can propose a round sooner than Rust, never later, and the Bullshark
       commit rule's safety is unaffected. It is deferred with the leader-fast-path.
-    - The equivocation guard ({!Arm_timer}-free re-emit of a stored header for a
-      round already proposed) is present for the recovery chunk but unreachable in
-      forward operation, where the round only ever advances, so {!step} needs no
-      error result. *)
+    - The equivocation guard (re-emit of a stored header for a round already
+      proposed) is unreachable in forward operation, where the round only ever
+      advances, so {!step} needs no error result. It becomes reachable through
+      {!recover}: a restart resumes at the recovered round with the persisted
+      header loaded, and the first proposal for that round re-emits it verbatim
+      rather than building a divergent one. *)
 
 open Tn_types
 open Tn_vertex
@@ -108,6 +110,27 @@ val step : t -> now:Units.Timestamp.t -> input -> t * action list
 (** Advance the machine. The returned state must be used in place of the argument
     — an input can change state (recording a digest, a parent, a fired timer)
     even when it emits no action. *)
+
+val recover :
+  config:config ->
+  committee:Committee.t ->
+  authority:Authority_id.t ->
+  genesis:Certificate.t list ->
+  now:Units.Timestamp.t ->
+  recovered_round:Round.t ->
+  last_proposed:Header.t option ->
+  t * action list
+(** Restart the proposer from persistence — Rust's cold [Proposer::new] combined
+    with the recovered primary round and the [LastProposed] slot. [recovered_round]
+    is the last committed leader round (the proposer resumes proposing
+    [recovered_round + 1]); [last_proposed] is the persisted header. A node that
+    never committed or proposed (genesis round, no stored header) recovers exactly
+    as {!create}. Otherwise no action is returned: parent aggregators are volatile,
+    so the (re-)proposal waits for a fresh parent quorum, at which point {!step}
+    re-emits the stored header when it matches the round or builds a fresh one. *)
+
+val last_proposed : t -> Header.t option
+(** The most recently proposed header, the [LastProposed] slot to persist. *)
 
 val round : t -> Round.t
 (** The round of the most recently proposed header (0 before the first

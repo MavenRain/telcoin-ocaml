@@ -77,36 +77,51 @@ let check_parents t certificate =
     |> List.find_opt (fun digest -> not (present digest))
     |> Option.fold ~none:(Ok ()) ~some:(fun missing -> Error (Missing_parent missing))
 
-let try_insert t certificate =
+(* The shared insertion body, past the GC drop and (for the live path) the parent
+   check: enforce the one-certificate-per-(round, author) rule, store into both
+   indexes, and report whether the certificate is newly relevant. Assumes the
+   round is strictly above the GC round. *)
+let insert_stored t certificate =
   let round = Certificate.round certificate in
   let origin = Certificate.origin certificate in
+  let table =
+    Round.Map.find_opt round t.certs |> Option.value ~default:Authority_id.Map.empty
+  in
+  match Authority_id.Map.find_opt origin table with
+  | Some existing when not (Certificate.equal existing certificate) ->
+      (* Keep the first certificate stored and reject the equivocating one.
+         Rust overwrites the slot with the new certificate and then returns the
+         error, leaving the equivocator in the dag; keeping the original is the
+         safer choice and the caller stops on the error either way. *)
+      Error (Equivocation (round, origin))
+  | _ ->
+      let table = Authority_id.Map.add origin certificate table in
+      let certs = Round.Map.add round table t.certs in
+      let by_digest =
+        Digest_map.add (Certificate.digest certificate) certificate t.by_digest
+      in
+      (* Newly relevant iff strictly beyond this author's last committed round;
+         the certificate is stored regardless, so parents of later rounds can
+         still be verified against it. *)
+      let last = last_committed_round t origin in
+      Ok ({ t with certs; by_digest }, Round.compare round last > 0)
+
+let try_insert t certificate =
   (* Below the GC horizon the certificate can never be part of a future commit,
      so it is dropped without error. *)
-  if Round.compare round t.gc_round <= 0 then Ok (t, false)
+  if Round.compare (Certificate.round certificate) t.gc_round <= 0 then Ok (t, false)
   else
     let* () = check_parents t certificate in
-    let table =
-      Round.Map.find_opt round t.certs
-      |> Option.value ~default:Authority_id.Map.empty
-    in
-    match Authority_id.Map.find_opt origin table with
-    | Some existing when not (Certificate.equal existing certificate) ->
-        (* Keep the first certificate stored and reject the equivocating one.
-           Rust overwrites the slot with the new certificate and then returns the
-           error, leaving the equivocator in the dag; keeping the original is the
-           safer choice and the caller stops on the error either way. *)
-        Error (Equivocation (round, origin))
-    | _ ->
-        let table = Authority_id.Map.add origin certificate table in
-        let certs = Round.Map.add round table t.certs in
-        let by_digest =
-          Digest_map.add (Certificate.digest certificate) certificate t.by_digest
-        in
-        (* Newly relevant iff strictly beyond this author's last committed round;
-           the certificate is stored regardless, so parents of later rounds can
-           still be verified against it. *)
-        let last = last_committed_round t origin in
-        Ok ({ t with certs; by_digest }, Round.compare round last > 0)
+    insert_stored t certificate
+
+(* The parent-check-disabled insert: Rust's [try_insert_in_dag(.., false)], used
+   only to rebuild the DAG from a persisted certificate slice, where the earliest
+   retained rounds legitimately lack their (garbage-collected) parents. The GC
+   drop and the equivocation guard still apply; only the parent-existence check is
+   skipped. *)
+let insert_recovered t certificate =
+  if Round.compare (Certificate.round certificate) t.gc_round <= 0 then Ok (t, false)
+  else insert_stored t certificate
 
 let update t certificate =
   let origin = Certificate.origin certificate in
@@ -139,3 +154,33 @@ let rounds t = List.map fst (Round.Map.bindings t.certs)
 let committed_round t = t.committed_round
 let gc_round t = t.gc_round
 let gc_depth t = t.gc_depth
+
+let all_certificates t =
+  Round.Map.bindings t.certs
+  |> List.concat_map (fun (_round, table) -> List.map snd (Authority_id.Map.bindings table))
+
+(* Rebuild a DAG from a persisted slice — the certificate-store half of Rust's
+   [ConsensusState::new_from_store]. The committed and GC rounds are anchored on
+   the recovered last-committed round ([gc_round = committed - gc_depth],
+   saturating), the per-author watermark map is seeded from the recovered values,
+   and every certificate is folded in through {!insert_recovered} (no parent
+   check). Certificates at or below the GC round are dropped; a genuine
+   equivocation (two different certificates for one slot) stops the rebuild with
+   {!Equivocation}, where Rust panics. *)
+let recover ~gc_depth ~last_committed_round ~last_committed ~certificates =
+  let gc_round = Round.sub_saturating last_committed_round gc_depth in
+  let base =
+    {
+      gc_depth;
+      committed_round = last_committed_round;
+      gc_round;
+      last_committed;
+      certs = Round.Map.empty;
+      by_digest = Digest_map.empty;
+    }
+  in
+  List.fold_left
+    (fun acc certificate ->
+      let* t = acc in
+      Result.map fst (insert_recovered t certificate))
+    (Ok base) certificates

@@ -73,6 +73,7 @@ type t = {
 
 let round t = t.round
 let pending_digests t = t.digests
+let last_proposed t = t.last_proposed
 
 let proposed_rounds t =
   Round.Map.fold (fun r _ acc -> r :: acc) t.proposed_headers [] |> List.rev
@@ -230,3 +231,34 @@ let create ~config ~committee ~authority ~genesis ~now =
     }
   in
   try_propose t ~now
+
+(* Restart the proposer from persistence. A node that never committed and never
+   proposed ([recovered_round] genesis, no stored header) is a cold start, so it
+   is exactly {!create}. Otherwise the machine resumes at the recovered round with
+   the persisted header loaded: parent aggregators are volatile and start empty,
+   so no proposal fires until a fresh parent quorum for [recovered_round + 1]
+   arrives — at which point {!step} re-emits the stored header verbatim when it is
+   the header for that round (Rust's re-propose equivocation guard) or builds a
+   fresh one otherwise. Proposed-header tracking and the digest queue are volatile
+   and start empty, matching Rust's cold [Proposer::new] plus the recovered round
+   watch. *)
+let recover ~config ~committee ~authority ~genesis ~now ~recovered_round ~last_proposed =
+  if Round.equal recovered_round Round.genesis && Option.is_none last_proposed then
+    create ~config ~committee ~authority ~genesis ~now
+  else
+    let t =
+      {
+        config;
+        committee;
+        authority;
+        round = recovered_round;
+        gen = 0;
+        last_parents = [];
+        digests = [];
+        proposed_headers = Round.Map.empty;
+        last_proposed;
+        min_timed_out = true;
+        max_timed_out = true;
+      }
+    in
+    (t, [])

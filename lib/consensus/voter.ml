@@ -1,13 +1,15 @@
 open Tn_types
 open Tn_vertex
 
-(* The persistent vote-once entry: the latest header this node signed for an
-   author, keyed by author. Rust's VoteDigestStore keeps only the latest vote per
-   author, so the dedup key is the author, not (author, round). *)
-type record = {
+(* The persistent vote-once entry: the round and header digest of the latest
+   header this node signed for an author, keyed by author. Rust's VoteDigestStore
+   (VoteInfo) keeps only the latest vote per author, so the dedup key is the
+   author, not (author, round). The vote itself is not stored: a Recast re-signs
+   the incoming header deterministically, exactly as Rust re-signs on its resend
+   path, so the record carries only what the vote-once decision reads. *)
+type persisted = {
   round : Round.t;
   header_digest : Digests.Header_digest.t;
-  vote : Vote.t;
 }
 
 type t = {
@@ -15,11 +17,21 @@ type t = {
   secret_key : Tn_crypto.Secret_key.t;
   self_id : Authority_id.t;
   genesis : Certificate.t list;
-  last_votes : record Authority_id.Map.t;
+  last_votes : persisted Authority_id.Map.t;
 }
 
 let create ~committee ~secret_key ~self_id ~genesis =
   { committee; secret_key; self_id; genesis; last_votes = Authority_id.Map.empty }
+
+let snapshot t = Authority_id.Map.bindings t.last_votes
+
+let recover ~committee ~secret_key ~self_id ~genesis ~votes =
+  let last_votes =
+    List.fold_left
+      (fun m (author, record) -> Authority_id.Map.add author record m)
+      Authority_id.Map.empty votes
+  in
+  { committee; secret_key; self_id; genesis; last_votes }
 
 let has_voted t author round =
   Option.fold (Authority_id.Map.find_opt author t.last_votes) ~none:false
@@ -73,7 +85,11 @@ let check_vote_once t dag header header_digest =
       if cmp < 0 then Error (Reject Already_voted_higher)
       else if cmp > 0 then Ok ()
       else if Digests.Header_digest.equal header_digest r.header_digest then
-        Error (Recast r.vote)
+        (* The identical request seen before: re-sign the very same header. Vote
+           signing is deterministic in the secret key and header, so the recast
+           vote equals the one first sent — Rust's resend path re-signs likewise
+           rather than replaying a stored vote. *)
+        Error (Recast (Vote.sign t.secret_key ~voter:t.self_id header))
       else if
         Option.is_some (Dag.get dag (Header.round header) (Header.author header))
       then Error (Reject Equivocating_header)
@@ -140,9 +156,7 @@ let vote t ~dag ~now header =
     ~error:(fun decision -> (t, decision))
     ~ok:(fun () ->
       let v = Vote.sign t.secret_key ~voter:t.self_id header in
-      let record =
-        { round = Header.round header; header_digest; vote = v }
-      in
+      let record = { round = Header.round header; header_digest } in
       let last_votes =
         Authority_id.Map.add (Header.author header) record t.last_votes
       in

@@ -74,6 +74,24 @@ val create :
     clamped to 1 — a zero window is meaningless and Rust never runs one.
     [gc_depth] is the DAG retention window (Rust default 50). *)
 
+val of_store :
+  committee:Committee.t ->
+  schedule:Leader_schedule.t ->
+  sub_dags_per_schedule:int ->
+  gc_depth:int ->
+  certificates:Certificate.t list ->
+  committed:Committed_log.t ->
+  (t, Dag.error) result
+(** Reconstruct the commit state at restart — the port of Rust's
+    [ConsensusState::new_from_store]. The DAG is rebuilt from [certificates] (the
+    persisted certificate store; {!Dag.recover} folds them parent-check-disabled
+    and drops any below the recovered GC round), and the committed watermark,
+    committed round, and last committed sub-DAG are derived from [committed] (the
+    persisted commit log). [schedule] is the separately recovered leader schedule
+    ({!Leader_schedule.from_store}), which must be built before this call, exactly
+    as Rust installs the swap table before spawning consensus. Fails with a
+    {!Dag.error} if the certificate slice equivocates (Rust panics there). *)
+
 val process_certificate :
   t -> Certificate.t -> (t * outcome, Dag.error) result
 (** Insert, then elect and commit as far as the DAG allows. Several sub-DAGs can

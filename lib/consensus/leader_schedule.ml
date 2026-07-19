@@ -124,6 +124,22 @@ let note_final_scores t ~activation scores =
   if not (Reputation_scores.is_final scores) then None
   else Some { t with table = build_table t.committee t.threshold scores }
 
+(* Rebuild the schedule at startup — the port of [LeaderSchedule::from_store].
+   The swap table in force at the crash was the one built from the last committed
+   sub-DAG whose scores were final, so recovery finds that sub-DAG in the log and
+   replays exactly the [note_final_scores] the commit rule ran then. No final-scores
+   commit (a fresh epoch) recovers to the round-robin [No_swaps] schedule. The
+   [note_final_scores] [None] branch cannot fire here — the scan already filtered on
+   [is_final] — but is folded away to keep [from_store] total. *)
+let from_store committee ~threshold log =
+  let base = create committee ~threshold in
+  Committed_log.latest_final_scores log
+  |> Option.fold ~none:base ~some:(fun sub_dag ->
+         Leader_round.of_round (Sub_dag.leader_round sub_dag)
+         |> Option.fold ~none:base ~some:(fun activation ->
+                note_final_scores base ~activation (Sub_dag.scores sub_dag)
+                |> Option.value ~default:base))
+
 let good_nodes t =
   match t.table with No_swaps -> [] | Swaps { good; _ } -> Nonempty.to_list good
 

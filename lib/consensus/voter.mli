@@ -42,6 +42,29 @@ val create :
     certificates a round-1 header legitimately parents; they resolve those
     parents even though genesis certificates are never stored in the DAG. *)
 
+type persisted = {
+  round : Round.t;
+  header_digest : Digests.Header_digest.t;
+}
+(** The vote-once record persisted per header author — Rust's [VoteInfo], the
+    round and header digest of the latest header this node signed for that author.
+    The vote itself is not stored; a {!Recast} re-signs deterministically. *)
+
+val snapshot : t -> (Authority_id.t * persisted) list
+(** The per-author vote-once records for persistence — the Votes table contents,
+    one row per header author. *)
+
+val recover :
+  committee:Committee.t ->
+  secret_key:Tn_crypto.Secret_key.t ->
+  self_id:Authority_id.t ->
+  genesis:Certificate.t list ->
+  votes:(Authority_id.t * persisted) list ->
+  t
+(** A voter with its vote-once records restored from persistence, so the
+    vote-once invariant holds across a restart. Equivalent to {!create} folded
+    with each [(author, record)]. *)
+
 type reject_reason =
   | Header_invalid of Header.error
       (** Failed {!Tn_vertex.Header.validate}: wrong epoch, unknown author, or
@@ -74,8 +97,9 @@ type decision =
       (** A fresh vote; the returned state has recorded it for the vote-once
           guard. *)
   | Recast of Vote.t
-      (** The identical request seen before; the stored vote is replayed and no
-          state changes. *)
+      (** The identical request seen before; the header is re-signed (signing is
+          deterministic, so the vote equals the one first sent) and no state
+          changes. *)
   | Need_parents of Digests.Header_digest.t list
       (** Named parents this node cannot yet resolve; a protocol-normal response,
           not an error. The peer re-requests with the certificates attached. *)
