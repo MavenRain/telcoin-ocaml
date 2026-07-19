@@ -64,6 +64,7 @@ tn_std ──► tn_codec ──► tn_crypto (virtual) ──► tn_types ─�
 | `tn_vertex` | `Intent`, `Header`, `Vote`, `Certificate` | ✅ done + tested |
 | `tn_consensus` | DAG, Bullshark commit rule, proposer/voter/node machines | ✅ done + tested (parts 1–3) |
 | `tn_execution` | execution seam: the `Noop` engine folds committed sub-DAGs into the consensus chain (later an OCaml EVM) | ✅ done + tested |
+| `tn_state` | EVM execution-state foundation: `U256`, `Account`, `World_state`, and the value-transfer state transition | ✅ done + tested |
 | `tn_sim` + `bin/tn_sim` | discrete-event simulator + runnable slice | ✅ done + tested |
 
 See [`PORTING.md`](./PORTING.md) for the full Rust→OCaml module map.
@@ -79,7 +80,7 @@ dune build      # builds all libraries
 dune test       # runs all test suites
 ```
 
-Current suite: **107 test cases green** (as `dune test` reports) plus 24 BCS
+Current suite: **123 test cases green** (as `dune test` reports) plus 24 BCS
 golden-vector conformance checks (a standalone runner) — 12 foundation cases
 (crypto, scalars, committee threshold table), 9 vertex/certificate cases (the
 full assembly rejection matrix), 36 consensus cases (vote and parent aggregators, the
@@ -99,7 +100,12 @@ timing; committed output is invariant to `gc_depth`; crash faults up to `f`
 preserve safety and liveness while `f+1` still preserves safety; and message loss
 never breaks safety), 12 recovery cases (the storage/recovery seam), and 7
 execution cases (the `Noop` engine folds committed sub-DAGs into a hash-linked
-consensus chain, one block per commit, and honest nodes derive the same chain).
+consensus chain, one block per commit, and honest nodes derive the same chain),
+and 16 execution-state cases (the `U256` byte layout, carry/borrow across byte
+boundaries, wrapping versus checked overflow/underflow and unsigned ordering; the
+EIP-161 canonical world state; and the value-transfer state transition — exact
+nonce and balance checks, the exact-spend boundary, atomic revert, and a
+self-transfer that nets zero while advancing the nonce).
 
 The committee threshold tests pin the exact Narwhal table against the Rust node:
 size 4 → quorum 3 / validity 2; 7 → 5 / 3; 10 → 7 / 4.
@@ -109,10 +115,11 @@ size 4 → quorum 3 / validity 2; 7 → 5 / 3; 10 → 7 / 4.
 A simulated committee reaching consensus and emitting ordered output, runnable
 as `dune exec bin/tn_sim.exe -- --validators 4 --seed 7 --until-s 60` (all flags
 optional; defaults are a 4-validator, seed-42, 20 s honest run). The latency band
-lives on `Sim.config`. **Milestone 1 is complete** (steps 1–13), and three
+lives on `Sim.config`. **Milestone 1 is complete** (steps 1–13), and four
 post-slice chunks have since landed (14 recovery/storage, 15 timing, 16 execution
-seam). This plan was produced and adversarially reviewed by a multi-agent
-architecture pass; the HIGH-severity traps it surfaced are noted.
+seam, 17 execution-state foundation). This plan was produced and adversarially
+reviewed by a multi-agent architecture pass; the HIGH-severity traps it surfaced
+are noted.
 
 1. ✅ Scaffold, licenses, layout, this README + PORTING.md
 2. ✅ `tn_std` — Nonempty, Prng
@@ -166,11 +173,22 @@ architecture pass; the HIGH-severity traps it surfaced are noted.
     block. It **cannot fail** — its error type is the uninhabited `Nothing.t` —
     which is the seam a real OCaml EVM slots into later. The simulator derives
     each node's chain on demand, and the demo prints its height and tip
+17. ✅ execution-state foundation (`tn_state`) — the EVM state model the future
+    interpreter stands on: `U256` (the 256-bit word, canonical 32-byte big-endian,
+    unsigned, wrapping and checked add/sub), `Nonce`, `Account` (nonce + balance,
+    EIP-161 emptiness), `World_state` (an address-keyed map kept canonical so
+    equality is exact — the state-level execution-agreement corollary), and
+    `Transfer`: a value-transfer transaction plus its pure state transition with a
+    genuine `error` (nonce mismatch, insufficient balance, credit overflow), the
+    first engine behind the seam to carry a real failure in place of `Noop`'s
+    uninhabited one. Pure and not yet wired into the running slice (it awaits batch
+    payloads, which are networking-deferred)
 
 **Still planned:** real crypto spike + golden vectors from a Rust harness; the
 pending-certificate fetcher (buffer-and-fetch on a missing parent — needs the
-network layer); the OCaml EVM behind the `tn_execution` seam; the Eio shell;
-codec/crypto byte-compat alignment.
+network layer); the OCaml EVM interpreter on top of `tn_state` (gas metering,
+storage, contract code, the opcode set) behind the `tn_execution` seam, fed by
+batch payloads; the Eio shell; codec/crypto byte-compat alignment.
 
 ## OCaml ecosystem for the full-node goal
 
