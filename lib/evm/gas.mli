@@ -304,6 +304,58 @@ val call_gas : requested:word -> remaining:t -> value:word -> call_gas
     [remaining()] past those deductions ([call_helpers.rs:83]). Passing the
     pre-charge allowance misprices the boundary of the 63/64 rule. *)
 
+val create_gas : t -> call_gas
+(** What a creation charges its caller and forwards to its frame
+    ([revm-interpreter] [contract.rs:79-91]). A creation takes no requested-gas
+    operand and gets no stipend, so both fields are the plain EIP-150 ceiling
+    {!forwardable_gas}: everything the ceiling allows is charged, and all of it
+    is forwarded.
+
+    [t] is the allowance {e after} the base and the EIP-3860 meter, since revm
+    reads what remains at that point. Passing the pre-charge allowance forwards
+    too much. *)
+
+val initcode_cost : int -> int
+(** EIP-3860's meter on init code: 2 per 32-byte word ([calc.rs] [initcode_cost],
+    the rate at [constants.rs:101]). Both creations pay it, on the length they
+    are asked to read, {e before} their base and before the memory holding that
+    init code is expanded. Zero at length zero. *)
+
+val create_cost : salted:bool -> int -> int
+(** What a creation charges once its init code has been read: 32000
+    ([constants.rs:29]), and for [CREATE2] a further 6 per word of init code for
+    the hash its address is derived from ([calc.rs] [create2_cost]). The word
+    rate is {!keccak_word_cost}'s because it is the same Keccak-256.
+
+    [salted] is [CREATE2]. It is a labelled [bool] rather than two functions
+    because the two prices differ by one addend and share the base: keeping them
+    in one place is what stops the 32000 drifting between them. *)
+
+val code_deposit_cost : int -> int
+(** 200 per byte of the code a creation deploys ([constants.rs:53]), charged out
+    of the creation frame's own leftover when its init code returns. EIP-2 point
+    3: a frame that cannot pay this fails the creation rather than deploying a
+    truncated contract ([revm-handler] [frame.rs:296-306]). *)
+
+val selfdestruct_base : int
+(** [SELFDESTRUCT]'s static 5000 ([calc.rs] [static_selfdestruct_cost] from
+    Tangerine on), charged before the beneficiary is looked up. *)
+
+val selfdestruct_dynamic :
+  Access.warmth -> had_value:bool -> beneficiary_exists:bool -> int
+(** The rest of [SELFDESTRUCT]'s price ([calc.rs] [dyn_selfdestruct_cost]),
+    charged after the beneficiary has been loaded and therefore after its
+    {!Access.warmth} exists:
+
+    - 25000 when [had_value] and not [beneficiary_exists]. EIP-161 put the value
+      in the predicate, so destroying into a fresh address costs nothing extra
+      when there is no balance to send.
+    - the {e full} 2600 on a cold beneficiary, not the 2500
+      {!account_access_cost} charges. That function's 2500 is the surcharge left
+      after a warm 100 already taken in the opcode table, and [SELFDESTRUCT]'s
+      table entry is zero — so routing this through it would undercharge a cold
+      beneficiary by exactly 100. *)
+
 val give_back : int -> t -> t
 (** Credit unused sub-frame gas back to the caller — revm's [Gas::erase_cost]
     ([revm-handler] [frame.rs:479-481]). Total: the caller's remaining plus the

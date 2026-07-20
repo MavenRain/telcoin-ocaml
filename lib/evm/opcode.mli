@@ -119,6 +119,10 @@ type t =
           an account that is empty (EIP-161) or absent. A codeless account that
           nonetheless exists hashes to [KECCAK_EMPTY], not zero. *)
   | Gasprice
+  | Blockhash
+      (** [0x40]. The hash of one of the 256 blocks before this one, and zero for
+          any other request — including this block's own number, which a block
+          cannot know the hash of while it is being built. *)
   | Coinbase
   | Timestamp
   | Number
@@ -168,6 +172,20 @@ type t =
   | Staticcall
       (** [0xfa]. EIP-214: like [CALL] with no value and a frame that may not
           change state — every [SSTORE], [TSTORE] and [LOG] beneath it halts. *)
+  | Create
+      (** [0xf0]. Deploy a contract: run init code in a fresh sub-frame and
+          install whatever it returns as the code of a new account, at an address
+          derived from the creator's nonce. Pushes that address, or zero if the
+          creation failed. *)
+  | Create2
+      (** [0xf5]. EIP-1014: [CREATE] with the address derived from a
+          caller-chosen salt and the init code's hash instead of the nonce, so it
+          can be computed before the account exists. *)
+  | Selfdestruct
+      (** [0xff]. Halt the frame and send the account's whole balance to a
+          beneficiary. EIP-6780 confined the deletion itself to accounts created
+          in the same transaction; for every other account this is now a balance
+          transfer that leaves the code and storage in place. *)
 
 val decode : int -> t option
 (** The instruction a code byte names, [None] for a byte that is unassigned or

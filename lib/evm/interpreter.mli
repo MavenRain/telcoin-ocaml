@@ -230,6 +230,19 @@ type error =
           apart says which rule refused the frame. As with every {!error} the
           distinction is diagnostic — both discard the frame and consume its
           gas. *)
+  | Initcode_too_large
+      (** [CREATE] or [CREATE2] asked to read more init code than EIP-3860
+          allows: revm's [CreateInitCodeSizeLimit] ([contract.rs:44-48]). The
+          test is on the requested {e length}, before the meter is charged and
+          before any of that memory is reached, so an over-long request never
+          pays for the expansion it named. *)
+  | Balance_overflow
+      (** A balance would have passed [2^256] — the overflow {!Effects.transfer}
+          and {!Effects.commit_destruction} report, reached here only by a
+          [SELFDESTRUCT] whose beneficiary is already holding almost the whole
+          256-bit range. No real total supply reaches it. It is a halt rather
+          than a forced wrap because the alternative would create or destroy
+          ether, and this port refuses to resolve value conservation by fiat. *)
 
 val error_to_string : error -> string
 

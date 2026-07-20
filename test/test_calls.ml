@@ -206,7 +206,7 @@ let env_of ~mutability =
     ~block:
       (Env.Block.make ~coinbase:(address_of 0xc0) ~timestamp:(u 1_600_000_000)
          ~number:(u 15_500_000) ~prevrandao:U256.zero ~gas_limit:(u 25_000_000)
-         ~basefee:(u 7) ~chain_id:(u 2017))
+         ~basefee:(u 7) ~chain_id:(u 2017) ~hashes:Tn_evm.Block_hashes.empty)
     ~tx:(Env.Tx.make ~origin:(address_of 0x09) ~gas_price:(u 9) ~access_list:[])
     ~call:(base_call ~mutability)
 

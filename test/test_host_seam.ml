@@ -167,7 +167,7 @@ let call_value = u 1_000_000_000_000_000_000
 
 let base_block =
   Env.Block.make ~coinbase ~timestamp ~number:block_number ~prevrandao ~gas_limit
-    ~basefee ~chain_id
+    ~basefee ~chain_id ~hashes:Tn_evm.Block_hashes.empty
 
 let base_tx = Env.Tx.make ~origin ~gas_price ~access_list:[]
 

@@ -4,6 +4,7 @@ type t = int
 
 let zero = 0
 let succ n = if n = max_int then n else n + 1
+let succ_checked n = if n = max_int then None else Some (n + 1)
 let of_int n = if n >= 0 then Some n else None
 let to_int n = n
 let equal = Int.equal

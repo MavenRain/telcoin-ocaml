@@ -13,6 +13,8 @@ type error =
   | Static_state_change
   | Out_of_offset
   | Call_not_allowed_inside_static
+  | Initcode_too_large
+  | Balance_overflow
 
 let error_to_string = function
   | Out_of_gas -> "out of gas"
@@ -25,6 +27,8 @@ let error_to_string = function
   | Static_state_change -> "state change in a static frame"
   | Out_of_offset -> "return-data read past the end of the buffer"
   | Call_not_allowed_inside_static -> "value-bearing call from a static frame"
+  | Initcode_too_large -> "init code longer than the EIP-3860 limit"
+  | Balance_overflow -> "balance overflow past 2^256"
 
 type outcome =
   | Stopped of { gas_left : Gas.t; effects : Effects.t }
@@ -757,6 +761,62 @@ let returndatacopy m =
    reach the input window then the output window. A zero-length window touches no
    memory and leaves its offset unconverted, so an enormous offset with a zero
    length is not an error. *)
+(* [BLOCKHASH] ([instructions/host.rs:186-216]). Its whole price is the table's
+   20, which the dispatch loop has already taken — revm's body carries a
+   commented-out [gas!] at [host.rs:189] for exactly that reason. Every request
+   outside the window reads zero, and {!Block_hashes.lookup} is where the four
+   ways of being outside it are one rule. *)
+let blockhash env m =
+  unary
+    (fun requested ->
+      Block_hashes.lookup
+        (Env.Block.hashes (Env.block env))
+        ~current:(Env.Block.number (Env.block env))
+        ~requested)
+    m
+
+(* [SELFDESTRUCT] ([instructions/host.rs:387-426]) in revm's order, which is
+   observable at three points:
+
+   1. the EIP-214 ban comes first, before the pop, so a static frame halts on the
+      ban and not on an empty stack;
+   2. the static 5000 is charged before the beneficiary is looked up, so a frame
+      that cannot afford even that never warms it;
+   3. the two surcharges are charged after that lookup, because both are
+      functions of what it found — and the plan is applied only once they are
+      paid, which is {!Effects.plan_destruction} and {!Effects.commit_destruction}
+      being two functions.
+
+   It halts like [STOP]: revm's [InstructionResult::SelfDestruct] is in the
+   success class, so the frame's effects survive and its remaining gas goes back
+   to the caller. There is no refund — EIP-3529 removed it, and [host.rs:414-421]
+   records one only below London. *)
+let selfdestruct env m =
+  Result.fold ~ok:Fun.id
+    ~error:(fun e -> Halt (Failed e))
+    (let ( let* ) = Result.bind in
+     let* permit = permitted env in
+     let* beneficiary_word, stack = stack_result (Stack.pop m.stack) in
+     let m = { m with stack } in
+     let* gas = charged Gas.selfdestruct_base m.gas in
+     let plan =
+       Effects.plan_destruction m.effects ~address:(executing env)
+         ~beneficiary:(Address_word.of_word beneficiary_word)
+     in
+     let planned = Effects.loaded plan in
+     let* gas =
+       charged
+         (Gas.selfdestruct_dynamic (Effects.warmth plan)
+            ~had_value:(Destruction.had_value planned)
+            ~beneficiary_exists:(Destruction.beneficiary_exists planned))
+         gas
+     in
+     Ok
+       (Option.fold
+          ~none:(Halt (Failed Balance_overflow))
+          ~some:(fun effects -> Halt (Stopped { gas_left = gas; effects }))
+          (Effects.commit_destruction plan permit)))
+
 let reach_window m ~offset_word ~length_word =
   let ( let* ) = Result.bind in
   let* length = extent_of_word length_word in
@@ -953,6 +1013,14 @@ let rec execute env code depth m = function
   | Opcode.Callcode -> callcode_op env code depth m
   | Opcode.Delegatecall -> delegatecall_op env code depth m
   | Opcode.Staticcall -> staticcall_op env code depth m
+  (* The creations open a sub-frame at code they were handed rather than at code
+     an account already holds, and deploy what it returns. *)
+  | Opcode.Create -> create_op env code depth m ~salted:false
+  | Opcode.Create2 -> create_op env code depth m ~salted:true
+  (* Neither of these opens a frame: [SELFDESTRUCT] ends one and [BLOCKHASH]
+     reads the chain behind this block. *)
+  | Opcode.Selfdestruct -> selfdestruct env m
+  | Opcode.Blockhash -> blockhash env m
 
 (* One instruction: decode the byte at the program counter, charge the fixed
    price before running it — so an instruction that then fails on its operands
@@ -1148,6 +1216,204 @@ and staticcall_op env code depth m =
        (do_call env code depth { m with stack } ~requested ~to_addr
           ~child_value:W.zero ~transfer_value:W.zero ~is_plain_call:false
           ~sub_target:to_addr ~sub_caller:self_target ~mutability:Mutability.Static))
+
+(* [CREATE] ([contract.rs:22-106]) and [CREATE2] (the same function under
+   [IS_CREATE2]), together with the frame lifecycle revm keeps in its handler
+   ([revm-handler] [frame.rs:262-346] going in, [:535-593] coming out).
+
+   The two differ in three places and nowhere else: [CREATE2] pops a salt, pays
+   6 per word to hash the init code, and derives its address from that hash
+   instead of from the creator's nonce.
+
+   The order below is revm's, and almost every step of it is observable:
+
+   1. the EIP-214 ban, before any pop;
+   2. pop value, offset and length;
+   3. EIP-3860, but only when the length is nonzero: the limit is checked against
+      the length BEFORE the meter is charged and before any memory is touched, so
+      an over-long request halts without paying for the expansion it asked for. A
+      zero length reads no memory and never converts its offset, so an enormous
+      offset with a zero length is not an error — the same rule the copy family
+      and the call windows follow;
+   4. [CREATE2] pops its salt only now, AFTER the memory work, which is why a
+      [CREATE2] with a doomed length halts on the length rather than on a missing
+      salt;
+   5. the 32000 base, plus [CREATE2]'s hash cost;
+   6. the EIP-150 ceiling, charged whole. A creation has no requested-gas operand
+      and gets no stipend, so all of what the ceiling allows goes to the frame.
+
+   Then the frame-entry guards, in revm's order, which is what decides both what
+   the creator keeps and what it is charged:
+
+   7. depth, 8. the creator's balance, 9. the nonce bump. All three refuse by
+      pushing zero and handing the whole forwarded allowance back, because revm
+      classifies [CallTooDeep] and [OutOfFunds] as {e reverts} and a nonce
+      overflow as an ordinary [Return] with no address ([frame.rs:275-292]);
+   10. derive the address from the nonce the creator had BEFORE step 9;
+   11. warm it, then test it for a collision. A collision burns the whole
+       forwarded allowance instead of returning it, because [CreateCollision] is
+       an {e error} ([revm-handler] [frame.rs:316] and the merge at [:514]), and
+       this is the one refusal that costs the caller everything;
+   12. create the account and move the endowment.
+
+   Two things a failed creation leaves behind, and they are not an oversight:
+   the creator's bumped nonce and the warmth of the created address. revm makes
+   both before the checkpoint that a failure reverts to ([frame.rs:290,306] are
+   above [inner.rs:399]), so neither is undone by any outcome. Here that falls
+   out of which value is threaded on: every refusal from step 11 onward carries
+   [warmed], the effects after the bump and the warming, and never [base]. *)
+and create_op env code depth m ~salted =
+  Result.fold ~ok:Fun.id
+    ~error:(fun e -> Halt (Failed e))
+    (let ( let* ) = Result.bind in
+     let* permit = permitted env in
+     let* value, stack = stack_result (Stack.pop m.stack) in
+     let* offset_word, length_word, stack = stack_result (Stack.pop2 stack) in
+     let m = { m with stack } in
+     let* length = extent_of_word length_word in
+     let* m, init_code =
+       if length = 0 then Ok (m, "")
+       else if length > Tn_state.Bytecode.max_initcode_size then Error Initcode_too_large
+       else
+         let* gas = charged (Gas.initcode_cost length) m.gas in
+         let* offset = extent_of_word offset_word in
+         let* memory, gas = reach { m with gas } ~offset ~length in
+         Ok ({ m with memory; gas }, Memory.slice memory ~offset ~length)
+     in
+     let* salt, m =
+       if salted then
+         Result.map
+           (fun (salt, stack) -> (salt, { m with stack }))
+           (stack_result (Stack.pop m.stack))
+       else Ok (W.zero, m)
+     in
+     let* gas = charged (Gas.create_cost ~salted length) m.gas in
+     let cg = Gas.create_gas gas in
+     let* gas = charged cg.Gas.charge gas in
+     let forwarded = cg.Gas.forwarded in
+     let base = { m with gas } in
+     let creator = executing env in
+     (* The creator is read whole and warmed, one lookup for the two fields the
+        creation needs: the balance for step 8, the nonce for step 10. *)
+     let creator_account, effects = Effects.self_account base.effects creator in
+     let base = { base with effects } in
+     (* Refusing with the allowance handed back, and refusing with it burned. The
+        difference between them is the whole of revm's revert-versus-error
+        classification for a creation that never ran. *)
+     let refund_all effects =
+       push_zero { base with effects }
+         ~gas:(Gas.give_back (Gas.remaining forwarded) base.gas)
+     in
+     let burn effects = push_zero { base with effects } ~gas:base.gas in
+     if not (Call_depth.within_limit (Call_depth.succ depth)) then Ok (refund_all base.effects)
+     else if W.compare (Account.balance creator_account) value < 0 then
+       Ok (refund_all base.effects)
+     else
+       Ok
+         (Option.fold ~none:(refund_all base.effects)
+            ~some:(fun bumped ->
+              let created =
+                Contract_address.derive ~creator
+                  (if salted then Contract_address.From_salt { salt; init_code }
+                   else Contract_address.From_nonce (Account.nonce creator_account))
+              in
+              let load = Effects.ext_account bumped created in
+              let warmed = Effects.warmed load in
+              if Account.is_occupied (Effects.loaded load) then burn warmed
+              else
+                (* A [None] here can only be the recipient overflow: the sender
+                   underflow was ruled out at step 8. revm classifies that
+                   overflow as an error, so it burns rather than refunds. *)
+                Option.fold ~none:(burn warmed)
+                  ~some:(fun child_effects ->
+                    merge_creation base ~created ~permit ~warmed
+                      ~outcome:
+                        (run_subframe
+                           ~env:
+                             (Env.with_call env
+                                (Env.Call.make ~target:created ~caller:creator ~value
+                                   ~data:Data.empty
+                                   ~mutability:(Env.Call.mutability (Env.call env))))
+                           ~code:(Code.of_string init_code) ~gas:forwarded
+                           ~effects:child_effects ~depth:(Call_depth.succ depth)))
+                  (Effects.begin_creation warmed permit ~creator ~created ~value))
+            (Effects.bump_nonce base.effects creator)))
+
+(* Merging a finished creation frame into its caller ([revm-handler]
+   [frame.rs:493-527]). It differs from {!merge_call} on every axis, which is why
+   it is a separate function rather than a flag on that one:
+
+   - what is pushed is the created address, not a one;
+   - nothing is copied into an output window, because a creation has none;
+   - the return-data buffer stays EMPTY on success. The deployed code is not
+     return data, and [RETURNDATASIZE] after a successful [CREATE] reads zero
+     ([frame.rs:497-505] populates the buffer only for an exact [Revert]);
+   - a revert hands its leftover gas back AND leaves its output in the buffer,
+     which is the only way a creation ever fills it. *)
+and merge_creation base ~created ~permit ~warmed ~outcome =
+  match outcome with
+  | Stopped { gas_left; effects } ->
+      deposit_code base ~created ~permit ~warmed ~output:"" ~gas_left ~effects
+  | Returned { output; gas_left; effects } ->
+      deposit_code base ~created ~permit ~warmed ~output ~gas_left ~effects
+  | Reverted { output; gas_left } ->
+      transition
+        (Result.map
+           (fun stack ->
+             {
+               base with
+               pc = base.pc + 1;
+               stack;
+               effects = warmed;
+               gas = Gas.give_back (Gas.remaining gas_left) base.gas;
+               return_data = Return_data.of_string output;
+             })
+           (stack_result (Stack.push W.zero base.stack)))
+  | Failed _ -> push_zero { base with effects = warmed } ~gas:base.gas
+
+(* The end of a successful creation frame ([revm-handler] [frame.rs:535-593]):
+   what the init code returned becomes the account's code, if it may and if the
+   frame can pay for it.
+
+   Three ways to fail, and all three are alike in the caller: the state the frame
+   built is dropped, zero is pushed and NOT one unit of the forwarded allowance
+   comes back, because all three are errors rather than reverts.
+
+   1. EIP-3541, output beginning with the reserved [0xEF];
+   2. EIP-170, output past {!Tn_state.Bytecode.max_deployed_size};
+   3. EIP-2 point 3, a frame that cannot pay 200 per byte for its own code. That
+      one is the reason the charge is here and not in the frame: a creation that
+      returns code it cannot afford deploys nothing at all rather than a shorter
+      contract.
+
+   An init code that merely [STOP]s returns no bytes, passes all three, pays
+   nothing, and deploys an account with empty code — which is a successful
+   creation, not a failed one. *)
+and deposit_code base ~created ~permit ~warmed ~output ~gas_left ~effects =
+  Result.fold
+    ~ok:Fun.id
+    ~error:(fun () -> push_zero { base with effects = warmed } ~gas:base.gas)
+    (let ( let* ) = Result.bind in
+     let* () =
+       Result.map_error (fun _ -> ()) (Tn_state.Bytecode.validate_deployment output)
+     in
+     let* paid =
+       Option.to_result ~none:()
+         (Gas.charge (Gas.code_deposit_cost (String.length output)) gas_left)
+     in
+     Ok
+       (transition
+          (Result.map
+             (fun stack ->
+               {
+                 base with
+                 pc = base.pc + 1;
+                 stack;
+                 effects = Effects.deploy_code effects permit created output;
+                 gas = Gas.give_back (Gas.remaining paid) base.gas;
+                 return_data = Return_data.empty;
+               })
+             (stack_result (Stack.push (Address_word.to_word created) base.stack)))))
 
 let run ~env ~code ~gas ~effects =
   run_subframe ~env ~code ~gas ~effects ~depth:Call_depth.zero

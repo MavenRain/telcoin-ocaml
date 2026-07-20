@@ -69,6 +69,7 @@ type t =
   | Extcodecopy
   | Extcodehash
   | Gasprice
+  | Blockhash
   | Coinbase
   | Timestamp
   | Number
@@ -90,6 +91,9 @@ type t =
   | Callcode
   | Delegatecall
   | Staticcall
+  | Create
+  | Create2
+  | Selfdestruct
 
 (* The first byte of each contiguous family, from which the family's operand is
    recovered by subtraction. *)
@@ -174,6 +178,10 @@ let to_byte = function
   | Callcode -> 0xf2
   | Delegatecall -> 0xf4
   | Staticcall -> 0xfa
+  | Create -> 0xf0
+  | Create2 -> 0xf5
+  | Selfdestruct -> 0xff
+  | Blockhash -> 0x40
   | Return -> 0xf3
   | Revert -> 0xfd
   | Invalid -> 0xfe
@@ -262,6 +270,10 @@ let decode byte =
   | 0xf2 -> Some Callcode
   | 0xf4 -> Some Delegatecall
   | 0xfa -> Some Staticcall
+  | 0xf0 -> Some Create
+  | 0xf5 -> Some Create2
+  | 0xff -> Some Selfdestruct
+  | 0x40 -> Some Blockhash
   | 0xf3 -> Some Return
   | 0xfd -> Some Revert
   | 0xfe -> Some Invalid
@@ -286,7 +298,8 @@ let immediate_bytes = function
   | Gasprice | Coinbase | Timestamp | Number
   | Prevrandao | Gaslimit | Chainid | Selfbalance | Basefee | Sload | Sstore
   | Mcopy | Keccak256 | Tload | Tstore | Log _ | Returndatasize | Returndatacopy
-  | Call | Callcode | Delegatecall | Staticcall ->
+  | Call | Callcode | Delegatecall | Staticcall | Create | Create2 | Selfdestruct
+  | Blockhash ->
       0
 
 (* Two instructions are equal exactly when they encode to the same byte — the
@@ -372,3 +385,7 @@ let to_string = function
   | Callcode -> "CALLCODE"
   | Delegatecall -> "DELEGATECALL"
   | Staticcall -> "STATICCALL"
+  | Create -> "CREATE"
+  | Create2 -> "CREATE2"
+  | Selfdestruct -> "SELFDESTRUCT"
+  | Blockhash -> "BLOCKHASH"

@@ -113,6 +113,25 @@ val debit : t -> U256.t -> t option
 val increment_nonce : t -> t
 (** The account after sending one transaction: its nonce advanced by one. *)
 
+val increment_nonce_checked : t -> t option
+(** The same advance, [None] when the nonce is already at its maximum and there
+    is no next one. Contract creation is the caller that needs the difference:
+    revm abandons a creation whose creator cannot be bumped rather than reusing
+    the nonce, and reusing it would derive the same address twice. See
+    {!Nonce.succ_checked}. *)
+
+val is_occupied : t -> bool
+(** Whether an address is already taken, in the sense that decides a [CREATE]
+    collision: it has code, or it has a nonzero nonce ([revm-context]
+    [journal/inner.rs:409]).
+
+    Balance is not part of it. An address that has only received ether is
+    unoccupied and can still be created at, which is what lets a counterfactual
+    [CREATE2] address be funded before its contract is deployed. This is
+    therefore a strictly weaker test than the negation of {!is_empty}, and the
+    two must not be substituted for each other: an account holding only a balance
+    is neither empty nor occupied. *)
+
 val equal : t -> t -> bool
 (** Exact content equality over every field, storage and code included — sound
     because {!Storage.t} and {!Bytecode.t} are each canonical on their own. *)

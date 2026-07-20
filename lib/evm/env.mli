@@ -47,6 +47,7 @@ module Block : sig
     gas_limit:word ->
     basefee:word ->
     chain_id:word ->
+    hashes:Block_hashes.t ->
     t
 
   val coinbase : t -> Units.Address.t
@@ -65,6 +66,14 @@ module Block : sig
   val chain_id : t -> word
   (** [CHAINID]. Held here rather than in a configuration record of its own —
       see this module's header. *)
+
+  val hashes : t -> Block_hashes.t
+  (** What [BLOCKHASH] can see: the hashes of this block's recent ancestors.
+
+      It is a supplied window rather than a lookup because this port has no chain
+      database, which is the same reason the timestamp and the coinbase are
+      fields here. {!Block_hashes} states exactly what a caller owes and what a
+      short window means. *)
 
   val equal : t -> t -> bool
 end

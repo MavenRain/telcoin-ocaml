@@ -76,7 +76,7 @@ let base_env =
     ~block:
       (Env.Block.make ~coinbase:(address_of 0xc0) ~timestamp:(u 1_600_000_000)
          ~number:(u 15_500_000) ~prevrandao:U256.zero ~gas_limit:(u 25_000_000)
-         ~basefee:(u 7) ~chain_id:(u 2017))
+         ~basefee:(u 7) ~chain_id:(u 2017) ~hashes:Tn_evm.Block_hashes.empty)
     ~tx:(Env.Tx.make ~origin:(address_of 0x01) ~gas_price:(u 9) ~access_list:[])
     ~call:
       (Env.Call.make ~target:(address_of 0x02) ~caller:(address_of 0x0c)

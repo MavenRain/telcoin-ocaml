@@ -12,10 +12,12 @@ module Block = struct
     gas_limit : word;
     basefee : word;
     chain_id : word;
+    hashes : Block_hashes.t;
   }
 
-  let make ~coinbase ~timestamp ~number ~prevrandao ~gas_limit ~basefee ~chain_id =
-    { coinbase; timestamp; number; prevrandao; gas_limit; basefee; chain_id }
+  let make ~coinbase ~timestamp ~number ~prevrandao ~gas_limit ~basefee ~chain_id
+      ~hashes =
+    { coinbase; timestamp; number; prevrandao; gas_limit; basefee; chain_id; hashes }
 
   let coinbase t = t.coinbase
   let timestamp t = t.timestamp
@@ -24,6 +26,7 @@ module Block = struct
   let gas_limit t = t.gas_limit
   let basefee t = t.basefee
   let chain_id t = t.chain_id
+  let hashes t = t.hashes
 
   let equal a b =
     Units.Address.equal a.coinbase b.coinbase
@@ -33,6 +36,7 @@ module Block = struct
     && U256.equal a.gas_limit b.gas_limit
     && U256.equal a.basefee b.basefee
     && U256.equal a.chain_id b.chain_id
+    && Block_hashes.equal a.hashes b.hashes
 end
 
 module Tx = struct

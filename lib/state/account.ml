@@ -46,6 +46,19 @@ let debit t amount =
 
 let increment_nonce t = { t with nonce = Nonce.succ t.nonce }
 
+let increment_nonce_checked t =
+  Option.map (fun nonce -> { t with nonce }) (Nonce.succ_checked t.nonce)
+
+(* revm's create-collision predicate ([revm-context] [journal/inner.rs:409]):
+   [code_hash != KECCAK_EMPTY || nonce != 0]. Balance is deliberately absent, and
+   its absence is the rule rather than an omission: an address that has only ever
+   received ether is still free to be created at, which is what makes it possible
+   to fund a counterfactual CREATE2 address before its contract exists. Storage
+   is absent for the same reason — nothing but code and a nonce can occupy an
+   address. *)
+let is_occupied t =
+  (not (Bytecode.is_empty t.code)) || not (Nonce.equal t.nonce Nonce.zero)
+
 let equal a b =
   Nonce.equal a.nonce b.nonce
   && U256.equal a.balance b.balance

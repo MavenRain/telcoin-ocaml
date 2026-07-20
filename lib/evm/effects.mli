@@ -90,6 +90,12 @@ val logs : t -> Log_journal.t
 val transient : t -> Transient.t
 (** The EIP-1153 transient store as it currently stands. *)
 
+val lifecycle : t -> Lifecycle.t
+(** Which accounts this transaction created and which have destroyed themselves.
+    Substate like the rest of this value, so a reverting frame drops both sets —
+    which is exactly what EIP-6780 needs, since a creation that was rolled back
+    must not license a later [SELFDESTRUCT] to delete. *)
+
 val loaded : 'a load -> 'a
 val warmth : 'a load -> Access.warmth
 
@@ -128,6 +134,19 @@ val self_balance : t -> Units.Address.t -> Tn_state.U256.t * t
     unobservable on any real transaction, because EIP-2929 pre-warms the
     executing account before the frame starts; it is observable, and correct,
     from an {!Access.empty} start. *)
+
+val self_account : t -> Units.Address.t -> Tn_state.Account.t * t
+(** The executing account read whole, warmed, and with no {!Access.warmth}
+    handed back — {!self_balance}'s bargain applied to the account rather than to
+    one field of it, and for the same reason: with no witness there is nothing to
+    price, so a surcharge cannot be charged by accident.
+
+    Contract creation is the caller. It needs the balance to check the endowment
+    and the nonce to derive the address, and both must come from one lookup
+    because they are one account access in revm ([revm-handler] [frame.rs:280],
+    [load_account_mut], which prices nothing). Like {!self_balance} the account is
+    nevertheless marked warm, which is unobservable on a real transaction because
+    the executing account is warm before its frame begins. *)
 
 val storage :
   t -> Units.Address.t -> slot:Tn_state.U256.t -> Tn_state.U256.t load
@@ -219,10 +238,70 @@ val transfer :
     because the target account was already warmed when it was loaded, before this
     is reached. *)
 
+val bump_nonce : t -> Units.Address.t -> t option
+(** Advance an account's nonce, [None] when it is already at the maximum.
+
+    Contract creation calls it on the creator {e before} deriving the address,
+    because the address is derived from the nonce the creator had before this
+    creation ([revm-handler] [frame.rs:289-297]). The [None] is that same code's
+    [bump_nonce] returning false: revm abandons the creation, and it has to,
+    since a creator that reused its nonce would derive one address forever. *)
+
+val begin_creation :
+  t ->
+  Mutability.permit ->
+  creator:Units.Address.t ->
+  created:Units.Address.t ->
+  value:Tn_state.U256.t ->
+  t option
+(** Bring [created] into existence and endow it — revm's
+    [create_account_checkpoint] ([revm-context] [journal/inner.rs:391-444]) less
+    the collision test, which the caller makes first with
+    {!Tn_state.Account.is_occupied}. The new account's nonce becomes one
+    (EIP-161), the address is recorded in {!lifecycle} as created by this
+    transaction, and [value] moves from the creator.
+
+    [None] on the two failures {!transfer} reports, for the same reason it
+    reports them: the creation is abandoned rather than resolved into a state
+    that creates or destroys ether.
+
+    Calling it requires a {!Mutability.permit}, so a creation inside a static
+    frame is unwritable rather than merely rejected. *)
+
+val deploy_code : t -> Mutability.permit -> Units.Address.t -> string -> t
+(** Install the code a creation frame returned, the last act of a successful
+    [CREATE]. The only writer of account code in the port. *)
+
+val plan_destruction :
+  t -> address:Units.Address.t -> beneficiary:Units.Address.t -> Destruction.t load
+(** [SELFDESTRUCT] priced but not yet applied. Warms the beneficiary — the touch
+    whose {!Access.warmth} prices the cold surcharge — and reads the three facts
+    the charge depends on plus the one EIP-6780 needs. Nothing moves yet, so a
+    frame that cannot pay never reaches {!commit_destruction}.
+
+    It takes no permit because looking is not changing; the permit is demanded
+    where the change happens. *)
+
+val commit_destruction : Destruction.t load -> Mutability.permit -> t option
+(** Apply the planned destruction, EIP-6780's three outcomes
+    ([revm-context] [journal/inner.rs:507-549]): an account created in this
+    transaction is emptied and recorded for removal, any other account merely
+    hands its balance over and keeps its code and storage, and an uncreated
+    account naming itself as beneficiary is left completely alone.
+
+    A destroyed account is {e recorded}, not removed. It keeps its code, its
+    storage and its callability for the rest of the transaction, which is what
+    the specification requires, and the transaction layer removes it afterwards
+    from {!Lifecycle.destroyed}.
+
+    [None] only on the recipient-overflow {!transfer} reports, which no real
+    total supply can reach. It is an option rather than a forced state for the
+    reason given there: value conservation is never resolved by fiat. *)
+
 val equal : t -> t -> bool
 (** Exact content equality across the world, the access set, the refund, the log
-    journal and the transient store — the property the tests need in order to
-    state "the revert changed nothing".
+    journal, the transient store and the creation and destruction sets — the
+    property the tests need in order to state "the revert changed nothing".
 
     Note it is stricter than "same post-state": two runs reaching the same world
     by different access patterns compare unequal here. That is correct, because

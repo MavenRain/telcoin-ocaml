@@ -45,6 +45,28 @@ let log_base = 375
 let log_topic = 375
 let log_data_byte = 8
 
+(* [BLOCKHASH]'s whole price ([revm-interpreter] [instructions.rs:136]). *)
+let blockhash = 20
+
+(* The creation prices. [CREATE]'s base is 32000 ([gas/constants.rs:29]) and
+   [CREATE2] pays it too, plus 6 per word of init code for the hash it takes of
+   that code ([calc.rs] [create2_cost] adds [KECCAK256WORD] per word to the same
+   [CREATE]). EIP-3860's word cost of 2 ([constants.rs:101]) is charged by BOTH
+   creations on the init code they read, before either base.
+
+   The deposit is 200 per byte of the code the init code returns
+   ([constants.rs:53]), charged at the end of the creation frame. *)
+let create_base = 32000
+let initcode_word = 2
+let code_deposit_byte = 200
+
+(* [SELFDESTRUCT]'s 5000 ([calc.rs] [static_selfdestruct_cost] post-Tangerine)
+   and the two surcharges [dyn_selfdestruct_cost] adds. The cold one is the FULL
+   2600, not the 2500 additional the other account readers take: those pay a warm
+   100 in the table first and this pays nothing there, so reusing
+   {!account_access_cost} here would undercharge a cold beneficiary by 100. *)
+let selfdestruct_base = 5000
+
 let static_cost = function
   (* The instructions that halt are free; all their cost, where they have any,
      is the memory they touch. *)
@@ -99,6 +121,17 @@ let static_cost = function
      allowance are all dynamic and computed in the interpreter body. *)
   | Opcode.Call | Opcode.Callcode | Opcode.Delegatecall | Opcode.Staticcall ->
       warm_storage_read
+  (* [BLOCKHASH] is the one instruction here whose whole price is in the table:
+     revm's body carries a commented-out [gas!] and charges nothing
+     ([instructions/host.rs:189]), because the 20 is the table entry
+     ([instructions.rs:136]). *)
+  | Opcode.Blockhash -> blockhash
+  (* The creations and [SELFDESTRUCT] are wholly dynamic ([instructions.rs:238],
+     [:243], [:248] all read zero and say so). [CREATE]'s 32000 base, the
+     EIP-3860 word cost, [CREATE2]'s hash cost and [SELFDESTRUCT]'s 5000 are all
+     charged in the interpreter body, where the order they fall in is
+     observable. *)
+  | Opcode.Create | Opcode.Create2 | Opcode.Selfdestruct -> zero
   | Opcode.Keccak256 -> keccak256
   (* Uniform across the five arities: revm gives every [LOG] the same table
      entry [gas::LOG] ([instructions.rs:282-286]) and charges the per-topic 375
@@ -366,6 +399,44 @@ let call_gas ~requested ~remaining ~value =
   let capped = Option.fold ~none:ceiling ~some:(Int.min ceiling) (W.to_int requested) in
   let stipend = if W.is_zero value then 0 else call_stipend in
   { charge = capped; forwarded = capped + stipend }
+
+(* EIP-3860's meter ([calc.rs] [initcode_cost], [constants.rs:101]): 2 per
+   32-byte word of init code, charged by BOTH creations before their base and
+   before the memory the init code is read from is expanded. Zero for empty init
+   code, which is why revm can leave it inside its [len != 0] branch. *)
+let initcode_cost length = initcode_word * words_of_length length
+
+(* The base a creation charges after the init code has been read. [CREATE] pays
+   32000; [CREATE2] pays the same 32000 plus 6 per word for hashing the init code
+   into its address ([calc.rs] [create2_cost] is [CREATE + cost_per_word(len,
+   KECCAK256WORD)]). The word rate is {!keccak_word_cost}'s, the same one
+   [KECCAK256] pays, because it is the same hash. *)
+let create_cost ~salted length =
+  create_base + if salted then keccak_word_cost length else 0
+
+(* EIP-2 point 3 ([revm-handler] [frame.rs:298-299]): 200 per byte of the code
+   the init code returned, charged at the end of the creation frame out of what
+   that frame has left. A frame that cannot pay it fails the creation outright
+   rather than deploying a shorter contract. *)
+let code_deposit_cost length = code_deposit_byte * length
+
+(* [SELFDESTRUCT]'s dynamic half ([calc.rs] [dyn_selfdestruct_cost]): 25000 when
+   value really moves to an account that does not exist yet — EIP-161 makes the
+   predicate [had_value && !target_exists], so draining a zero balance into a
+   fresh address is free — plus the full cold-account 2600 when the beneficiary
+   had not been touched. Both are on top of {!selfdestruct_base}. *)
+let selfdestruct_dynamic warmth ~had_value ~beneficiary_exists =
+  (if had_value && not beneficiary_exists then new_account else 0)
+  + if Access.is_cold warmth then cold_account_access else 0
+
+(* What a creation charges and forwards ([revm-interpreter] [contract.rs:79-91]).
+   Unlike a call it has no requested-gas operand and no stipend, so the EIP-150
+   ceiling is the whole answer: the creation is charged all of it and the child
+   receives all of it. The charge is taken AFTER the 32000 base and the EIP-3860
+   meter, because revm reads [remaining()] at that point. *)
+let create_gas remaining =
+  let ceiling = forwardable_gas remaining in
+  { charge = ceiling; forwarded = ceiling }
 
 (* Credit unused sub-frame gas back to the caller — revm's [Gas::erase_cost]
    ([revm-handler] [frame.rs:479-481]), which adds the child's leftover to the

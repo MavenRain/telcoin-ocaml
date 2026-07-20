@@ -77,7 +77,7 @@ let base_env =
          ~prevrandao:
            (hex "4b7e19a2c05d38f61ea4907c2d5b8e3f016ca94d7b2e58301fc6a9d4e07b3521")
          ~gas_limit:(u 25_000_000) ~basefee:(u 3_500_000_000)
-         ~chain_id:(u 4_321))
+         ~chain_id:(u 4_321) ~hashes:Tn_evm.Block_hashes.empty)
     ~tx:
       (Env.Tx.make ~origin:(address_of 0x01) ~gas_price:(u 9_000_000_000)
          ~access_list:[])
@@ -763,16 +763,19 @@ let test_program_invalid_opcode () =
      something else. Several have now graduated, and each stood exactly here
      before it did: 0x54 (SLOAD) with the host seam, 0x20 (KECCAK256) with the
      hash, 0x3b, 0x3c and 0x3f (the external-code readers) once code landed on an
-     account, and — as of this chunk — 0x3d/0x3e (the return-data readers) and
-     0xf1/0xf2/0xf4/0xfa (the message calls), which needed a second frame. What
-     is still deferred needs state this port has not built: 0x40 is BLOCKHASH and
-     0xf0 is CREATE. *)
-  check_outcome "a deferred block-hash instruction halts"
-    (Interpreter.Failed (Interpreter.Invalid_opcode 0x40))
-    (run (Code.of_string (byte 0x40)) 1_000);
-  check_outcome "a deferred create instruction halts"
-    (Interpreter.Failed (Interpreter.Invalid_opcode 0xf0))
-    (run (Code.of_string (byte 0xf0)) 1_000)
+     account, 0x3d/0x3e (the return-data readers) and 0xf1/0xf2/0xf4/0xfa (the
+     message calls) once there was a second frame, and — as of this chunk —
+     0x40 (BLOCKHASH), 0xf0/0xf5 (the creations) and 0xff (SELFDESTRUCT).
+
+     What is still deferred needs state this port has not built: 0x49 is
+     BLOBHASH and 0x4a is BLOBBASEFEE, and both want the EIP-4844 blob fields
+     that no transaction here carries. *)
+  check_outcome "a deferred blob-hash instruction halts"
+    (Interpreter.Failed (Interpreter.Invalid_opcode 0x49))
+    (run (Code.of_string (byte 0x49)) 1_000);
+  check_outcome "a deferred blob-base-fee instruction halts"
+    (Interpreter.Failed (Interpreter.Invalid_opcode 0x4a))
+    (run (Code.of_string (byte 0x4a)) 1_000)
 
 (* ---------- randomised properties ---------- *)
 
@@ -836,19 +839,33 @@ let test_termination_invariant () =
       Option.fold ~none:()
         ~some:(fun decoded ->
           let free = Gas.static_cost decoded = 0 in
+          (* [SELFDESTRUCT] joins the halting four: its table price is zero and
+             it charges 5000 in its body, but it never reaches [Continue] at all,
+             so it is free-and-halting rather than free-and-continuing. *)
           let halts =
             List.exists (Opcode.equal decoded)
-              [ Opcode.Stop; Opcode.Return; Opcode.Revert; Opcode.Invalid ]
+              [
+                Opcode.Stop; Opcode.Return; Opcode.Revert; Opcode.Invalid;
+                Opcode.Selfdestruct;
+              ]
           in
           (* [SSTORE]'s table price is zero so EIP-2200's sentry reads an
              undecremented allowance; it charges 100 in its body. [RETURNDATACOPY]
              is zero in the table so its [OutOfOffset] bounds check precedes all
              gas; it then charges [copy_cost_verylow] (at least the VERYLOW 3, even
              for a zero length) in its body. Both restore the strict decrease off
-             the dispatch loop. *)
+             the dispatch loop.
+
+             The creations are zero in the table because every one of their
+             prices is dynamic, and each charges the 32000 base before any path
+             of theirs can reach [Continue] — including the refusals, which are
+             taken after that charge. So they too restore the strict decrease,
+             by a wide margin. *)
           let charges_in_its_body =
             Opcode.equal decoded Opcode.Sstore
             || Opcode.equal decoded Opcode.Returndatacopy
+            || Opcode.equal decoded Opcode.Create
+            || Opcode.equal decoded Opcode.Create2
           in
           Alcotest.(check bool)
             (Printf.sprintf "%s is free only if it halts" (Opcode.to_string decoded))

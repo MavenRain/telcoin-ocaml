@@ -62,6 +62,34 @@ val hash : t -> Tn_keccak.t
     digest, and so is never confused with the [KECCAK_EMPTY] a real codeless
     account has. *)
 
+val max_deployed_size : int
+(** EIP-170's ceiling on the code a creation may deploy, [0x6000]
+    ([revm-primitives] [eip170.rs]). *)
+
+val max_initcode_size : int
+(** EIP-3860's ceiling on the init code a creation may read, defined as twice
+    {!max_deployed_size} ([revm-primitives] [eip3860.rs]) rather than as an
+    independent number, so the two cannot drift apart. Exceeding it is checked
+    against the requested {e length} before any of that memory is touched, so
+    this is the one limit that bites before the bytes exist. *)
+
+type deployment_error =
+  | Reserved_prefix
+      (** EIP-3541: the output begins with [0xEF], the byte reserved for EOF. *)
+  | Too_large of int
+      (** EIP-170: the output is longer than {!max_deployed_size}, carrying the
+          length that broke the limit. *)
+
+val validate_deployment : string -> (unit, deployment_error) result
+(** Whether a creation's output may become code, in revm's order
+    ([revm-handler] [frame.rs:281-296]): the reserved prefix first, then the
+    size. The order matters because the two are different halts, so it is decided
+    here once rather than at each call site.
+
+    Neither test is folded into {!of_string}. Code arriving from genesis or from
+    a test fixture is not subject to either limit — only a [CREATE] output is —
+    so making the constructor reject them would refuse states the chain permits. *)
+
 val equal : t -> t -> bool
 (** Byte equality. Exact as content equality: the representation is the bytes
     themselves, so no two distinct representations read alike. *)

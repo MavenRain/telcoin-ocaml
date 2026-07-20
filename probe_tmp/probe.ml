@@ -23,6 +23,7 @@ let u n = Option.get (U256.of_int n)
 let base_block =
   Env.Block.make ~coinbase ~timestamp:(u 1) ~number:(u 2) ~prevrandao:U256.zero
     ~gas_limit:(u 30_000_000) ~basefee:(u 7) ~chain_id:(u 1)
+    ~hashes:Tn_evm.Block_hashes.empty
 
 let base_tx = Env.Tx.make ~origin ~gas_price:(u 1) ~access_list:[]
 
