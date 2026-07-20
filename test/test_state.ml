@@ -11,6 +11,8 @@ module Nonce = Tn_state.Nonce
 module Account = Tn_state.Account
 module World_state = Tn_state.World_state
 module Transfer = Tn_state.Transfer
+module Storage = Tn_state.Storage
+module Address_word = Tn_state.Address_word
 
 let get = function Some x -> x | None -> Alcotest.fail "expected Some"
 let u n = get (U256.of_int n)
@@ -291,6 +293,149 @@ let test_transfer_determinism () =
   Alcotest.(check bool) "b: 500 + 100 - 50 = 550" true (U256.equal (World_state.balance st b) (u 550));
   Alcotest.(check bool) "c: 0 + 50 + 30 = 80" true (U256.equal (World_state.balance st c) (u 80))
 
+(* ---------- Storage: the canonical slot map ---------- *)
+
+(* Reading is total: a slot no write ever touched reads zero, not an error. *)
+let test_storage_total_read () =
+  Alcotest.(check bool) "an unwritten slot reads zero" true
+    (U256.is_zero (Storage.get Storage.empty (u 7)));
+  Alcotest.(check bool) "the empty storage is empty" true (Storage.is_empty Storage.empty)
+
+(* Canonicity, which is what makes [equal] exact: a write of zero {removes} the
+   key rather than storing a zero word, so a contract that clears every slot it
+   wrote leaves a storage identical to the one it started from — not merely one
+   that reads the same. *)
+let test_storage_canonicity () =
+  let written = Storage.set (Storage.set Storage.empty (u 1) (u 42)) (u 2) (u 43) in
+  Alcotest.(check bool) "a written storage is not empty" false (Storage.is_empty written);
+  Alcotest.(check int) "both slots are stored" 2 (List.length (Storage.bindings written));
+  Alcotest.(check bool) "and read back" true (U256.equal (Storage.get written (u 1)) (u 42));
+  let cleared = Storage.set (Storage.set written (u 1) U256.zero) (u 2) U256.zero in
+  Alcotest.(check bool) "clearing every slot is empty again" true (Storage.is_empty cleared);
+  Alcotest.(check bool) "and exactly equal to empty" true
+    (Storage.equal cleared Storage.empty);
+  Alcotest.(check int) "with no key left behind" 0 (List.length (Storage.bindings cleared));
+  (* Storing zero into an already-zero slot is the identity: an [SSTORE] no-op
+     leaves no trace in the representation either. *)
+  Alcotest.(check bool) "zero into an unwritten slot changes nothing" true
+    (Storage.equal (Storage.set Storage.empty (u 9) U256.zero) Storage.empty);
+  (* Two storages that read alike agree structurally however they got there. *)
+  let direct = Storage.set Storage.empty (u 1) (u 5) in
+  let detour = Storage.set (Storage.set Storage.empty (u 1) (u 99)) (u 3) (u 7) in
+  let detour = Storage.set (Storage.set detour (u 3) U256.zero) (u 1) (u 5) in
+  Alcotest.(check bool) "the route taken does not show in the representation" true
+    (Storage.equal direct detour)
+
+(* Bindings are the nonzero slots in ascending slot order, whatever the write
+   order was. *)
+let test_storage_bindings_order () =
+  let out_of_order = Storage.set (Storage.set Storage.empty (u 2) (u 20)) (u 1) (u 10) in
+  Alcotest.(check (list string)) "bindings ascend by slot"
+    [ U256.to_hex (u 1); U256.to_hex (u 2) ]
+    (List.map (fun (slot, _) -> U256.to_hex slot) (Storage.bindings out_of_order))
+
+(* ---------- The pruning predicate split ---------- *)
+
+(* [is_empty] is the literal EIP-161 test and ignores storage; [is_absent] adds
+   the storage conjunct. They differ on exactly one class of account — zero
+   nonce, zero balance, nonempty storage — and that is the class the world state
+   must not prune. *)
+let test_account_predicate_split () =
+  let stored = Account.set_slot Account.empty (u 1) (u 42) in
+  Alcotest.(check bool) "EIP-161 still calls it empty" true (Account.is_empty stored);
+  Alcotest.(check bool) "but it is not absent" false (Account.is_absent stored);
+  Alcotest.(check bool) "its slot reads back" true (U256.equal (Account.slot stored (u 1)) (u 42));
+  Alcotest.(check bool) "an untouched account is both empty and absent" true
+    (Account.is_empty Account.empty && Account.is_absent Account.empty);
+  (* Clearing the slot collapses the difference again. *)
+  Alcotest.(check bool) "clearing the slot makes it absent" true
+    (Account.is_absent (Account.set_slot stored (u 1) U256.zero));
+  (* A funded account is neither, and storage does not disturb its balance. *)
+  let funded = Account.set_slot (Account.make ~nonce:Nonce.zero ~balance:(u 1)) (u 1) (u 42) in
+  Alcotest.(check bool) "a funded account is not empty" false (Account.is_empty funded);
+  Alcotest.(check bool) "nor absent" false (Account.is_absent funded);
+  Alcotest.(check bool) "and an SSTORE moved no value" true
+    (U256.equal (Account.balance funded) (u 1))
+
+(* The load-bearing consequence: [set_account] prunes on [is_absent], so the
+   first [SSTORE] into a zero-nonce zero-balance account survives. Pruning on
+   [is_empty] would delete it, and [World_state.equal] would stop being exact
+   content equality — the claim the whole state layer rests on. *)
+let test_world_state_storage_pruning () =
+  let a = addr '\001' in
+  let st = World_state.set_storage World_state.empty a (u 1) (u 42) in
+  Alcotest.(check bool) "a slot written into an empty account survives" true
+    (U256.equal (World_state.storage st a (u 1)) (u 42));
+  Alcotest.(check int) "the entry is stored" 1 (List.length (World_state.accounts st));
+  (* Two states differing only in that slot must not compare equal. *)
+  let other = World_state.set_storage World_state.empty a (u 1) (u 43) in
+  Alcotest.(check bool) "states differing in one slot differ" false (World_state.equal st other);
+  (* Clearing the only slot restores the previous state exactly. *)
+  let cleared = World_state.set_storage st a (u 1) U256.zero in
+  Alcotest.(check bool) "clearing the only slot prunes the entry" true
+    (World_state.equal cleared World_state.empty);
+  Alcotest.(check int) "with no entry left behind" 0
+    (List.length (World_state.accounts cleared));
+  (* A fully absent account is still pruned on the way in. *)
+  Alcotest.(check bool) "storing an absent account stores nothing" true
+    (World_state.equal (World_state.set_account World_state.empty a Account.empty)
+       World_state.empty);
+  (* And the slot read is total at both levels. *)
+  Alcotest.(check bool) "a slot of an account with no entry reads zero" true
+    (U256.is_zero (World_state.storage World_state.empty (addr '\002') (u 5)))
+
+(* [remove_account] takes the account and its storage together — they live in
+   one entry, so no caller can orphan the slots. *)
+let test_world_state_remove_account () =
+  let a = addr '\001' in
+  let st = World_state.set_storage (World_state.of_alloc [ (a, u 100) ]) a (u 1) (u 42) in
+  Alcotest.(check bool) "the funded account holds its slot" true
+    (U256.equal (World_state.storage st a (u 1)) (u 42));
+  let dropped = World_state.remove_account st a in
+  Alcotest.(check bool) "the balance is gone" true
+    (U256.is_zero (World_state.balance dropped a));
+  Alcotest.(check bool) "and the slot went with it" true
+    (U256.is_zero (World_state.storage dropped a (u 1)));
+  Alcotest.(check bool) "leaving the empty state" true
+    (World_state.equal dropped World_state.empty)
+
+(* ---------- Address_word: the two total conversions ---------- *)
+
+(* Widening is injective and puts the address in the low 160 bits. *)
+let test_address_word_round_trip () =
+  let a = addr '\001' in
+  let w = Address_word.to_word a in
+  Alcotest.(check string) "twelve zero bytes then the address"
+    (String.make 24 '0' ^ String.concat "" (List.init Units.Address.length (fun _ -> "01")))
+    (U256.to_hex w);
+  Alcotest.(check bool) "an address round-trips through its word" true
+    (Units.Address.equal a (Address_word.of_word w));
+  Alcotest.(check bool) "the zero address is the zero word" true
+    (U256.is_zero (Address_word.to_word Units.Address.zero));
+  Alcotest.(check bool) "distinct addresses give distinct words" false
+    (U256.equal w (Address_word.to_word (addr '\002')))
+
+(* Narrowing truncates rather than failing. revm's [Address::from_word] keeps
+   the low twenty bytes, so a word with dirt above them is a balance query for
+   the truncated address, not a halt — hardening this into a partial function
+   would make valid mainnet transactions halt. *)
+let test_address_word_truncation () =
+  let a = addr '\001' in
+  let dirt = hex (String.make 24 'f' ^ String.make 40 '0') in
+  let dirty = U256.logor (Address_word.to_word a) dirt in
+  Alcotest.(check bool) "dirt above the low twenty bytes is discarded" true
+    (Units.Address.equal a (Address_word.of_word dirty));
+  (* [to_word (of_word w)] is [w] with its top twelve bytes cleared, and
+     narrowing that again changes nothing. *)
+  let clean = Address_word.to_word (Address_word.of_word dirty) in
+  Alcotest.(check bool) "re-widening clears the high twelve bytes" true
+    (U256.equal clean (Address_word.to_word a));
+  Alcotest.(check bool) "and the clearing is idempotent" true
+    (U256.equal clean (Address_word.to_word (Address_word.of_word clean)));
+  (* Dirt alone, with zero low bytes, names the zero address. *)
+  Alcotest.(check bool) "dirt alone names the zero address" true
+    (Units.Address.equal Units.Address.zero (Address_word.of_word dirt))
+
 let () =
   Alcotest.run "state"
     [
@@ -305,9 +450,34 @@ let () =
           Alcotest.test_case "ordering is unsigned" `Quick test_u256_compare;
         ] );
       ("nonce", [ Alcotest.test_case "counts and saturates" `Quick test_nonce ]);
-      ("account", [ Alcotest.test_case "balance and nonce arithmetic" `Quick test_account ]);
+      ( "storage",
+        [
+          Alcotest.test_case "reading is total" `Quick test_storage_total_read;
+          Alcotest.test_case "write then clear is exactly empty" `Quick
+            test_storage_canonicity;
+          Alcotest.test_case "bindings ascend by slot" `Quick test_storage_bindings_order;
+        ] );
+      ( "account",
+        [
+          Alcotest.test_case "balance and nonce arithmetic" `Quick test_account;
+          Alcotest.test_case "is_empty and is_absent split on storage" `Quick
+            test_account_predicate_split;
+        ] );
       ( "world state",
-        [ Alcotest.test_case "canonical address-to-account map" `Quick test_world_state ] );
+        [
+          Alcotest.test_case "canonical address-to-account map" `Quick test_world_state;
+          Alcotest.test_case "pruning keeps an account that has only storage" `Quick
+            test_world_state_storage_pruning;
+          Alcotest.test_case "remove_account drops the storage with it" `Quick
+            test_world_state_remove_account;
+        ] );
+      ( "address word",
+        [
+          Alcotest.test_case "an address round-trips through its word" `Quick
+            test_address_word_round_trip;
+          Alcotest.test_case "narrowing truncates rather than failing" `Quick
+            test_address_word_truncation;
+        ] );
       ( "transfer",
         [
           Alcotest.test_case "a valid transfer moves value" `Quick test_transfer_happy;

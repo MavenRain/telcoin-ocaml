@@ -33,6 +33,16 @@ val byte_at : t -> int -> int
 (** The byte at an offset, or zero ([STOP]) at any offset outside the code —
     including a negative one, which no execution produces. *)
 
+val window : t -> Data.t
+(** The code as a padded read window, for [CODECOPY]. Computed once in
+    {!of_string} alongside the jump-destination analysis, because [CODECOPY] in
+    a loop must not rebuild it per iteration.
+
+    It exists so that [CODECOPY] and [CALLDATACOPY] read through one function.
+    They are priced identically ({!Gas.copy_cost}) and their out-of-range rule is
+    identical — saturating source offset, zero fill past the end — so sharing the
+    reader is how this port stops them from drifting apart. *)
+
 val is_valid_jumpdest : t -> int -> bool
 (** Whether an offset holds a [JUMPDEST] instruction, and so may be jumped to.
     False for a [0x5b] byte inside push data, for any offset outside the code,

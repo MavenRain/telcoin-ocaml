@@ -1,16 +1,21 @@
 (** The instruction set the interpreter executes, and the decoding of a code byte
     into it.
 
-    This is the pure-computation subset of the EVM: arithmetic, comparison,
-    bitwise and shift operations (dispatched to {!Alu}), stack manipulation,
-    memory, gas and control flow. The opcodes that read the environment or touch
-    the world — storage, calls, contract creation, the block and transaction
-    context — are deliberately absent, because each needs state this chunk does
-    not yet wire up; a code byte naming one of them decodes to [None] exactly as
-    an unassigned byte does, and the interpreter halts on it. That is a
-    {e temporary} divergence from a full node, and the only one: within this
-    subset the byte values, immediate sizes and semantics are those of the real
-    machine (revm's [revm-bytecode] opcode table).
+    This is the single-frame subset of the EVM: arithmetic, comparison, bitwise
+    and shift operations (dispatched to {!Alu}), stack manipulation, memory, gas
+    and control flow, and — since the host seam landed — the instructions that
+    read the block and transaction context, read the calling frame's calldata and
+    its own code, and read and write account storage.
+
+    What remains absent is what needs a {e second} frame or a hash function:
+    [KECCAK256], the external-code and return-data readers, [BLOCKHASH], the blob
+    instructions, transient storage, the logs, the calls, the creations and
+    [SELFDESTRUCT]. Each needs machinery this port does not yet wire up; a code
+    byte naming one of them decodes to [None] exactly as an unassigned byte does,
+    and the interpreter halts on it. That is a {e temporary} divergence from a
+    full node, and the only one: within this subset the byte values, immediate
+    sizes and semantics are those of the real machine (revm's [revm-bytecode]
+    opcode table).
 
     Every operand a byte can carry is held in a type that admits only the legal
     range — {!Push_bytes} for the [1, 32] immediate width and {!Depth} for the
@@ -83,11 +88,47 @@ type t =
       (** The designated invalid instruction [0xfe]. It is a defined byte that
           always halts exceptionally — distinct from an unassigned byte, which
           {!decode} rejects, though both halt the machine the same way. *)
+  | Address
+  | Balance
+  | Origin
+  | Caller
+  | Callvalue
+  | Calldataload
+  | Calldatasize
+  | Calldatacopy
+  | Codesize
+  | Codecopy
+  | Gasprice
+  | Coinbase
+  | Timestamp
+  | Number
+  | Prevrandao
+      (** [0x44]. The byte revm still calls [DIFFICULTY]
+          ([instructions.rs:188]); post-merge it names the beacon chain's
+          randomness, and the name here is the one the semantics deserve. *)
+  | Gaslimit
+  | Chainid
+  | Selfbalance
+  | Basefee
+  | Sload
+  | Sstore
+  | Mcopy
 
 val decode : int -> t option
 (** The instruction a code byte names, [None] for a byte that is unassigned or
     outside this subset. The argument is a byte value; anything outside
-    [\[0, 255\]] is [None]. *)
+    [\[0, 255\]] is [None].
+
+    The subset grew; the mechanism did not. Every still-deferred instruction has
+    no arm here, so its byte decodes to [None] and halts the machine rather than
+    silently doing the wrong thing. Being absent from a total decoder {e is} the
+    mechanism — it needs no allow-list, no feature flag and no code.
+
+    The asymmetry is deliberate. Adding a constructor to {!t} breaks compilation
+    in {!to_byte}, in {!Gas.static_cost} and in the interpreter's dispatch, all
+    three of which are exhaustive with no wildcard; adding an arm {e here} is a
+    separate, deliberate edit. That is what keeps a decoded byte a promise that
+    the instruction is really implemented. *)
 
 val to_byte : t -> int
 (** The code byte that encodes an instruction — the inverse of {!decode}, which

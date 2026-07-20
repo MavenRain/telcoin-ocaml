@@ -1,4 +1,4 @@
 (library
  (name tn_evm)
  (public_name telcoin_ocaml.evm)
- (libraries tn_state))
+ (libraries tn_types tn_state))

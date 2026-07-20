@@ -55,6 +55,28 @@ type t =
   | Return
   | Revert
   | Invalid
+  | Address
+  | Balance
+  | Origin
+  | Caller
+  | Callvalue
+  | Calldataload
+  | Calldatasize
+  | Calldatacopy
+  | Codesize
+  | Codecopy
+  | Gasprice
+  | Coinbase
+  | Timestamp
+  | Number
+  | Prevrandao
+  | Gaslimit
+  | Chainid
+  | Selfbalance
+  | Basefee
+  | Sload
+  | Sstore
+  | Mcopy
 
 (* The first byte of each contiguous family, from which the family's operand is
    recovered by subtraction. *)
@@ -89,16 +111,38 @@ let to_byte = function
   | Shl -> 0x1b
   | Shr -> 0x1c
   | Sar -> 0x1d
+  | Address -> 0x30
+  | Balance -> 0x31
+  | Origin -> 0x32
+  | Caller -> 0x33
+  | Callvalue -> 0x34
+  | Calldataload -> 0x35
+  | Calldatasize -> 0x36
+  | Calldatacopy -> 0x37
+  | Codesize -> 0x38
+  | Codecopy -> 0x39
+  | Gasprice -> 0x3a
+  | Coinbase -> 0x41
+  | Timestamp -> 0x42
+  | Number -> 0x43
+  | Prevrandao -> 0x44
+  | Gaslimit -> 0x45
+  | Chainid -> 0x46
+  | Selfbalance -> 0x47
+  | Basefee -> 0x48
   | Pop -> 0x50
   | Mload -> 0x51
   | Mstore -> 0x52
   | Mstore8 -> 0x53
+  | Sload -> 0x54
+  | Sstore -> 0x55
   | Jump -> 0x56
   | Jumpi -> 0x57
   | Pc -> 0x58
   | Msize -> 0x59
   | Gas -> 0x5a
   | Jumpdest -> 0x5b
+  | Mcopy -> 0x5e
   | Push0 -> 0x5f
   | Push n -> push1_byte + Push_bytes.to_int n - 1
   | Dup d -> dup1_byte + Depth.to_int d - 1
@@ -141,16 +185,38 @@ let decode byte =
   | 0x1b -> Some Shl
   | 0x1c -> Some Shr
   | 0x1d -> Some Sar
+  | 0x30 -> Some Address
+  | 0x31 -> Some Balance
+  | 0x32 -> Some Origin
+  | 0x33 -> Some Caller
+  | 0x34 -> Some Callvalue
+  | 0x35 -> Some Calldataload
+  | 0x36 -> Some Calldatasize
+  | 0x37 -> Some Calldatacopy
+  | 0x38 -> Some Codesize
+  | 0x39 -> Some Codecopy
+  | 0x3a -> Some Gasprice
+  | 0x41 -> Some Coinbase
+  | 0x42 -> Some Timestamp
+  | 0x43 -> Some Number
+  | 0x44 -> Some Prevrandao
+  | 0x45 -> Some Gaslimit
+  | 0x46 -> Some Chainid
+  | 0x47 -> Some Selfbalance
+  | 0x48 -> Some Basefee
   | 0x50 -> Some Pop
   | 0x51 -> Some Mload
   | 0x52 -> Some Mstore
   | 0x53 -> Some Mstore8
+  | 0x54 -> Some Sload
+  | 0x55 -> Some Sstore
   | 0x56 -> Some Jump
   | 0x57 -> Some Jumpi
   | 0x58 -> Some Pc
   | 0x59 -> Some Msize
   | 0x5a -> Some Gas
   | 0x5b -> Some Jumpdest
+  | 0x5e -> Some Mcopy
   | 0x5f -> Some Push0
   | 0xf3 -> Some Return
   | 0xfd -> Some Revert
@@ -170,7 +236,11 @@ let immediate_bytes = function
   | Stop | Add | Mul | Sub | Div | Sdiv | Mod | Smod | Addmod | Mulmod | Exp
   | Signextend | Lt | Gt | Slt | Sgt | Eq | Iszero | And | Or | Xor | Not | Byte
   | Shl | Shr | Sar | Pop | Mload | Mstore | Mstore8 | Jump | Jumpi | Pc | Msize
-  | Gas | Jumpdest | Push0 | Dup _ | Swap _ | Return | Revert | Invalid ->
+  | Gas | Jumpdest | Push0 | Dup _ | Swap _ | Return | Revert | Invalid | Address
+  | Balance | Origin | Caller | Callvalue | Calldataload | Calldatasize
+  | Calldatacopy | Codesize | Codecopy | Gasprice | Coinbase | Timestamp | Number
+  | Prevrandao | Gaslimit | Chainid | Selfbalance | Basefee | Sload | Sstore
+  | Mcopy ->
       0
 
 (* Two instructions are equal exactly when they encode to the same byte — the
@@ -221,3 +291,25 @@ let to_string = function
   | Return -> "RETURN"
   | Revert -> "REVERT"
   | Invalid -> "INVALID"
+  | Address -> "ADDRESS"
+  | Balance -> "BALANCE"
+  | Origin -> "ORIGIN"
+  | Caller -> "CALLER"
+  | Callvalue -> "CALLVALUE"
+  | Calldataload -> "CALLDATALOAD"
+  | Calldatasize -> "CALLDATASIZE"
+  | Calldatacopy -> "CALLDATACOPY"
+  | Codesize -> "CODESIZE"
+  | Codecopy -> "CODECOPY"
+  | Gasprice -> "GASPRICE"
+  | Coinbase -> "COINBASE"
+  | Timestamp -> "TIMESTAMP"
+  | Number -> "NUMBER"
+  | Prevrandao -> "PREVRANDAO"
+  | Gaslimit -> "GASLIMIT"
+  | Chainid -> "CHAINID"
+  | Selfbalance -> "SELFBALANCE"
+  | Basefee -> "BASEFEE"
+  | Sload -> "SLOAD"
+  | Sstore -> "SSTORE"
+  | Mcopy -> "MCOPY"

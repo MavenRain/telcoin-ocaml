@@ -17,13 +17,20 @@
    sampled cases — and the verdict — replay. *)
 
 module U256 = Tn_state.U256
+module World_state = Tn_state.World_state
+module Units = Tn_types.Units
+module Access = Tn_evm.Access
 module Alu = Tn_evm.Alu
 module Code = Tn_evm.Code
+module Data = Tn_evm.Data
 module Depth = Tn_evm.Depth
+module Effects = Tn_evm.Effects
+module Env = Tn_evm.Env
 module Gas = Tn_evm.Gas
 module Interpreter = Tn_evm.Interpreter
 module Memory = Tn_evm.Memory
 module Opcode = Tn_evm.Opcode
+module Refund = Tn_evm.Refund
 module Stack = Tn_evm.Stack
 
 let get = function Some x -> x | None -> Alcotest.fail "expected Some"
@@ -32,6 +39,52 @@ let hex s = get (U256.of_hex s)
 let gas_of n = get (Gas.of_int n)
 let depth_of n = get (Depth.of_int n)
 let width_of n = get (Opcode.Push_bytes.of_int n)
+
+(* The interpreter takes a context and an effects accumulator. Nothing in this
+   file exercises either — the host seam has its own suite — so the world and the
+   access set are empty and the programs below neither read the context nor touch
+   the world.
+
+   The environment is nevertheless built from DISTINCT, nonzero values rather
+   than the zeros it used to hold, and the reason is exactly that nothing here
+   should be able to tell. Every gas figure and every expected output in this file
+   is computed on the assumption that no program reads the context; with the
+   fixture all zeros that assumption was untestable, because a program that DID
+   read a field would push the same zero as one that read nothing. Nonzero
+   discriminating values turn the assumption into something the suite checks:
+   were any figure below secretly reading a field, it would move the moment these
+   constants did.
+
+   The constants deliberately differ from the ones [test_host_seam.ml] uses. The
+   two files are separate executables with separate fixtures, and disagreeing
+   values mean a figure accidentally hardcoded from one cannot pass in the other.
+   That file is where the fields are asserted; here they are only required to be
+   invisible.
+
+   Passing [Access.empty] is a deliberately unreal starting point (a real
+   transaction pre-warms the target, the origin and the coinbase), and it is
+   harmless precisely because no program here contains an instruction that could
+   observe it. *)
+let address_of n =
+  get (Units.Address.of_bytes (String.make (Units.Address.length - 1) '\000' ^ String.make 1 (Char.chr n)))
+
+let base_env =
+  Env.make
+    ~block:
+      (Env.Block.make ~coinbase:(address_of 0xc0) ~timestamp:(u 1_600_000_000)
+         ~number:(u 15_500_000)
+         ~prevrandao:
+           (hex "4b7e19a2c05d38f61ea4907c2d5b8e3f016ca94d7b2e58301fc6a9d4e07b3521")
+         ~gas_limit:(u 25_000_000) ~basefee:(u 3_500_000_000)
+         ~chain_id:(u 4_321))
+    ~tx:
+      (Env.Tx.make ~origin:(address_of 0x01) ~gas_price:(u 9_000_000_000)
+         ~access_list:[])
+    ~call:
+      (Env.Call.make ~target:(address_of 0x02) ~caller:(address_of 0x0c)
+         ~value:(u 500_000_000_000_000_000) ~data:Data.empty)
+
+let base_effects = Effects.start ~world:World_state.empty ~access:Access.empty
 
 let u256 =
   Alcotest.testable (fun ppf w -> Format.pp_print_string ppf (U256.to_hex w)) U256.equal
@@ -45,30 +98,50 @@ let push2 hi lo = op (Opcode.Push (width_of 2)) ^ byte hi ^ byte lo
 let push32 w = op (Opcode.Push (width_of 32)) ^ U256.to_be_bytes w
 let asm parts = Code.of_string (String.concat "" parts)
 
-(* An outcome projected to comparable data: the kind of halt, the output bytes
-   and the gas left (which a failure does not have, so it reads as [-1] — a value
-   no successful halt can produce). Comparing projections needs no case analysis
-   across constructors. *)
+(* An outcome projected to comparable data: the kind of halt, the output bytes,
+   the gas left (which a failure does not have, so it reads as [-1] — a value no
+   successful halt can produce), and the effects it carries, if the constructor
+   has any. Comparing projections needs no case analysis across constructors.
+
+   The fourth component is not decoration. The expected values below all name
+   [effects = base_effects], and while this projection dropped the field those
+   were dead text: they READ like assertions, and every one of them would have
+   held with any effects whatever in the outcome. A dead expectation is worse
+   than an absent one, because it advertises a check that is not happening. So
+   the field is compared, and the twelve [check_outcome] cases now genuinely
+   assert that a program which touches no storage hands its effects back
+   untouched. *)
 let view = function
-  | Interpreter.Stopped { gas_left } -> ("stopped", "", Gas.remaining gas_left)
-  | Interpreter.Returned { output; gas_left } ->
-      ("returned", output, Gas.remaining gas_left)
+  | Interpreter.Stopped { gas_left; effects } ->
+      ("stopped", "", Gas.remaining gas_left, Some effects)
+  | Interpreter.Returned { output; gas_left; effects } ->
+      ("returned", output, Gas.remaining gas_left, Some effects)
   | Interpreter.Reverted { output; gas_left } ->
-      ("reverted", output, Gas.remaining gas_left)
-  | Interpreter.Failed error -> (Interpreter.error_to_string error, "", -1)
+      ("reverted", output, Gas.remaining gas_left, None)
+  | Interpreter.Failed error -> (Interpreter.error_to_string error, "", -1, None)
+
+(* Enough of an [Effects.t] to read a mismatch from the failure message. The
+   refund and the account count are the two components a stray write moves. *)
+let pp_effects ppf = function
+  | None -> Format.pp_print_string ppf "no effects"
+  | Some effects ->
+      Format.fprintf ppf "refund=%d accounts=%d"
+        (Refund.to_int (Effects.refund effects))
+        (List.length (World_state.accounts (Effects.world effects)))
 
 let pp_outcome ppf outcome =
-  let kind, output, gas_left = view outcome in
-  Format.fprintf ppf "%s [%s] gas=%d" kind
+  let kind, output, gas_left, effects = view outcome in
+  Format.fprintf ppf "%s [%s] gas=%d %a" kind
     (String.concat ""
        (List.init (String.length output) (fun i ->
             Printf.sprintf "%02x" (Char.code (String.get output i)))))
-    gas_left
+    gas_left pp_effects effects
 
 let outcome =
   Alcotest.testable pp_outcome (fun a b ->
-      let ka, oa, ga = view a and kb, ob, gb = view b in
-      String.equal ka kb && String.equal oa ob && Int.equal ga gb)
+      let ka, oa, ga, ea = view a and kb, ob, gb, eb = view b in
+      String.equal ka kb && String.equal oa ob && Int.equal ga gb
+      && Option.equal Effects.equal ea eb)
 
 let check_outcome msg expected actual = Alcotest.(check outcome) msg expected actual
 
@@ -143,21 +216,15 @@ let test_memory_words_needed () =
     (needed max_int 0);
   Alcotest.(check (option int)) "an unrepresentable extent is refused" None
     (needed max_int 1);
-  (* Rounding an extent up to whole words must not overflow. An extent within a
-     word of the representable limit still reports a huge POSITIVE count, which
-     the gas curve then prices beyond any allowance. A negative count would read
-     downstream as "no expansion needed" and hand out that memory for free. *)
+  (* Everything past [Memory.max_extent] is refused outright rather than priced.
+     These extents used to be admitted and left to the gas curve, which made them
+     payable up to roughly 1.55e12 bytes and let a copy drive the interpreter into
+     an allocation instead of an outcome. *)
   List.iter
     (fun (offset, length) ->
-      let w = needed offset length in
-      Alcotest.(check bool)
-        (Printf.sprintf "extent %d+%d rounds up positively" offset length)
-        true
-        (Option.fold ~none:false ~some:(fun w -> w > 0) w);
       Alcotest.(check (option int))
-        (Printf.sprintf "extent %d+%d costs more than any allowance" offset length)
-        None
-        (Option.bind w Gas.memory_cost))
+        (Printf.sprintf "extent %d+%d is past the bound" offset length)
+        None (needed offset length))
     [
       (max_int - 32, 32);
       (max_int - 40, 32);
@@ -165,7 +232,19 @@ let test_memory_words_needed () =
       (max_int - 1, 1);
       (0, max_int - 10);
       (0, max_int);
+      (Memory.max_extent, 1);
+      (1, Memory.max_extent);
+      (Memory.max_extent / 2, (Memory.max_extent / 2) + 1);
     ]
+  ;
+  (* The bound itself is reachable, and rounding an extent up to whole words at
+     the boundary must not overflow: a negative count would read downstream as
+     "no expansion needed" and hand out that memory for free. *)
+  Alcotest.(check (option int)) "the bound itself is admitted"
+    (Some (Memory.max_extent / 32))
+    (needed (Memory.max_extent - 32) 32);
+  Alcotest.(check bool) "an extent at the bound rounds up positively" true
+    (Option.fold ~none:false ~some:(fun w -> w > 0) (needed (Memory.max_extent - 1) 1))
 
 let test_memory_read_write () =
   let m = Memory.store_word Memory.empty 0 (u 0x1234) in
@@ -268,7 +347,8 @@ let test_code_bytes () =
 
 (* ---------- whole programs, with gas computed from the schedule ---------- *)
 
-let run code gas = Interpreter.run ~code ~gas:(gas_of gas)
+let run code gas =
+  Interpreter.run ~env:base_env ~code ~gas:(gas_of gas) ~effects:base_effects
 let word_output w = U256.to_be_bytes w
 
 (* Store the top of the stack at memory zero and return those 32 bytes: the
@@ -283,16 +363,16 @@ let test_program_add () =
   let code = asm ([ push1 2; push1 3; op Opcode.Add ] @ return_top) in
   let spent = 3 + 3 + 3 + return_top_cost in
   check_outcome "two and three make five"
-    (Interpreter.Returned { output = word_output (u 5); gas_left = gas_of (1_000 - spent) })
+    (Interpreter.Returned { effects = base_effects; output = word_output (u 5); gas_left = gas_of (1_000 - spent) })
     (run code 1_000)
 
 let test_program_empty () =
   check_outcome "empty code stops having spent nothing"
-    (Interpreter.Stopped { gas_left = gas_of 100 })
+    (Interpreter.Stopped { effects = base_effects; gas_left = gas_of 100 })
     (run (Code.of_string "") 100);
   (* Walking off the end of the code is the same halt as an explicit STOP. *)
   check_outcome "a program counter off the end stops"
-    (Interpreter.Stopped { gas_left = gas_of 97 })
+    (Interpreter.Stopped { effects = base_effects; gas_left = gas_of 97 })
     (run (asm [ push1 1 ]) 100)
 
 let test_program_memory_expansion () =
@@ -300,14 +380,14 @@ let test_program_memory_expansion () =
   let code = asm [ push1 0x00; push1 0x20; op Opcode.Mstore ] in
   let spent = 3 + 3 + (3 + 6) in
   check_outcome "a store at the second word pays for two"
-    (Interpreter.Stopped { gas_left = gas_of (1_000 - spent) })
+    (Interpreter.Stopped { effects = base_effects; gas_left = gas_of (1_000 - spent) })
     (run code 1_000);
   (* And a second store inside what is already paid for adds nothing. *)
   let twice =
     asm [ push1 0x00; push1 0x20; op Opcode.Mstore; push1 0x00; push1 0x00; op Opcode.Mstore ]
   in
   check_outcome "a store inside paid-for memory expands nothing"
-    (Interpreter.Stopped { gas_left = gas_of (1_000 - spent - 3 - 3 - 3) })
+    (Interpreter.Stopped { effects = base_effects; gas_left = gas_of (1_000 - spent - 3 - 3 - 3) })
     (run twice 1_000)
 
 let test_program_msize () =
@@ -320,7 +400,7 @@ let test_program_msize () =
      less the 3 it usually pays for that first word. *)
   let spent = 3 + 3 + (3 + 3) + 2 + (return_top_cost - 3) in
   check_outcome "msize rounds a partial word up"
-    (Interpreter.Returned { output = word_output (u 32); gas_left = gas_of (1_000 - spent) })
+    (Interpreter.Returned { effects = base_effects; output = word_output (u 32); gas_left = gas_of (1_000 - spent) })
     (run code 1_000)
 
 let test_program_pc () =
@@ -342,7 +422,7 @@ let test_program_pc () =
   let spent = 2 + 3 + (3 + 3) + 2 + 3 + (3 + 3) + 3 + 3 + 0 in
   check_outcome "pc is the offset of the pc instruction"
     (Interpreter.Returned
-       {
+       { effects = base_effects;
          output = word_output U256.zero ^ word_output (u 4);
          gas_left = gas_of (1_000 - spent);
        })
@@ -354,7 +434,7 @@ let test_program_gas () =
   let spent = 2 + return_top_cost in
   check_outcome "gas reports the balance after its own cost"
     (Interpreter.Returned
-       { output = word_output (u (1_000 - 2)); gas_left = gas_of (1_000 - spent) })
+       { effects = base_effects; output = word_output (u (1_000 - 2)); gas_left = gas_of (1_000 - spent) })
     (run code 1_000)
 
 let test_program_jump () =
@@ -370,7 +450,7 @@ let test_program_jump () =
       ]
   in
   check_outcome "a jump lands on the jumpdest and skips what is between"
-    (Interpreter.Stopped { gas_left = gas_of (1_000 - 3 - 8 - 1) })
+    (Interpreter.Stopped { effects = base_effects; gas_left = gas_of (1_000 - 3 - 8 - 1) })
     (run code 1_000)
 
 let test_program_jump_invalid () =
@@ -401,7 +481,7 @@ let test_program_jumpi () =
      impossible destination is not an error when the branch is not taken. *)
   let not_taken = asm [ push1 0x00; push1 0xff; op Opcode.Jumpi; op Opcode.Stop ] in
   check_outcome "a zero condition falls through and never checks the destination"
-    (Interpreter.Stopped { gas_left = gas_of (1_000 - 3 - 3 - 10) })
+    (Interpreter.Stopped { effects = base_effects; gas_left = gas_of (1_000 - 3 - 3 - 10) })
     (run not_taken 1_000);
   (* Any nonzero condition takes the branch — not only one. *)
   let taken =
@@ -417,7 +497,7 @@ let test_program_jumpi () =
       ]
   in
   check_outcome "any nonzero condition branches"
-    (Interpreter.Stopped { gas_left = gas_of (1_000 - 3 - 3 - 10 - 1) })
+    (Interpreter.Stopped { effects = base_effects; gas_left = gas_of (1_000 - 3 - 3 - 10 - 1) })
     (run taken 1_000);
   check_outcome "a taken branch to an invalid destination fails"
     (Interpreter.Failed Interpreter.Invalid_jump)
@@ -429,13 +509,13 @@ let test_program_push_immediate () =
   let code = asm ([ push2 0x01 0x00 ] @ return_top) in
   check_outcome "a two-byte immediate is big-endian in the low bytes"
     (Interpreter.Returned
-       { output = word_output (u 256); gas_left = gas_of (1_000 - 3 - return_top_cost) })
+       { effects = base_effects; output = word_output (u 256); gas_left = gas_of (1_000 - 3 - return_top_cost) })
     (run code 1_000);
   (* An immediate the code cuts short reads its missing bytes as zero and the
      program counter lands past the end, which halts. *)
   let truncated = Code.of_string (op (Opcode.Push (width_of 2)) ^ byte 0x01) in
   check_outcome "a truncated immediate is zero-extended and then stops"
-    (Interpreter.Stopped { gas_left = gas_of (1_000 - 3) })
+    (Interpreter.Stopped { effects = base_effects; gas_left = gas_of (1_000 - 3) })
     (run truncated 1_000)
 
 let test_program_mload () =
@@ -453,14 +533,14 @@ let test_program_mload () =
   let spent = 3 + 3 + (3 + 3) + 3 + 3 + 3 + (3 + 3) + 3 + 3 + 0 in
   check_outcome "a load reads back what was stored"
     (Interpreter.Returned
-       { output = word_output (u 0x42); gas_left = gas_of (1_000 - spent) })
+       { effects = base_effects; output = word_output (u 0x42); gas_left = gas_of (1_000 - spent) })
     (run code 1_000);
   (* A load of memory that was never written reads zero, and pays to reach it. *)
   let unwritten = asm ([ push1 0x00; op Opcode.Mload ] @ return_top) in
   let unwritten_spent = 3 + (3 + 3) + (return_top_cost - 3) in
   check_outcome "a load of untouched memory reads zero and pays for the word"
     (Interpreter.Returned
-       { output = word_output U256.zero; gas_left = gas_of (1_000 - unwritten_spent) })
+       { effects = base_effects; output = word_output U256.zero; gas_left = gas_of (1_000 - unwritten_spent) })
     (run unwritten 1_000)
 
 let test_program_unary_and_pop () =
@@ -468,12 +548,12 @@ let test_program_unary_and_pop () =
   let iszero = asm ([ push1 0x00; op Opcode.Iszero ] @ return_top) in
   check_outcome "iszero of zero is one"
     (Interpreter.Returned
-       { output = word_output U256.one; gas_left = gas_of (1_000 - 3 - 3 - return_top_cost) })
+       { effects = base_effects; output = word_output U256.one; gas_left = gas_of (1_000 - 3 - 3 - return_top_cost) })
     (run iszero 1_000);
   let complement = asm ([ push1 0x00; op Opcode.Not ] @ return_top) in
   check_outcome "not of zero is every bit set"
     (Interpreter.Returned
-       {
+       { effects = base_effects;
          output = word_output U256.max_value;
          gas_left = gas_of (1_000 - 3 - 3 - return_top_cost);
        })
@@ -482,7 +562,7 @@ let test_program_unary_and_pop () =
   let popped = asm ([ push1 0xaa; push1 0xbb; op Opcode.Pop ] @ return_top) in
   check_outcome "pop uncovers the word beneath"
     (Interpreter.Returned
-       {
+       { effects = base_effects;
          output = word_output (u 0xaa);
          gas_left = gas_of (1_000 - 3 - 3 - 2 - return_top_cost);
        })
@@ -491,37 +571,94 @@ let test_program_unary_and_pop () =
   let zero = asm ([ op Opcode.Push0 ] @ return_top) in
   check_outcome "push0 pushes zero"
     (Interpreter.Returned
-       { output = word_output U256.zero; gas_left = gas_of (1_000 - 2 - return_top_cost) })
+       { effects = base_effects; output = word_output U256.zero; gas_left = gas_of (1_000 - 2 - return_top_cost) })
     (run zero 1_000)
 
 let test_program_extent_at_the_limit () =
-  (* An offset near the top of the representable range must halt out of gas, not
-     quietly store for the price of the instruction alone. Rounding the extent up
-     to whole words used to wrap negative here, which read as "no expansion
-     needed": the store succeeded for 3 gas and MSIZE still reported zero. *)
+  (* An offset near the top of the representable range must halt, not quietly
+     store for the price of the instruction alone. Rounding the extent up to whole
+     words used to wrap negative here, which read as "no expansion needed": the
+     store succeeded for 3 gas and MSIZE still reported zero.
+
+     The halt is [Offset_too_large] and not [Out_of_gas] because these extents now
+     fail [Memory.words_needed]'s [Memory.max_extent] test before any price is
+     computed — the refusal does not consult the allowance at all. *)
   let near_limit = get (U256.of_int (max_int - 40)) in
   let storing = asm [ push1 0x00; push32 near_limit; op Opcode.Mstore ] in
-  check_outcome "a store at the representable limit cannot be paid for"
-    (Interpreter.Failed Interpreter.Out_of_gas)
+  check_outcome "a store at the representable limit is refused"
+    (Interpreter.Failed Interpreter.Offset_too_large)
     (run storing 1_000);
   let loading = asm [ push32 near_limit; op Opcode.Mload ] in
-  check_outcome "a load there cannot be paid for either"
-    (Interpreter.Failed Interpreter.Out_of_gas)
+  check_outcome "a load there is refused too"
+    (Interpreter.Failed Interpreter.Offset_too_large)
     (run loading 1_000);
   (* And the same for a length rather than an offset, which additionally used to
      reach the output slice and raise out of the interpreter. *)
   let returning =
     asm [ push32 (get (U256.of_int (max_int - 10))); push1 0x00; op Opcode.Return ]
   in
-  check_outcome "a return of a length at the limit cannot be paid for"
+  check_outcome "a return of a length at the limit is refused"
+    (Interpreter.Failed Interpreter.Offset_too_large)
+    (run returning 1_000);
+  (* The reproducer from the finding. A copy length below the old [max_int] guard
+     is payable, because the copy price is LINEAR — three per word — so no
+     allowance short of the extent bound stops it reaching the byte producer,
+     which then builds the string. [Memory.max_extent] is what refuses it now.
+
+     The whole copy family goes through the same [plan_copy] and the same [reach],
+     so all three are driven here rather than only the one the finding happened to
+     name. MCOPY additionally reads its source through [Memory.slice].
+
+     The wall clock is part of the assertion, and it is the only part that can
+     speak to the defect's actual symptom. Under the bug this program does not
+     produce a wrong answer to compare against — it attempts a 1.55-terabyte
+     allocation, so the suite hangs or dies rather than failing. The bound is
+     deliberately enormous: the correct answer takes microseconds, and anything
+     here measured in seconds is the bug. *)
+  let huge_length = get (U256.of_int 1_550_000_000_000) in
+  let unpayable_allowance = 4_582_405_380_957_031_300 in
+  let started = Sys.time () in
+  List.iter
+    (fun (name, opcode) ->
+      let copying =
+        asm [ push32 huge_length; op Opcode.Push0; op Opcode.Push0; op opcode; op Opcode.Stop ]
+      in
+      check_outcome
+        (name ^ ": a copy length no allowance can reach is refused, not allocated")
+        (Interpreter.Failed Interpreter.Offset_too_large)
+        (run copying unpayable_allowance))
+    [ ("CALLDATACOPY", Opcode.Calldatacopy); ("CODECOPY", Opcode.Codecopy);
+      ("MCOPY", Opcode.Mcopy) ];
+  Alcotest.(check bool) "and all three answer at once rather than allocating" true
+    (Sys.time () -. started < 5.0);
+  (* The same length as a RETURN, which reaches the output slice rather than the
+     copy path, and the same length as a plain expansion. *)
+  let returning_huge = asm [ push32 huge_length; op Opcode.Push0; op Opcode.Return ] in
+  check_outcome "a return of that length is refused too"
+    (Interpreter.Failed Interpreter.Offset_too_large)
+    (run returning_huge unpayable_allowance);
+  let storing_huge = asm [ op Opcode.Push0; push32 huge_length; op Opcode.Mstore ] in
+  check_outcome "and a store at that offset"
+    (Interpreter.Failed Interpreter.Offset_too_large)
+    (run storing_huge unpayable_allowance);
+  (* The bound is a bound and not a blanket refusal: an extent just inside it is
+     still admitted and still priced, so it fails for want of gas rather than on
+     the offset rule. This is what says [max_extent] did not simply break the
+     copy family. *)
+  let just_inside =
+    asm
+      [ push32 (get (U256.of_int (Memory.max_extent - 32)));
+        op Opcode.Push0; op Opcode.Push0; op Opcode.Calldatacopy; op Opcode.Stop ]
+  in
+  check_outcome "a length just inside the bound is priced, not refused"
     (Interpreter.Failed Interpreter.Out_of_gas)
-    (run returning 1_000)
+    (run just_inside 1_000_000)
 
 let test_program_dup_swap () =
   let dup = asm ([ push1 0xaa; push1 0xbb; op (Opcode.Dup (depth_of 2)) ] @ return_top) in
   check_outcome "dup2 brings the deeper word to the top"
     (Interpreter.Returned
-       {
+       { effects = base_effects;
          output = word_output (u 0xaa);
          gas_left = gas_of (1_000 - 3 - 3 - 3 - return_top_cost);
        })
@@ -529,7 +666,7 @@ let test_program_dup_swap () =
   let swap = asm ([ push1 0xaa; push1 0xbb; op (Opcode.Swap (depth_of 1)) ] @ return_top) in
   check_outcome "swap1 exchanges the top two"
     (Interpreter.Returned
-       {
+       { effects = base_effects;
          output = word_output (u 0xaa);
          gas_left = gas_of (1_000 - 3 - 3 - 3 - return_top_cost);
        })
@@ -543,7 +680,7 @@ let test_program_revert () =
   let spent = 3 + return_top_cost in
   check_outcome "return hands back the slice"
     (Interpreter.Returned
-       { output = word_output (u 0x42); gas_left = gas_of (1_000 - spent) })
+       { effects = base_effects; output = word_output (u 0x42); gas_left = gas_of (1_000 - spent) })
     (run code 1_000);
   (* A revert keeps both its output and its unspent gas. *)
   check_outcome "revert hands back the slice and keeps its gas"
@@ -557,7 +694,7 @@ let test_program_zero_length_return () =
      charged for expansion. *)
   let code = asm [ push1 0x00; push32 U256.max_value; op Opcode.Return ] in
   check_outcome "a zero-length return ignores an enormous offset"
-    (Interpreter.Returned { output = ""; gas_left = gas_of (1_000 - 3 - 3) })
+    (Interpreter.Returned { effects = base_effects; output = ""; gas_left = gas_of (1_000 - 3 - 3) })
     (run code 1_000);
   (* With a nonzero length that same offset cannot be paid for. *)
   let paying = asm [ push1 0x20; push32 U256.max_value; op Opcode.Return ] in
@@ -569,15 +706,15 @@ let test_program_exp_cost () =
   (* EXP pays ten plus fifty per byte of its exponent. *)
   let code = asm [ push2 0x01 0x00; push1 0x03; op Opcode.Exp ] in
   check_outcome "exp charges per byte of the exponent"
-    (Interpreter.Stopped { gas_left = gas_of (10_000 - 3 - 3 - (10 + 100)) })
+    (Interpreter.Stopped { effects = base_effects; gas_left = gas_of (10_000 - 3 - 3 - (10 + 100)) })
     (run code 10_000);
   let one_byte = asm [ push1 0xff; push1 0x03; op Opcode.Exp ] in
   check_outcome "a one-byte exponent costs fifty"
-    (Interpreter.Stopped { gas_left = gas_of (10_000 - 3 - 3 - (10 + 50)) })
+    (Interpreter.Stopped { effects = base_effects; gas_left = gas_of (10_000 - 3 - 3 - (10 + 50)) })
     (run one_byte 10_000);
   let zero = asm [ push1 0x00; push1 0x03; op Opcode.Exp ] in
   check_outcome "a zero exponent has no dynamic cost"
-    (Interpreter.Stopped { gas_left = gas_of (10_000 - 3 - 3 - 10) })
+    (Interpreter.Stopped { effects = base_effects; gas_left = gas_of (10_000 - 3 - 3 - 10) })
     (run zero 10_000)
 
 let test_program_out_of_gas () =
@@ -590,8 +727,11 @@ let test_program_out_of_gas () =
   check_outcome "an unbounded loop terminates out of gas"
     (Interpreter.Failed Interpreter.Out_of_gas)
     (run forever 10_000);
-  (* Memory too expensive to reach is the same halt. *)
-  let expensive = asm [ push1 0x00; push32 (U256.two_pow 32); op Opcode.Mstore ] in
+  (* Memory too expensive to reach is the same halt. The offset stays well inside
+     [Memory.max_extent] on purpose: past that the halt is [Offset_too_large], and
+     this case is about the gas curve refusing an extent it is willing to price.
+     Sixteen mebibytes costs some 538 million units. *)
+  let expensive = asm [ push1 0x00; push32 (U256.two_pow 24); op Opcode.Mstore ] in
   check_outcome "memory beyond the allowance halts out of gas"
     (Interpreter.Failed Interpreter.Out_of_gas)
     (run expensive 1_000)
@@ -607,7 +747,7 @@ let test_program_stack_errors () =
     (run overflowing 100_000);
   let exactly_full = asm (List.init Stack.limit (fun _ -> push1 0x00)) in
   check_outcome "exactly the limit is fine"
-    (Interpreter.Stopped { gas_left = gas_of (100_000 - (3 * Stack.limit)) })
+    (Interpreter.Stopped { effects = base_effects; gas_left = gas_of (100_000 - (3 * Stack.limit)) })
     (run exactly_full 100_000)
 
 let test_program_invalid_opcode () =
@@ -618,10 +758,15 @@ let test_program_invalid_opcode () =
     (Interpreter.Failed (Interpreter.Invalid_opcode 0xfe))
     (run (asm [ op Opcode.Invalid ]) 1_000);
   (* An opcode deferred to a later chunk is refused rather than silently doing
-     something else: 0x54 is SLOAD, which needs storage. *)
-  check_outcome "an opcode this chunk defers halts"
-    (Interpreter.Failed (Interpreter.Invalid_opcode 0x54))
-    (run (Code.of_string (byte 0x54)) 1_000)
+     something else. 0x54 (SLOAD) used to stand here and now decodes, which is
+     the whole point of the host seam; 0x20 is KECCAK256, deferred with the rest
+     of this port's crypto, and 0xf1 is CALL, which needs a second frame. *)
+  check_outcome "a deferred hash instruction halts"
+    (Interpreter.Failed (Interpreter.Invalid_opcode 0x20))
+    (run (Code.of_string (byte 0x20)) 1_000);
+  check_outcome "a deferred call instruction halts"
+    (Interpreter.Failed (Interpreter.Invalid_opcode 0xf1))
+    (run (Code.of_string (byte 0xf1)) 1_000)
 
 (* ---------- randomised properties ---------- *)
 
@@ -669,7 +814,16 @@ let test_opcode_roundtrip () =
 (* The dispatch loop terminates because every instruction that lets execution
    continue costs at least one unit of gas. That is a property of the schedule,
    so check it against the schedule: the only free instructions are the four that
-   halt. *)
+   halt — and [SSTORE].
+
+   [SSTORE]'s table entry is zero on purpose, exactly as revm leaves it
+   ([instructions.rs:201-203]), so that EIP-2200's sentry reads an allowance the
+   dispatch loop has not decremented. It is the one instruction whose decrease is
+   restored by its own body rather than by the loop: [Gas.sstore_entry] takes 100
+   before any path can continue. Listing it here as an exemption rather than
+   weakening the check keeps the hole visible and countable — one instruction,
+   named, with its guarantee written down. The property that the body really does
+   charge belongs to the host-seam suite, which runs [SSTORE] programs. *)
 let test_termination_invariant () =
   List.iter
     (fun b ->
@@ -680,10 +834,11 @@ let test_termination_invariant () =
             List.exists (Opcode.equal decoded)
               [ Opcode.Stop; Opcode.Return; Opcode.Revert; Opcode.Invalid ]
           in
+          let charges_in_its_body = Opcode.equal decoded Opcode.Sstore in
           Alcotest.(check bool)
             (Printf.sprintf "%s is free only if it halts" (Opcode.to_string decoded))
             true
-            ((not free) || halts))
+            ((not free) || halts || charges_in_its_body))
         (Opcode.decode b))
     (List.init 256 (fun i -> i))
 
@@ -809,7 +964,7 @@ let prop_cases =
     (* Whatever the bytecode, the machine halts and never invents gas. *)
     mk ~salt:24 ~count:400 "arbitrary bytecode halts without raising" arb_code (fun s ->
         let limit = 20_000 in
-        let _, _, gas_left = view (run (Code.of_string s) limit) in
+        let _, _, gas_left, _ = view (run (Code.of_string s) limit) in
         gas_left <= limit);
     (* The memory curve against an arbitrary-precision oracle that shares none of
        its code. This is what pins the .mli's claim that the native-int
@@ -873,11 +1028,12 @@ let prop_cases =
         let base = 20_000 in
         let extra = 777 in
         let lean = view (run code base) and rich = view (run code (base + extra)) in
-        let kind_lean, output_lean, gas_lean = lean in
-        let kind_rich, output_rich, gas_rich = rich in
+        let kind_lean, output_lean, gas_lean, effects_lean = lean in
+        let kind_rich, output_rich, gas_rich, effects_rich = rich in
         String.equal kind_lean (Interpreter.error_to_string Interpreter.Out_of_gas)
         || String.equal kind_lean kind_rich
            && String.equal output_lean output_rich
+           && Option.equal Effects.equal effects_lean effects_rich
            && (gas_lean < 0 || Int.equal gas_rich (gas_lean + extra)));
   ]
 

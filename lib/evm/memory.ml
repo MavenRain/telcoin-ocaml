@@ -14,13 +14,24 @@ let empty = { words = 0; bytes = Bytes_map.empty }
 let words t = t.words
 let size_bytes t = t.words * word_size
 
+(* Four gibibytes. The derivation is in the interface; the short version is that
+   a memory this large costs 35_184_774_742_016 gas, about a million times a
+   block's whole limit, so nothing payable is refused. *)
+let max_extent = 0x1_0000_0000
+
 (* Rounding up to whole words, guarding the one addition that can leave the
-   representable range. Native [int] is 63-bit, so an offset past [max_int] can
-   only be produced by a word so large that the memory reaching it costs more
-   gas than any allowance could hold. *)
+   representable range and, more tightly, holding the extent to [max_extent].
+   The tighter test subsumes the looser one — [max_extent] is far below [max_int]
+   — so [offset + length] below cannot overflow. [length < 0] is tested first so
+   that [max_extent - length] is never formed for a length that would wrap it.
+
+   The bound is not the gas schedule's: gas alone leaves extents up to some
+   1.55e12 bytes payable, and reaching one drives [slice] and [Data.read] into an
+   allocation the host may or may not survive. Refusing here is what keeps
+   [Interpreter.run] total on every input rather than on every affordable one. *)
 let words_needed ~offset ~length =
   if length = 0 then Some 0
-  else if offset < 0 || length < 0 || offset > max_int - length then None
+  else if offset < 0 || length < 0 || offset > max_extent - length then None
   else
     (* Round up by dividing first and counting the partial word separately. The
        familiar [(extent + word_size - 1) / word_size] would add 31 to a sum
@@ -60,6 +71,17 @@ let store_word t offset w =
     (List.init word_size (fun i -> i))
 
 let store_byte t offset n = set_byte t offset (Char.chr (n land 0xff))
+
+(* Folding [store_byte] over the source is what keeps the zero-byte-removes-the-
+   key rule in one place: a bulk write that stored zeroes would break canonicity,
+   and copying zeroes over written memory is the common case, not a corner. The
+   fold carries the destination index alongside the memory so no intermediate
+   list of offsets is built. *)
+let store_bytes t ~offset source =
+  fst
+    (String.fold_left
+       (fun (t, i) c -> (store_byte t (offset + i) (Char.code c), i + 1))
+       (t, 0) source)
 let slice t ~offset ~length = String.init length (fun i -> byte t (offset + i))
 
 let equal a b =

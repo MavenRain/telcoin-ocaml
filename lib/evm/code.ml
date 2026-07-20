@@ -1,6 +1,10 @@
 module Offsets = Set.Make (Int)
 
-type t = { code : string; jumpdests : Offsets.t }
+(* The window is the same bytes seen through {!Data}'s zero-extension rule. It is
+   built once here rather than on demand because [CODECOPY] inside a loop would
+   otherwise pay to rebuild it on every iteration, and because holding it makes
+   the sharing with [CALLDATACOPY] structural rather than a convention. *)
+type t = { code : string; jumpdests : Offsets.t; window : Data.t }
 
 let length t = String.length t.code
 
@@ -35,6 +39,9 @@ let rec analyse code offset found =
     analyse code (offset + stride byte)
       (if is_jumpdest byte then Offsets.add offset found else found)
 
-let of_string code = { code; jumpdests = analyse code 0 Offsets.empty }
+let of_string code =
+  { code; jumpdests = analyse code 0 Offsets.empty; window = Data.of_string code }
+
+let window t = t.window
 let is_valid_jumpdest t offset = Offsets.mem offset t.jumpdests
 let jumpdests t = Offsets.elements t.jumpdests
