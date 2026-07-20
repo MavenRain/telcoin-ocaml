@@ -1,4 +1,4 @@
 (library
  (name tn_state)
  (public_name telcoin_ocaml.state)
- (libraries tn_types))
+ (libraries tn_types tn_keccak))

@@ -760,13 +760,14 @@ let test_program_invalid_opcode () =
     (Interpreter.Failed (Interpreter.Invalid_opcode 0xfe))
     (run (asm [ op Opcode.Invalid ]) 1_000);
   (* An opcode deferred to a later chunk is refused rather than silently doing
-     something else. Two have now graduated: 0x54 (SLOAD) with the host seam and
-     0x20 (KECCAK256) with the hash, and each stood exactly here before it did.
-     0x3f is EXTCODEHASH, which needs code on an account and so arrives with
-     CREATE, and 0xf1 is CALL, which needs a second frame. *)
-  check_outcome "a deferred external-code instruction halts"
-    (Interpreter.Failed (Interpreter.Invalid_opcode 0x3f))
-    (run (Code.of_string (byte 0x3f)) 1_000);
+     something else. Several have now graduated, and each stood exactly here
+     before it did: 0x54 (SLOAD) with the host seam, 0x20 (KECCAK256) with the
+     hash, and 0x3b, 0x3c and 0x3f (the external-code readers) once code landed
+     on an account. 0x3d is RETURNDATASIZE, which needs a return-data buffer only
+     a completed CALL fills, and 0xf1 is CALL, which needs a second frame. *)
+  check_outcome "a deferred return-data instruction halts"
+    (Interpreter.Failed (Interpreter.Invalid_opcode 0x3d))
+    (run (Code.of_string (byte 0x3d)) 1_000);
   check_outcome "a deferred call instruction halts"
     (Interpreter.Failed (Interpreter.Invalid_opcode 0xf1))
     (run (Code.of_string (byte 0xf1)) 1_000)

@@ -37,12 +37,14 @@
     and the refusal is an argument they demand rather than a branch each one has
     to remember. That guarded set is exactly the one {!Mutability} names.
 
-    What is still absent needs a {e second frame} or a piece of state this port
-    has not built: [CALL] and its relatives, [CREATE], [EXTCODE*] and
-    [EXTCODEHASH] (which want code on an account), [RETURNDATA*], [BLOCKHASH],
-    [SELFDESTRUCT] and the blob instructions. Each remains a code byte that
-    simply fails to decode, so a program using one halts rather than silently
-    doing the wrong thing. See {!Opcode}.
+    The external-code readers [EXTCODESIZE], [EXTCODECOPY] and [EXTCODEHASH]
+    joined this set as of this chunk: code now lives on an account, which is all
+    they wanted, and none of them opens a second frame. What is still absent
+    needs a {e second frame} or a piece of state this port has not built: [CALL]
+    and its relatives, [CREATE], [RETURNDATA*], [BLOCKHASH], [SELFDESTRUCT] and
+    the blob instructions. Each remains a code byte that simply fails to decode,
+    so a program using one halts rather than silently doing the wrong thing. See
+    {!Opcode}.
 
     {2 Termination}
 

@@ -62,6 +62,18 @@ let balance t address =
   let touched, access = Access.touch_account t.access address in
   read t ~touched ~access ~value:(World_state.balance t.world address)
 
+(* The whole account, warmed like [balance] but handed back entire, because the
+   three readers that want it each want a different projection of it: its code
+   length, its EIP-1052 code hash, its code bytes. Deriving those here would
+   split what is one account access at revm's [berlin_load_account!] into three
+   near-copies; deriving them at the instruction keeps the touch one fact. The
+   warmth is the same account touch [balance] records, so a [BALANCE] then an
+   [EXTCODESIZE] of one address is warm the second time, and either after the
+   other is too. *)
+let ext_account t address =
+  let touched, access = Access.touch_account t.access address in
+  read t ~touched ~access ~value:(World_state.account t.world address)
+
 (* No witness escapes: the touch's [warmth] is dropped here, on purpose, so that
    there is nothing for a caller to hand to [Gas.account_access_cost]. The set
    still grows, because revm's [Host::balance] loads the account through the

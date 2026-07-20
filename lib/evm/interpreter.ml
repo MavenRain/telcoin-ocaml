@@ -1,5 +1,6 @@
 module W = Tn_state.U256
 module Address_word = Tn_state.Address_word
+module Account = Tn_state.Account
 
 type error =
   | Out_of_gas
@@ -437,6 +438,104 @@ let permitted env =
 let word_of_digest digest =
   Option.value ~default:W.zero (W.of_be_bytes (Tn_keccak.to_bytes digest))
 
+(* ---------- the external-code readers ---------- *)
+
+(* [EXTCODESIZE] and [EXTCODEHASH] share [BALANCE]'s shape — warm the named
+   account, charge the EIP-2929 surcharge that same touch's warmth prices, push a
+   word — but for the word: [BALANCE] pushes the value loaded, these push a
+   function of the account loaded (its code length, or its EIP-1052 code hash).
+   So [load_and_charge]'s direct push does not fit, and this projects the account
+   first. The surcharge is [account_access_cost], exactly [BALANCE]'s. *)
+let account_projection ~project ~load m =
+  Option.fold ~none:(Error Out_of_gas)
+    ~some:(fun gas ->
+      Result.map
+        (fun stack ->
+          { m with pc = m.pc + 1; stack; gas; effects = Effects.warmed load })
+        (stack_result (Stack.push (project (Effects.loaded load)) m.stack)))
+    (Gas.charge (Gas.account_access_cost (Effects.warmth load)) m.gas)
+
+let extcodesize m =
+  transition
+    (Result.bind (stack_result (Stack.pop m.stack)) (fun (word, stack) ->
+         account_projection
+           ~project:(fun account -> word_of_int (Account.code_length account))
+           ~load:(Effects.ext_account m.effects (Address_word.of_word word))
+           { m with stack }))
+
+(* EIP-1052 ([instructions/host.rs:77-104]) and its one subtlety: an account that
+   is [is_empty] — EIP-161's zero nonce, zero balance and no code — has a code
+   hash of ZERO, and this is NOT [KECCAK_EMPTY]. A codeless account that
+   nonetheless exists, one with a balance say, is not [is_empty], so it reports
+   its real code hash, which for empty code IS [KECCAK_EMPTY]. Only an account
+   that does not exist reports zero. That zero is a bare word produced here, never
+   a digest, so it can never be confused with the [KECCAK_EMPTY] of a real
+   codeless account — the distinction {!Tn_keccak} has no constructor to blur. *)
+let extcodehash m =
+  transition
+    (Result.bind (stack_result (Stack.pop m.stack)) (fun (word, stack) ->
+         account_projection
+           ~project:(fun account ->
+             if Account.is_empty account then W.zero
+             else word_of_digest (Account.code_hash account))
+           ~load:(Effects.ext_account m.effects (Address_word.of_word word))
+           { m with stack }))
+
+(* Warm the target account and charge its EIP-2929 surcharge, returning the
+   loaded account (its code is [EXTCODECOPY]'s source) alongside the machine that
+   has paid. Charged AFTER whatever the copy prologue and any expansion took,
+   because revm's [berlin_load_account!] ([instructions/host.rs:140-141]) sits
+   after both the copy [gas!] and the resize — and it runs even for a zero
+   length, so the caller pays this on the empty copy too. *)
+let charge_ext_account machine address =
+  let load = Effects.ext_account machine.effects address in
+  Option.fold ~none:(Error Out_of_gas)
+    ~some:(fun gas ->
+      Ok (Effects.loaded load, { machine with gas; effects = Effects.warmed load }))
+    (Gas.charge (Gas.account_access_cost (Effects.warmth load)) machine.gas)
+
+(* [EXTCODECOPY] ([instructions/host.rs:106-158]). The copy family with two
+   differences from [CODECOPY]: the source is ANOTHER account's code, reached
+   through the host seam so the read warms it, and the account surcharge falls
+   after the copy price and the expansion rather than not at all. The address is
+   the first word popped, above the three the copy prologue takes. revm's order:
+
+     base 100 (dispatch) -> copy price -> expansion (only if len>0)
+       -> account 2500-if-cold -> write.
+
+   The account is warmed and its surcharge paid EVEN for a zero length, where the
+   frame-local copies do nothing: [berlin_load_account!] is after the
+   [if len != 0] resize, so a zero-length [EXTCODECOPY] still warms and still pays
+   the cold surcharge. That is why [Copy_nothing] here charges the account rather
+   than continuing at once. *)
+let extcodecopy m =
+  Result.fold ~ok:Fun.id
+    ~error:(fun e -> Halt (Failed e))
+    (Result.bind (stack_result (Stack.pop m.stack)) (fun (address_word, stack) ->
+         let address = Address_word.of_word address_word in
+         match plan_copy { m with stack } with
+         | Copy_failed error -> Error error
+         | Copy_nothing machine ->
+             Result.map
+               (fun (_account, machine) ->
+                 Continue { machine with pc = machine.pc + 1 })
+               (charge_ext_account machine address)
+         | Copy_to { machine; dest; source; length } ->
+             Result.bind (reach machine ~offset:dest ~length) (fun (memory, gas) ->
+                 Result.map
+                   (fun (account, machine) ->
+                     Continue
+                       {
+                         machine with
+                         pc = machine.pc + 1;
+                         memory =
+                           Memory.store_bytes machine.memory ~offset:dest
+                             (Data.read
+                                (Data.of_string (Account.code account))
+                                ~offset:source ~length);
+                       })
+                   (charge_ext_account { machine with gas; memory } address))))
+
 (* [KECCAK256] ([instructions/system.rs:14-34]). The static 30 is the table's;
    the six per word is charged inside [reach_data], before the zero-length
    branch, which is where revm charges it.
@@ -673,6 +772,11 @@ let execute env code m = function
      padded bytecode does. *)
   | Opcode.Codesize -> env_word (fun _env -> word_of_int (Code.length code)) env m
   | Opcode.Codecopy -> copy_from_data (Code.window code) m
+  (* The external-code readers name their account by a popped word, not the
+     environment, so like [BALANCE] they take no [env]. *)
+  | Opcode.Extcodesize -> extcodesize m
+  | Opcode.Extcodecopy -> extcodecopy m
+  | Opcode.Extcodehash -> extcodehash m
   | Opcode.Selfbalance -> selfbalance env m
   (* The transaction. [ORIGIN] is the signer, never the immediate caller; they
      coincide only in the top-level frame. *)

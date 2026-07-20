@@ -303,16 +303,32 @@ are noted.
     are popped *after* the gas charge and after the memory expansion, so a
     doomed `LOG4` reports `Out_of_gas` and not `Stack_underflow`. Hoisting the
     pop is invisible on every program except that one
+22. ✅ code on an account and the external-code readers (`tn_state` + `tn_evm`) —
+    a `Bytecode.t` field on `Account`, and the three instructions that reading it
+    makes expressible without a second frame: `EXTCODESIZE` (`0x3b`),
+    `EXTCODECOPY` (`0x3c`) and `EXTCODEHASH` (`0x3f`). Code needed a home before
+    the calls could run a callee's own code; this is that home, landed on its own
+    so the migration is reviewable apart from the recursion it unblocks. Two
+    things it makes unrepresentable. **A code hash that pretends to be a digest**:
+    `Tn_keccak` has no constructor but `digest`, so EIP-1052's zero for an account
+    that does not exist is a bare word the interpreter produces and never a
+    `Tn_keccak.t` — which keeps it distinct from the `KECCAK_EMPTY` a codeless
+    *but existing* account really hashes to, the one distinction the opcode turns
+    on. **A hash out of step with its code**: it is derived (`Bytecode.hash`),
+    never stored, so there is no invariant to break. The chunk's own trap, pinned
+    by absolute gas: `EXTCODECOPY` warms its account and pays the cold surcharge
+    *even for a zero-length copy* — revm's account load sits after the resize
+    guard — so a zero-length `EXTCODECOPY` of a cold account is 2500 gas dearer
+    than of a warm one, where the frame-local copies would have done nothing at all
 
-**Still planned.** Now buildable on what is already here: contract code on an
-account and its `EXTCODESIZE`/`EXTCODECOPY` readers, the calls (`CALL`,
+**Still planned.** Now buildable on what is already here: the calls (`CALL`,
 `CALLCODE`, `DELEGATECALL`, `STATICCALL`) with the call depth and return-data
 buffer `Env` deliberately omits, `RETURNDATASIZE`/`RETURNDATACOPY`,
 `SELFDESTRUCT` (whose `World_state.remove_account` already exists, unused), and
 the blob instructions. The static-call flag itself now exists, as
-`Env.Call.mutability`, because the three writes it governs are here. Blocked on
-code rather than on crypto: `EXTCODEHASH` and contract creation
-(`CREATE`/`CREATE2`, whose addresses are keccak-derived). Blocked on the trie:
+`Env.Call.mutability`, because the three writes it governs are here. Blocked on a
+second frame: contract creation (`CREATE`/`CREATE2`, whose keccak-derived
+addresses and code deposit are what will let a run deploy code at last). Blocked on the trie:
 the state root and storage root that would replace content equality as the
 agreement check.
 Blocked on the block-execution layer: `BLOCKHASH`, which reads a history of

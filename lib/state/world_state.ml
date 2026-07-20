@@ -18,11 +18,12 @@ let set_account t addr acct =
 
 let remove_account t addr = Addr_map.remove addr t
 
-(* [Account.make] installs empty storage, so this is lossy for any genesis
-   account that specifies slots: Rust's [GenesisAccount] carries a storage map
-   this argument type cannot even name. Nothing passes storage at genesis yet,
-   so nothing is dropped today; expressing one means widening the argument to an
-   [Account.t], not patching slots in afterwards. See the .mli. *)
+(* [Account.make] installs empty storage and no code, so this is lossy for any
+   genesis account that specifies either: Rust's [GenesisAccount] carries a
+   storage map and code this argument type cannot even name. Nothing passes
+   storage or code at genesis yet, so nothing is dropped today; expressing one
+   means widening the argument to an [Account.t], not patching slots or code in
+   afterwards. See the .mli. *)
 let of_alloc allocs =
   List.fold_left
     (fun t (addr, balance) ->

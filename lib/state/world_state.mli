@@ -32,11 +32,14 @@ val of_alloc : (Units.Address.t * U256.t) list -> t
     a zero allocation stores no entry.
 
     That restriction is a real gap, not a simplification. Reth's
-    [GenesisAccount] carries a storage map and a nonce alongside the balance (and
-    code, which no account in this port models yet), and a pair of address and
-    balance can express none of it: an allocation with pre-populated storage
-    would be funded here at {!Account.empty}'s storage and its slots silently
-    lost. Nothing in this port passes storage at genesis, so nothing is lost
+    [GenesisAccount] carries a storage map, a nonce and code alongside the
+    balance, and a pair of address and balance can express none of it: an
+    allocation with pre-populated storage or code would be funded here at
+    {!Account.empty}'s storage and code and those silently lost. Code exists on
+    an account as of this chunk, so a genesis seeding a pre-deployed contract
+    meanwhile goes through {!set_account} with {!Account.with_code}, which the
+    external-code readers already read. Nothing in this port passes storage at
+    genesis, so nothing is lost
     today — but a chain whose genesis pre-populates storage, such as a
     pre-deployed system contract with a seeded configuration slot, needs this
     constructor widened to take an {!Account.t} (or the fields of a
@@ -92,5 +95,5 @@ val accounts : t -> (Units.Address.t * Account.t) list
 
 val equal : t -> t -> bool
 (** Exact content equality — still sound now that accounts carry storage,
-    because {!Storage.t} is canonical on its own and {!Account.is_absent} covers
-    every field {!Account.equal} compares. *)
+    and code, because {!Storage.t} and {!Bytecode.t} are each canonical on their
+    own and {!Account.is_absent} covers every field {!Account.equal} compares. *)

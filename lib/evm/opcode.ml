@@ -65,6 +65,9 @@ type t =
   | Calldatacopy
   | Codesize
   | Codecopy
+  | Extcodesize
+  | Extcodecopy
+  | Extcodehash
   | Gasprice
   | Coinbase
   | Timestamp
@@ -126,6 +129,9 @@ let to_byte = function
   | Calldatacopy -> 0x37
   | Codesize -> 0x38
   | Codecopy -> 0x39
+  | Extcodesize -> 0x3b
+  | Extcodecopy -> 0x3c
+  | Extcodehash -> 0x3f
   | Gasprice -> 0x3a
   | Coinbase -> 0x41
   | Timestamp -> 0x42
@@ -206,6 +212,9 @@ let decode byte =
   | 0x38 -> Some Codesize
   | 0x39 -> Some Codecopy
   | 0x3a -> Some Gasprice
+  | 0x3b -> Some Extcodesize
+  | 0x3c -> Some Extcodecopy
+  | 0x3f -> Some Extcodehash
   | 0x41 -> Some Coinbase
   | 0x42 -> Some Timestamp
   | 0x43 -> Some Number
@@ -255,7 +264,8 @@ let immediate_bytes = function
   | Shl | Shr | Sar | Pop | Mload | Mstore | Mstore8 | Jump | Jumpi | Pc | Msize
   | Gas | Jumpdest | Push0 | Dup _ | Swap _ | Return | Revert | Invalid | Address
   | Balance | Origin | Caller | Callvalue | Calldataload | Calldatasize
-  | Calldatacopy | Codesize | Codecopy | Gasprice | Coinbase | Timestamp | Number
+  | Calldatacopy | Codesize | Codecopy | Extcodesize | Extcodecopy | Extcodehash
+  | Gasprice | Coinbase | Timestamp | Number
   | Prevrandao | Gaslimit | Chainid | Selfbalance | Basefee | Sload | Sstore
   | Mcopy | Keccak256 | Tload | Tstore | Log _ ->
       0
@@ -318,6 +328,9 @@ let to_string = function
   | Calldatacopy -> "CALLDATACOPY"
   | Codesize -> "CODESIZE"
   | Codecopy -> "CODECOPY"
+  | Extcodesize -> "EXTCODESIZE"
+  | Extcodecopy -> "EXTCODECOPY"
+  | Extcodehash -> "EXTCODEHASH"
   | Gasprice -> "GASPRICE"
   | Coinbase -> "COINBASE"
   | Timestamp -> "TIMESTAMP"

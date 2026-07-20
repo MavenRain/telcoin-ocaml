@@ -8,11 +8,13 @@
     write account storage, and — since the hash landed — [KECCAK256], the logs
     and EIP-1153 transient storage.
 
-    What remains absent is what needs a {e second} frame or a piece of state
-    this port has not built: the external-code readers and [EXTCODEHASH] (which
-    need code on an account, and so arrive with [CREATE]), the return-data
-    readers, [BLOCKHASH], the blob instructions, the calls, the creations and
-    [SELFDESTRUCT]. A code byte naming one of them decodes to [None] exactly as
+    The external-code readers — [EXTCODESIZE], [EXTCODECOPY] and [EXTCODEHASH] —
+    are in as of this chunk: code now lives on an account, which is all they
+    needed, and none of them opens a second frame. What remains absent is what
+    needs a {e second} frame or a piece of state this port has not built: the
+    return-data readers, [BLOCKHASH], the blob instructions, the calls, the
+    creations and [SELFDESTRUCT]. A code byte naming one of them decodes to
+    [None] exactly as
     an unassigned byte does, and the interpreter halts on it. That is a
     {e temporary} divergence from a full node, and the only one: within this
     subset the byte values, immediate sizes and semantics are those of the real
@@ -99,6 +101,19 @@ type t =
   | Calldatacopy
   | Codesize
   | Codecopy
+  | Extcodesize
+      (** [0x3b]. The size of {e another} account's code, unlike [CODESIZE]'s
+          own-frame reading. It warms the account (EIP-2929) and pushes the
+          length, zero for an account with no code or no entry. *)
+  | Extcodecopy
+      (** [0x3c]. Copies another account's code into memory, through the same
+          zero-extension rule as [CODECOPY], and warms the account. Its account
+          surcharge falls {e after} the copy price and the expansion, and is
+          paid even for a zero length. *)
+  | Extcodehash
+      (** [0x3f]. EIP-1052: the Keccak-256 of another account's code, or zero for
+          an account that is empty (EIP-161) or absent. A codeless account that
+          nonetheless exists hashes to [KECCAK_EMPTY], not zero. *)
   | Gasprice
   | Coinbase
   | Timestamp

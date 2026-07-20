@@ -111,10 +111,13 @@ val storage_access_cost : Access.warmth -> int
     Do not "restore" the branch. *)
 
 val account_access_cost : Access.warmth -> int
-(** [BALANCE]'s cold surcharge on top of the 100 already charged: 2500 cold,
-    nothing warm — 2600 and 100 in total. 2500 is
-    [COLD_ACCOUNT_ACCESS_COST_ADDITIONAL], [2600 - 100]
-    ([revm-context-interface] [cfg/gas.rs:97-98], wired at
+(** The cold surcharge on an account touch, on top of the 100 already charged:
+    2500 cold, nothing warm — 2600 and 100 in total. Shared by [BALANCE] and by
+    the three external-code readers [EXTCODESIZE], [EXTCODEHASH] and
+    [EXTCODECOPY], each of which takes the same warm 100 base and reaches its
+    account through revm's [berlin_load_account!], whose only charge is this
+    additional cold cost. 2500 is [COLD_ACCOUNT_ACCESS_COST_ADDITIONAL],
+    [2600 - 100] ([revm-context-interface] [cfg/gas.rs:97-98], wired at
     [cfg/gas_params.rs:270-271], charged at [revm-interpreter]
     [instructions/macros.rs:54-62]). *)
 

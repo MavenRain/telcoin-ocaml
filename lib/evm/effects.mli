@@ -102,6 +102,16 @@ val balance : t -> Units.Address.t -> Tn_state.U256.t load
 (** [BALANCE]: read an account's balance and warm the account. Total — an
     account with no entry reads zero. *)
 
+val ext_account : t -> Units.Address.t -> Tn_state.Account.t load
+(** The external-code readers' lookup: read a whole account and warm it, exactly
+    the account touch {!balance} performs. Total — an address with no entry reads
+    {!Tn_state.Account.empty}, whose code is empty, whose {!Tn_state.Account.code_length}
+    is zero and which is {!Tn_state.Account.is_empty}. It hands back the account
+    rather than a projection of it because [EXTCODESIZE], [EXTCODEHASH] and
+    [EXTCODECOPY] each read a different one, and splitting the single access into
+    three would be three chances to warm on a different footing. The interpreter
+    takes the length, the EIP-1052 hash or the code from what this returns. *)
+
 val self_balance : t -> Units.Address.t -> Tn_state.U256.t * t
 (** [SELFBALANCE]: read the executing account's balance for a flat 5
     ([revm-interpreter] [instructions.rs:191]) with no cold surcharge, ever

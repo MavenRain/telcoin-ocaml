@@ -75,6 +75,13 @@ let static_cost = function
      and [SLOAD] used to cost into the cold surcharge, leaving the warm 100 here
      ([instructions.rs:118-119]). *)
   | Opcode.Balance | Opcode.Sload -> warm_storage_read
+  (* The external-code readers take the same Berlin base as [BALANCE]: their warm
+     100, with the cold surcharge in the body ([instructions.rs:120-122] sets all
+     three to [WARM_STORAGE_READ_COST] under Berlin). [EXTCODECOPY] pays its copy
+     price and expansion on top, and every one of the three pays the account
+     surcharge {!account_access_cost} prices. *)
+  | Opcode.Extcodesize | Opcode.Extcodehash | Opcode.Extcodecopy ->
+      warm_storage_read
   (* EIP-1153 gives both a flat warm-read price and no cold axis at all
      ([instructions.rs:210-211] writes the 100 as a literal). *)
   | Opcode.Tload | Opcode.Tstore -> warm_storage_read
