@@ -15,9 +15,10 @@
     identity function, which is what makes an [SSTORE] no-op invisible in the
     state as well as free of refund.
 
-    The storage root — the trie hash committing this map — needs the state trie,
-    RLP and keccak this port defers with the rest of its crypto. Agreement is
-    checked here by direct content equality, exactly as {!World_state} does. *)
+    The storage root — the trie hash committing this map — needs the state trie
+    and RLP, which this port still defers; keccak itself now exists, in
+    {!Tn_keccak}. Agreement is checked here by direct content equality, exactly
+    as {!World_state} does. *)
 
 type t
 

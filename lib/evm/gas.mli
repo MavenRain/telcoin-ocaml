@@ -136,6 +136,31 @@ val copy_cost : int -> int
     count is at most [max_int / 32], so three times it is representable. This is
     unlike {!memory_cost}, whose quadratic term genuinely can leave the range. *)
 
+val keccak_word_cost : int -> int
+(** Six units per thirty-two-byte word of input to [KECCAK256], rounded up
+    ([revm-context-interface] [cfg/gas.rs:52], [KECCAK256WORD = 6]), charged on
+    top of the instruction's static 30 and on top of the memory expansion its
+    window forces.
+
+    Six, not three. This shares the {e rounding rule} with {!copy_cost} and
+    nothing else: there are three word prices in this schedule — the expansion
+    curve's linear term (3), the copy family (3) and this one (6) — the first
+    two coincide and the third does not, and a hashing instruction pays this one
+    and the expansion. Cannot overflow, for {!copy_cost}'s reason with six in
+    place of three. *)
+
+val log_dynamic_cost : topics:Topic_count.t -> length:int -> int option
+(** A log's dynamic half: [375] per topic plus [8] per byte of data
+    ([cfg/gas.rs:44,46,48]), on top of the flat [375] every [LOG] pays through
+    {!static_cost}. So a [LOG2] over 32 bytes of data costs
+    [375 + 750 + 256 = 1381] in all, plus whatever expansion its window forces.
+
+    Per {e byte}, not per word: this is the one dynamic price in the schedule
+    applied to a raw length rather than to a word count, which is why it is the
+    one that has to be checked. [None] means the true price exceeds [max_int],
+    and since no allowance can reach that, treating it as out of gas is exact
+    rather than conservative. *)
+
 type sstore_entry_error =
   | Reentrancy_sentry
       (** The allowance is at or below {!call_stipend}. EIP-2200 refuses the

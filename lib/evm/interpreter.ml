@@ -9,6 +9,7 @@ type error =
   | Invalid_opcode of int
   | Offset_too_large
   | Reentrancy_sentry
+  | Static_state_change
 
 let error_to_string = function
   | Out_of_gas -> "out of gas"
@@ -18,6 +19,7 @@ let error_to_string = function
   | Invalid_opcode byte -> Printf.sprintf "invalid opcode 0x%02x" byte
   | Offset_too_large -> "memory offset or length too large"
   | Reentrancy_sentry -> "storage write refused on a call stipend"
+  | Static_state_change -> "state change in a static frame"
 
 type outcome =
   | Stopped of { gas_left : Gas.t; effects : Effects.t }
@@ -207,22 +209,55 @@ let push_immediate code width m =
        (fun stack -> { m with stack; pc = m.pc + 1 + width })
        (stack_result (Stack.push value m.stack)))
 
-(* [RETURN] and [REVERT] hand back a slice of memory, paying for whatever of it
-   the frame had not already reached. A zero-length output touches no memory, so
-   its offset is never even examined — an enormous offset with a zero length is a
-   perfectly good empty return. *)
+let charged cost gas =
+  Option.fold ~none:(Error Out_of_gas) ~some:(fun gas -> Ok gas) (Gas.charge cost gas)
+
+(* Read the window [offset .. offset + length) as bytes, in the exact order revm
+   reads one. Four instructions want it: [RETURN] and [REVERT] hand it back,
+   [KECCAK256] hashes it and [LOG] journals it, and all four are written from
+   this one function so the order below is one fact rather than four copies.
+
+   The order is the whole content, and every step of it is observable through
+   which error a failing program reports:
+
+   1. Convert the LENGTH. A length no native integer can hold is
+      [Offset_too_large] before anything is charged or read.
+   2. Charge [price] — the caller's dynamic half, which is nothing for a return,
+      six per word for a hash and 375-per-topic-plus-8-per-byte for a log. This
+      happens BEFORE the zero-length branch and before any expansion, so a frame
+      that cannot afford the dynamic price reports [Out_of_gas] having never
+      looked at the offset.
+   3. Zero length short-circuits with the empty string. The offset is NEVER
+      converted and memory is NOT expanded, so an enormous offset with a zero
+      length succeeds. This is not a convenience: revm's [len == 0] arm returns
+      before its [as_usize_or_fail!] on the offset, so a program that returns
+      zero bytes from [2^255] is valid there and must be valid here.
+   4. Only then convert the offset and pay the expansion.
+
+   Note what is deliberately NOT here: popping the operands. [KECCAK256] takes
+   its two from the stack while [LOG] takes two and then more afterwards, and
+   folding the pops in would have forced a shape that could not express the
+   second. *)
+let reach_data m ~offset_word ~length_word ~price =
+  Result.bind (extent_of_word length_word) (fun length ->
+      Result.bind (price length m.gas) (fun gas ->
+          if length = 0 then Ok ("", m.memory, gas)
+          else
+            Result.bind (extent_of_word offset_word) (fun offset ->
+                Result.map
+                  (fun (memory, gas) ->
+                    (Memory.slice memory ~offset ~length, memory, gas))
+                  (reach { m with gas } ~offset ~length))))
+
+(* A return or a revert is that window with no dynamic price of its own, handed
+   to the outcome constructor. *)
 let halt_with_output build m =
   Result.fold ~ok:Fun.id ~error:(fun e -> Halt (Failed e))
     (Result.bind (stack_result (Stack.pop2 m.stack))
        (fun (offset_word, length_word, _stack) ->
-         Result.bind (extent_of_word length_word) (fun length ->
-             if length = 0 then Ok (Halt (build "" m.gas))
-             else
-               Result.bind (extent_of_word offset_word) (fun offset ->
-                   Result.map
-                     (fun (memory, gas) ->
-                       Halt (build (Memory.slice memory ~offset ~length) gas))
-                     (reach m ~offset ~length)))))
+         Result.map
+           (fun (output, _memory, gas) -> Halt (build output gas))
+           (reach_data m ~offset_word ~length_word ~price:(fun _length gas -> Ok gas))))
 
 (* ---------- the context instructions ---------- *)
 
@@ -387,15 +422,130 @@ let selfbalance env m =
   let value, effects = Effects.self_balance m.effects (executing env) in
   push_value value { m with effects }
 
+(* EIP-214, as an argument rather than as a branch someone must remember to
+   write. The three instructions that change substate — [SSTORE], [TSTORE] and
+   [LOG] — each demand a {!Mutability.permit}, and this is the only thing in the
+   port that produces one. An arm that forgets it does not undercharge or
+   over-permit, it fails to compile. *)
+let permitted env =
+  Option.fold ~none:(Error Static_state_change) ~some:(fun permit -> Ok permit)
+    (Mutability.permit (Env.Call.mutability (Env.call env)))
+
+(* A digest as a word. {!Tn_keccak.length} is 32, which is exactly the width
+   [of_be_bytes] accepts, so the default is unreachable — the same shape, and
+   the same justification, as [word_of_int]. *)
+let word_of_digest digest =
+  Option.value ~default:W.zero (W.of_be_bytes (Tn_keccak.to_bytes digest))
+
+(* [KECCAK256] ([instructions/system.rs:14-34]). The static 30 is the table's;
+   the six per word is charged inside [reach_data], before the zero-length
+   branch, which is where revm charges it.
+
+   A zero-length hash pushes {!Tn_keccak.empty} rather than hashing the empty
+   slice it did not read. The two are the same word, and going through the
+   constant is what keeps the promise that memory is never touched: this arm
+   reaches no memory at all, so an enormous offset with a zero length is a valid
+   [KECCAK_EMPTY] and not an [Offset_too_large]. *)
+let keccak256 m =
+  transition
+    (Result.bind (stack_result (Stack.pop2 m.stack))
+       (fun (offset_word, length_word, stack) ->
+         Result.bind
+           (reach_data m ~offset_word ~length_word ~price:(fun length gas ->
+                charged (Gas.keccak_word_cost length) gas))
+           (fun (bytes, memory, gas) ->
+             let digest =
+               if String.length bytes = 0 then Tn_keccak.empty else Tn_keccak.digest bytes
+             in
+             Result.map
+               (fun stack -> { m with pc = m.pc + 1; stack; memory; gas })
+               (stack_result (Stack.push (word_of_digest digest) stack)))))
+
+(* [LOG0]-[LOG4] ([instructions/host.rs:313-347]), in revm's order, which is not
+   the order a reader expects:
+
+   1. The static guard FIRST, before a single pop, so a static frame reports
+      [Static_state_change] even when the stack could not have supplied the
+      operands.
+   2. Pop the offset and the length; convert the length; charge
+      375-per-topic-plus-8-per-byte; expand.
+   3. Pop the TOPICS LAST, after all of that.
+
+   Step 3 is the trap. The topics are popped after the gas and after the
+   expansion, so a [LOG4] on a short stack with too small an allowance reports
+   [Out_of_gas] and not [Stack_underflow]: the price of a log does not depend on
+   whether its topics are actually there. Moving [Topics.collect] earlier would
+   be invisible on every program except that one, which is why the test suite
+   pins it with an allowance pair rather than trusting the comment. *)
+let log arity env m =
+  let ( let* ) = Result.bind in
+  transition
+    (let* permit = permitted env in
+     let* offset_word, length_word, stack = stack_result (Stack.pop2 m.stack) in
+     let* data, memory, gas =
+       reach_data m ~offset_word ~length_word ~price:(fun length gas ->
+           Option.fold ~none:(Error Out_of_gas)
+             ~some:(fun cost -> charged cost gas)
+             (Gas.log_dynamic_cost ~topics:arity ~length))
+     in
+     let* topics, stack =
+       Log.Topics.collect arity ~pop:(fun stack -> stack_result (Stack.pop stack)) stack
+     in
+     let entry = Log.make ~address:(executing env) ~topics ~data in
+     (* Every field of the machine is named here, which is why there is no
+        [m with]: a log is the one instruction that moves all five at once. *)
+     Ok
+       {
+         pc = m.pc + 1;
+         stack;
+         memory;
+         gas;
+         effects = Effects.log m.effects permit entry;
+       })
+
+(* [TLOAD] ([instructions/host.rs:302-311]): a flat 100 from the table, a total
+   read, and no warmth — EIP-1153 puts transient storage outside EIP-2929, so
+   there is no surcharge and nothing to price one from. No static guard: a read
+   changes nothing, and revm's [tload] carries no [require_non_staticcall]. *)
+let tload env m =
+  transition
+    (Result.bind (stack_result (Stack.pop m.stack)) (fun (slot, stack) ->
+         Result.map
+           (fun stack -> { m with pc = m.pc + 1; stack })
+           (stack_result
+              (Stack.push (Effects.transient_load m.effects (executing env) ~slot) stack))))
+
+(* [TSTORE] ([instructions/host.rs:290-300]): the guard first (revm puts
+   [require_non_staticcall] at :294, the statement after the Cancun hardfork
+   check this port has no counterpart for), then a flat 100 from the table and a
+   write. There is no plan-and-commit split as [SSTORE] has, because the price
+   depends on nothing that has to be looked up first, and no refund, because
+   EIP-1153 gives transient storage none. *)
+let tstore env m =
+  transition
+    (Result.bind (permitted env) (fun permit ->
+         Result.map
+           (fun (slot, value, stack) ->
+             {
+               m with
+               pc = m.pc + 1;
+               stack;
+               effects =
+                 Effects.transient_store m.effects permit (executing env) ~slot ~value;
+             })
+           (stack_result (Stack.pop2 m.stack))))
+
 let sstore_error = function
   | Gas.Reentrancy_sentry -> Reentrancy_sentry
   | Gas.Insufficient -> Out_of_gas
 
 (* [SSTORE], in revm's exact order ([instructions/host.rs:228-288]).
 
-   1. [require_non_staticcall] — absent, because there is no static flag in this
-      chunk (:229). It arrives with STATICCALL.
-   2. Pop both operands FIRST (:230). This is why a two-deep underflow on a
+   1. [require_non_staticcall] (:229), which here is [permitted] producing the
+      {!Mutability.permit} that [Effects.plan_store] demands. It is first, before
+      the pops, so a static frame reports [Static_state_change] even when the
+      stack could not have supplied the operands.
+   2. Pop both operands (:230). This is why a two-deep underflow on a
       2300-unit allowance reports [Stack_underflow] and not [Reentrancy_sentry];
       swapping the two lines is invisible on every program except that one.
    3. [Gas.sstore_entry]: the EIP-2200 sentry against the UNDECREMENTED allowance
@@ -418,12 +568,13 @@ let sstore_error = function
    side. *)
 let sstore env m =
   transition
-    (Result.bind (stack_result (Stack.pop2 m.stack)) (fun (slot, value, stack) ->
+    (Result.bind (permitted env) (fun permit ->
+    Result.bind (stack_result (Stack.pop2 m.stack)) (fun (slot, value, stack) ->
          Result.bind
            (Result.map_error sstore_error (Gas.sstore_entry m.gas))
            (fun entered ->
              let planned =
-               Effects.plan_store m.effects (executing env) ~slot ~value
+               Effects.plan_store m.effects permit (executing env) ~slot ~value
              in
              Option.fold ~none:(Error Out_of_gas)
                ~some:(fun gas ->
@@ -438,7 +589,7 @@ let sstore env m =
                (Gas.charge
                   (Gas.sstore_dynamic_cost (Effects.warmth planned)
                      (Effects.loaded planned))
-                  entered))))
+                  entered)))))
 
 let execute env code m = function
   | Opcode.Stop -> Halt (Stopped { gas_left = m.gas; effects = m.effects })
@@ -550,6 +701,10 @@ let execute env code m = function
   | Opcode.Sload -> sload env m
   | Opcode.Sstore -> sstore env m
   | Opcode.Mcopy -> mcopy m
+  | Opcode.Keccak256 -> keccak256 m
+  | Opcode.Tload -> tload env m
+  | Opcode.Tstore -> tstore env m
+  | Opcode.Log arity -> log arity env m
 
 (* One instruction: decode the byte at the program counter, charge the fixed
    price before running it — so an instruction that then fails on its operands

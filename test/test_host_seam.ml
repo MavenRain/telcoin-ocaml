@@ -91,6 +91,12 @@ module Code = Tn_evm.Code
 module Data = Tn_evm.Data
 module Effects = Tn_evm.Effects
 module Env = Tn_evm.Env
+module Mutability = Tn_evm.Mutability
+module Log = Tn_evm.Log
+module Log_journal = Tn_evm.Log_journal
+module Topic_count = Tn_evm.Topic_count
+module Transient = Tn_evm.Transient
+module Keccak = Tn_keccak
 module Gas = Tn_evm.Gas
 module Interpreter = Tn_evm.Interpreter
 module Memory = Tn_evm.Memory
@@ -99,6 +105,15 @@ module Refund = Tn_evm.Refund
 module Sstore_state = Tn_evm.Sstore_state
 
 let get = function Some x -> x | None -> Alcotest.fail "expected Some"
+
+(* The permit for a mutability, for the two unit tests that call an Effects
+   write directly rather than through a program. Going through {!Mutability.permit}
+   rather than fabricating one is not ceremony: there is no other way to obtain
+   the value, which is the property the type exists for. *)
+let get_permit mutability =
+  match Mutability.permit mutability with
+  | Some permit -> permit
+  | None -> Alcotest.fail "expected a mutable frame to yield a permit"
 let u n = get (U256.of_int n)
 let hex s = get (U256.of_hex s)
 let gas_of n = get (Gas.of_int n)
@@ -156,11 +171,18 @@ let base_block =
 
 let base_tx = Env.Tx.make ~origin ~gas_price ~access_list:[]
 
-let env_with_data data =
+let env_with_mutability mutability data =
   Env.make ~block:base_block ~tx:base_tx
-    ~call:(Env.Call.make ~target:self ~caller ~value:call_value ~data)
+    ~call:(Env.Call.make ~target:self ~caller ~value:call_value ~data ~mutability)
 
+let env_with_data data = env_with_mutability Mutability.Mutable data
 let base_env = env_with_data Data.empty
+
+(* A frame entered by [STATICCALL]. Nothing in this chunk builds one — the calls
+   chunk does — so the static column of the cross product below is reached only
+   by constructing it here, which is exactly why the guard is worth having
+   before its caller exists. *)
+let static_env = env_with_mutability Mutability.Static Data.empty
 
 (* ---------- warmth witnesses ----------
 
@@ -1268,7 +1290,8 @@ let arb_word = QCheck.make ~print:U256.to_hex gen_word
 let host_bytes =
   List.map Opcode.to_byte
     [ Opcode.Sload; Opcode.Sstore; Opcode.Balance; Opcode.Selfbalance;
-      Opcode.Calldataload; Opcode.Calldatacopy; Opcode.Codecopy; Opcode.Mcopy ]
+      Opcode.Calldataload; Opcode.Calldatacopy; Opcode.Codecopy; Opcode.Mcopy;
+      Opcode.Keccak256; Opcode.Tload; Opcode.Tstore; Opcode.Log Topic_count.One ]
 
 let gen_host_code =
   let open QCheck.Gen in
@@ -1475,9 +1498,14 @@ let random_code_is_sound (source, allowed) =
         let left = Gas.remaining gas_left in
         left >= 0 && left <= allowed
   in
-  (* SSTORE is the only writer and it always names the executing account, so no
-     other account can have moved. The result world is therefore reachable from
-     the input by writes to [self] alone. *)
+  (* SSTORE is the only writer OF THE WORLD, and it always names the executing
+     account, so no other account can have moved. The result world is therefore
+     reachable from the input by writes to [self] alone.
+
+     TSTORE and LOG also write, but they write substate this conjunct does not
+     constrain: neither can reach {!World_state} at all, since {!Transient} and
+     {!Log_journal} live in [tn_evm] and the world state cannot see them. That
+     is the layering argument, not an omission. *)
   let world_is_reachable =
     match effects_of outcome with
     | None -> true
@@ -1540,12 +1568,17 @@ let arb_unhalting_code = QCheck.make ~print:print_code gen_unhalting_code
    it previously did not do.
 
    How much of the sample carries that weight, counted rather than assumed: of
-   the 300 samples at this seed, 30 reach the REVERT and 270 fail before it, on a
-   stack underflow or an undecodable byte or the allowance. The 270 are the weak
-   half — [Failed] carries no effects and structurally cannot — so it is the 30
+   the 300 samples at this seed, 29 reach the REVERT and 271 fail before it, on a
+   stack underflow or an undecodable byte or the allowance. The 271 are the weak
+   half — [Failed] carries no effects and structurally cannot — so it is the 29
    that could catch a leak, and they do: the constructor-swapping patch described
    above fails this property. The deterministic case in
-   {!test_revert_discards_everything} remains the sharper of the two. *)
+   {!test_revert_discards_everything} remains the sharper of the two.
+
+   The figure is 29 and not the 30 recorded before this chunk, because
+   {!host_bytes} grew when the hash, the logs and transient storage landed and
+   that reshuffles the corpus drawn at this seed. It is recounted here rather
+   than left to drift: a stale count reads as evidence while being none. *)
 let revert_is_a_no_op source =
   let world = world_with_slot 1 in
   let before = Effects.start ~world ~access:Access.empty in
@@ -1605,6 +1638,432 @@ let prop_cases =
       terminates_and_accounts;
   ]
 
+(* ---------- 6. the hash, the logs and transient storage ---------- *)
+
+(* KECCAK256 over 32 bytes of memory, with the total hand-computed.
+
+   PUSH1 3, PUSH1 3, MSTORE 3 and the first word of memory 3 puts a known word at
+   offset 0. Then PUSH1 3, PUSH1 3 for the length and offset, KECCAK256's static
+   30, its 6 for the one word it absorbs, and no further expansion because the
+   word is already paid for. The epilogue then re-stores and returns. *)
+let test_keccak256_of_a_word () =
+  let subject = hex "00000000000000000000000000000000000000000000000000000000000000ff" in
+  let outcome =
+    run
+      (asm
+         ([ push32 subject; push1 0x00; op Opcode.Mstore; push1 0x20; push1 0x00;
+            op Opcode.Keccak256 ]
+         @ return_top))
+      allowance
+  in
+  Alcotest.(check string) "the hash of the stored word"
+    (Keccak.to_hex (Keccak.digest (U256.to_be_bytes subject)))
+    (U256.to_hex (get (U256.of_be_bytes (output_of outcome))));
+  check_total "PUSH32 3, PUSH1 3, MSTORE 3, memory 3, PUSH1 6, KECCAK256 30, word 6, epilogue"
+    (3 + 3 + 3 + 3 + 6 + 30 + 6 + return_top_cost_paid)
+    outcome
+
+(* The word rate is SIX and not the copy family's three. Two lengths whose word
+   counts differ by one must differ by exactly six, and the absolute totals are
+   asserted so that an implementation charging three fails both rather than
+   neither. *)
+let test_keccak256_word_rate () =
+  let hash_of_length length =
+    run
+      (asm [ push1 length; push1 0x00; op Opcode.Keccak256; op Opcode.Pop; op Opcode.Stop ])
+      allowance
+  in
+  let one_word = allowance - remaining_of (hash_of_length 0x20) in
+  let two_words = allowance - remaining_of (hash_of_length 0x40) in
+  (* PUSH1 3, PUSH1 3, KECCAK256 30, one word 6, memory for one word 3, POP 2. *)
+  Alcotest.(check int) "one word costs 47" (3 + 3 + 30 + 6 + 3 + 2) one_word;
+  (* The second word costs 6 to absorb and 3 more of curve. *)
+  Alcotest.(check int) "two words cost 56" (3 + 3 + 30 + 12 + 6 + 2) two_words;
+  Alcotest.(check int) "the marginal word is six plus three of curve" 9
+    (two_words - one_word)
+
+(* A zero-length hash pushes KECCAK_EMPTY, and does so without ever converting
+   the offset: 2^255 is not a reachable memory offset, so an implementation that
+   converted it first would report Offset_too_large. It also expands nothing,
+   which the total pins by containing no memory term at all. *)
+let test_keccak256_zero_length_ignores_the_offset () =
+  let outcome =
+    run
+      (asm
+         ([ push1 0x00; push32 (U256.two_pow 255); op Opcode.Keccak256 ] @ return_top))
+      allowance
+  in
+  Alcotest.(check string) "the empty hash" (Keccak.to_hex Keccak.empty)
+    (U256.to_hex (get (U256.of_be_bytes (output_of outcome))));
+  check_total "PUSH1 3, PUSH32 3, KECCAK256 30, no words, no expansion, epilogue"
+    (3 + 3 + 30 + return_top_cost)
+    outcome
+
+(* LOG1 over 32 bytes: 375 base, 375 for the one topic, 8 per byte for 32 bytes,
+   plus the memory the window forces. The absolute total is what separates a
+   correct implementation from one that prices topics or data at the wrong rate,
+   since every wrong rate still produces a plausible-looking number. *)
+let test_log1_price_and_journal () =
+  let topic = u 0xbeef in
+  let outcome =
+    run
+      (asm
+         [ push32 (u 0x1234); push1 0x00; op Opcode.Mstore; push32 topic; push1 0x20;
+           push1 0x00; op (Opcode.Log Topic_count.One); op Opcode.Stop ])
+      allowance
+  in
+  check_total "PUSH32 3, PUSH1 3, MSTORE 3, memory 3, PUSH32 3, PUSH1 6, LOG1 375+375+256"
+    (3 + 3 + 3 + 3 + 3 + 6 + 375 + 375 + (8 * 32))
+    outcome;
+  let entries = Log_journal.to_list (Effects.logs (effects_or_fail outcome)) in
+  Alcotest.(check int) "one entry was journalled" 1 (List.length entries);
+  let entry = List.hd entries in
+  Alcotest.(check bool) "it names the executing account" true
+    (Units.Address.equal (Log.address entry) self);
+  Alcotest.(check (list string)) "it carries its one topic" [ U256.to_hex topic ]
+    (List.map U256.to_hex (Log.Topics.to_list (Log.topics entry)));
+  Alcotest.(check string) "and the memory window as data"
+    (U256.to_be_bytes (u 0x1234))
+    (Log.data entry)
+
+(* The base price and the per-topic price are pinned SEPARATELY, at arities where
+   they do not sum to the same number. At arity 1 a base of 400 and a topic of
+   350 total 750 exactly as 375 and 375 do, so LOG1 alone cannot tell the split
+   apart. LOG0 pins the base with no topic term at all, and LOG2 pins the topic
+   given that base, so the two together fix both constants. *)
+let test_log_price_by_arity () =
+  let cost body = allowance - remaining_of (run (asm (body @ [ op Opcode.Stop ])) allowance) in
+  (* LOG0, no data: PUSH1 3, PUSH1 3, base 375. *)
+  Alcotest.(check int) "LOG0 is base alone" (3 + 3 + 375)
+    (cost [ push1 0x00; push1 0x00; op (Opcode.Log Topic_count.Zero) ]);
+  (* LOG2, no data: PUSH1 x4 12, base 375, two topics 750. *)
+  Alcotest.(check int) "LOG2 is base plus two topics" (12 + 375 + 750)
+    (cost
+       [ push1 0x01; push1 0x02; push1 0x00; push1 0x00; op (Opcode.Log Topic_count.Two) ])
+
+(* Each arity pops exactly its own topics, bounded from BOTH sides.
+
+   Conjunct (a): with exactly 5 - n words left beneath, a following POP sequence
+   of that length succeeds and one more underflows. Conjunct (a) alone would
+   pass against a LOG3 that popped four topics and discarded one, which is why
+   the underflow half is here: it pins that no EXTRA word was consumed, while
+   the successful half pins that no word was left behind. *)
+let test_log_arity_pops_exactly () =
+  let markers = [ 0x11; 0x22; 0x33; 0x44 ] in
+  let probe arity ~extra_pops =
+    (* Four marker words, then the log's length and offset. The log consumes the
+       offset, the length and n markers, leaving 4 - n markers. *)
+    run
+      (asm
+         (List.map push1 markers
+         @ [ push1 0x00; push1 0x00; op (Opcode.Log arity) ]
+         @ List.init extra_pops (fun _ -> op Opcode.Pop)
+         @ [ op Opcode.Stop ]))
+      allowance
+  in
+  List.iter
+    (fun arity ->
+      let n = Topic_count.to_int arity in
+      let label = Printf.sprintf "LOG%d" n in
+      Alcotest.(check string)
+        (label ^ " leaves exactly " ^ string_of_int (4 - n) ^ " words")
+        "stopped"
+        (error_of (probe arity ~extra_pops:(4 - n)));
+      check_error (label ^ " left no more than that") Interpreter.Stack_underflow
+        (probe arity ~extra_pops:(5 - n)))
+    Topic_count.all
+
+(* The topics are popped AFTER the gas charge and after the expansion, which is
+   revm's order and is observable through WHICH error a doomed program reports.
+
+   Both programs below would underflow if the topics were popped first. Neither
+   does, because something else refuses earlier: the first cannot pay the
+   1500-unit topic charge, and the second names an offset no memory can reach.
+   An implementation that hoisted Topics.collect would report Stack_underflow
+   for both, so this pair is the whole evidence for the ordering. *)
+let test_log_topics_pop_after_the_charge () =
+  check_error "the gas charge precedes the topic pops" Interpreter.Out_of_gas
+    (Interpreter.run ~env:base_env
+       ~code:(asm [ push1 0x00; push1 0x00; op (Opcode.Log Topic_count.Four) ])
+       ~gas:(gas_of 500) ~effects:empty_effects);
+  check_error "and so does the offset conversion" Interpreter.Offset_too_large
+    (run
+       (asm [ push1 0x20; push32 (U256.two_pow 255); op (Opcode.Log Topic_count.One) ])
+       allowance)
+
+(* A zero-length log at an unreachable offset is valid and expands nothing,
+   exactly as a zero-length return is. *)
+let test_log_zero_length_ignores_the_offset () =
+  let outcome =
+    run
+      (asm
+         [ push32 (u 0xaa); push1 0x00; push32 (U256.two_pow 255);
+           op (Opcode.Log Topic_count.One); op Opcode.Stop ])
+      allowance
+  in
+  check_total "PUSH32 3, PUSH1 3, PUSH32 3, LOG1 375+375, no data, no expansion"
+    (3 + 3 + 3 + 375 + 375)
+    outcome;
+  let entry = List.hd (Log_journal.to_list (Effects.logs (effects_or_fail outcome))) in
+  Alcotest.(check int) "the entry carries no data" 0 (String.length (Log.data entry))
+
+(* The journal is a list and not a set: order and multiplicity both reach
+   consensus through the receipt. Two identical logs are two entries.
+
+   The emitted sequence must not be a palindrome, or "oldest first" and "newest
+   first" agree and the assertion pins nothing. An earlier version of this case
+   emitted 1, 2, 1 and a mutation dropping the reversal in {!Log_journal.to_list}
+   survived it. The repeated 2 keeps the multiplicity half of the claim while
+   1, 2, 2, 3 stays asymmetric. *)
+let test_log_journal_is_ordered_and_counts () =
+  let emit topic = [ push1 topic; push1 0x00; push1 0x00; op (Opcode.Log Topic_count.One) ] in
+  let emitted = [ 0x01; 0x02; 0x02; 0x03 ] in
+  let outcome =
+    run (asm (List.concat_map emit emitted @ [ op Opcode.Stop ])) allowance
+  in
+  let topics_of entry = List.map U256.to_hex (Log.Topics.to_list (Log.topics entry)) in
+  Alcotest.(check bool) "the fixture is asymmetric, so order is observable" false
+    (List.equal Int.equal emitted (List.rev emitted));
+  Alcotest.(check (list (list string))) "four entries, in emission order"
+    (List.map (fun topic -> [ U256.to_hex (u topic) ]) emitted)
+    (List.map topics_of (Log_journal.to_list (Effects.logs (effects_or_fail outcome))))
+
+(* TSTORE then TLOAD round-trips, at a flat 100 each and with no cold surcharge
+   on either: the second read of the same slot costs exactly what the first did,
+   which is what "outside EIP-2929" means in gas terms. *)
+let test_transient_round_trip () =
+  let outcome =
+    run
+      (asm
+         ([ push1 0x2a; push1 0x07; op Opcode.Tstore; push1 0x07; op Opcode.Tload;
+            op Opcode.Pop; push1 0x07; op Opcode.Tload ]
+         @ return_top))
+      allowance
+  in
+  Alcotest.(check string) "the value written comes back"
+    (U256.to_hex (u 0x2a))
+    (U256.to_hex (get (U256.of_be_bytes (output_of outcome))));
+  check_total "PUSH1 x4 12, TSTORE 100, TLOAD 100, POP 2, TLOAD 100, epilogue"
+    (3 + 3 + 100 + 3 + 100 + 2 + 3 + 100 + return_top_cost)
+    outcome;
+  (* Observed through the OUTCOME's effects at a specific address, not just
+     through the program's own TLOAD. The program round-trips whichever account
+     the interpreter keys by, so it cannot see whether that account is the
+     executing one or the caller; only an Effects read at a named address can.
+     [self] and [caller] are distinct fixtures, so routing the key through the
+     caller — the cross-contract transient leak CALL would expose — flips this. *)
+  let effects = effects_or_fail outcome in
+  Alcotest.(check string) "the write lands under the executing account"
+    (U256.to_hex (u 0x2a))
+    (U256.to_hex (Effects.transient_load effects self ~slot:(u 7)));
+  Alcotest.(check bool) "and not under the caller"
+    true
+    (U256.is_zero (Effects.transient_load effects caller ~slot:(u 7)))
+
+(* An unwritten transient slot reads zero, and a slot written zero is
+   indistinguishable from one never written — EIP-1153 offers no way to tell
+   them apart, so the representation must not either. *)
+let test_transient_zero_is_canonical () =
+  let effects =
+    Effects.transient_store empty_effects (get_permit Mutability.Mutable) self ~slot:(u 7)
+      ~value:U256.zero
+  in
+  Alcotest.(check bool) "a zero write leaves no binding" true
+    (Transient.is_empty (Effects.transient effects));
+  Alcotest.(check int) "and nothing to enumerate" 0
+    (Transient.length (Effects.transient effects));
+  Alcotest.(check bool) "an unwritten slot reads zero" true
+    (U256.is_zero (Effects.transient_load empty_effects self ~slot:(u 7)))
+
+(* Transient storage is keyed by the PAIR. A write under one account is
+   invisible to another at the same slot number, which is the cross-contract
+   leak the day CALL lands. *)
+let test_transient_is_keyed_by_the_pair () =
+  let permit = get_permit Mutability.Mutable in
+  (* Both halves of the key are exercised symmetrically: the same slot under a
+     different account, and a different slot under the same account. Varying only
+     the address would pass against a key that dropped the slot component (every
+     slot of a contract aliasing to one cell), which is exactly the collapse a
+     mutation of the comparator produces. *)
+  let effects =
+    Effects.transient_store
+      (Effects.transient_store empty_effects permit self ~slot:(u 7) ~value:(u 99))
+      permit self ~slot:(u 8) ~value:(u 42)
+  in
+  Alcotest.(check string) "slot 7 under self reads its own value" (U256.to_hex (u 99))
+    (U256.to_hex (Effects.transient_load effects self ~slot:(u 7)));
+  Alcotest.(check string) "slot 8 under self reads independently" (U256.to_hex (u 42))
+    (U256.to_hex (Effects.transient_load effects self ~slot:(u 8)));
+  Alcotest.(check bool) "another account at slot 7 does not see it" true
+    (U256.is_zero (Effects.transient_load effects other ~slot:(u 7)));
+  Alcotest.(check int) "two distinct slots are two bindings" 2
+    (Transient.length (Effects.transient effects));
+  Alcotest.(check bool) "every binding is nonzero" true
+    (List.for_all
+       (fun (_address, _slot, value) -> not (U256.is_zero value))
+       (Transient.bindings (Effects.transient effects)))
+
+(* A transient write cannot reach the persistent world. This is layering rather
+   than behaviour — World_state cannot see Transient — but the run is worth
+   asserting because it is the claim a reader wants checked. *)
+let test_transient_does_not_touch_the_world () =
+  let outcome =
+    run (asm [ push1 0x2a; push1 0x07; op Opcode.Tstore; op Opcode.Stop ]) allowance
+  in
+  Alcotest.(check bool) "the world is untouched" true
+    (World_state.equal World_state.empty (Effects.world (effects_or_fail outcome)))
+
+(* The static cross product: every substate write refuses in a static frame and
+   succeeds in a mutable one. The mutable column is not decoration — it is what
+   proves the static column is failing for the right reason rather than because
+   the programs are broken. *)
+let test_static_frame_refuses_every_write () =
+  let programs =
+    [ ("SSTORE", [ push1 0x01; push1 0x07; op Opcode.Sstore ]);
+      ("TSTORE", [ push1 0x01; push1 0x07; op Opcode.Tstore ]);
+      ("LOG0", [ push1 0x00; push1 0x00; op (Opcode.Log Topic_count.Zero) ]);
+      ("LOG1", [ push1 0x01; push1 0x00; push1 0x00; op (Opcode.Log Topic_count.One) ]);
+      ("LOG4",
+       [ push1 0x01; push1 0x02; push1 0x03; push1 0x04; push1 0x00; push1 0x00;
+         op (Opcode.Log Topic_count.Four) ]) ]
+  in
+  List.iter
+    (fun (label, body) ->
+      let code = asm (body @ [ op Opcode.Stop ]) in
+      check_error (label ^ " is refused in a static frame") Interpreter.Static_state_change
+        (run ~env:static_env code allowance);
+      Alcotest.(check string) (label ^ " succeeds in a mutable one") "stopped"
+        (error_of (run ~env:base_env code allowance)))
+    programs
+
+(* The guard is FIRST: it precedes the pops and it precedes the charge. A static
+   frame with an empty stack reports the static violation rather than the
+   underflow it would report if the operands were taken first, and a static
+   frame that could not pay reports it rather than running out of gas. *)
+let test_static_guard_precedes_everything () =
+  (* The fixture really is a static frame, read through the accessor rather than
+     assumed, and a mutable one really is not. This also exercises
+     {!Mutability.is_static}, whose only caller is here. *)
+  Alcotest.(check bool) "the static fixture is static" true
+    (Mutability.is_static (Env.Call.mutability (Env.call static_env)));
+  Alcotest.(check bool) "the base fixture is not" false
+    (Mutability.is_static (Env.Call.mutability (Env.call base_env)));
+  check_error "the guard precedes the pops" Interpreter.Static_state_change
+    (run ~env:static_env (asm [ op Opcode.Sstore ]) allowance);
+  (* TSTORE separately, because its guard sits after a hardfork check in revm and
+     is the one whose reordering no other case here would catch. *)
+  check_error "for TSTORE, on an empty stack" Interpreter.Static_state_change
+    (run ~env:static_env (asm [ op Opcode.Tstore ]) allowance);
+  check_error "for a log too" Interpreter.Static_state_change
+    (run ~env:static_env (asm [ op (Opcode.Log Topic_count.Four) ]) allowance);
+  check_error "and it precedes the charge" Interpreter.Static_state_change
+    (Interpreter.run ~env:static_env
+       ~code:(asm [ push1 0x00; push1 0x00; op (Opcode.Log Topic_count.Four) ])
+       ~gas:(gas_of 500) ~effects:empty_effects)
+
+(* A revert discards the logs and the transient writes with no code to do it,
+   because both ride inside the Effects.t that Reverted structurally does not
+   carry. Asserted through the OUTCOME, for the reason {!reachable_effects}
+   documents: inspecting the value passed in would be true by the type of run. *)
+let test_revert_discards_logs_and_transient () =
+  let body =
+    [ push1 0x2a; push1 0x07; op Opcode.Tstore; push1 0x01; push1 0x00; push1 0x00;
+      op (Opcode.Log Topic_count.One) ]
+  in
+  let reverted = run (asm (body @ [ push1 0x00; push1 0x00; op Opcode.Revert ])) allowance in
+  let stopped = run (asm (body @ [ op Opcode.Stop ])) allowance in
+  Alcotest.(check bool) "the reverting run reaches no effects at all" true
+    (Option.is_none (reachable_effects reverted));
+  Alcotest.(check bool) "the reverting run did not report success" false
+    (halted_successfully reverted);
+  (* And the same body without the REVERT really did produce both, so the
+     assertion above is about the revert and not about an inert program. *)
+  let effects = effects_or_fail stopped in
+  Alcotest.(check int) "the stopping run journalled its log" 1
+    (Log_journal.length (Effects.logs effects));
+  Alcotest.(check int) "and kept its transient write" 1
+    (Transient.length (Effects.transient effects))
+
+(* Topic_count and Log.Topics are two five-way sums that could drift apart. The
+   round trip over every arity is the only thing holding them together.
+
+   The pop source yields 0, 1, 2, 3 in pop order, and the payload is asserted as
+   a whole rather than by length, so the ORDER is pinned and not just the count:
+   [collect]'s docstring promises "first pop first, which is topic order", and
+   reversing any of the T2/T3/T4 arms would produce 3, 2, 1, 0 here. A reversed
+   order is a wrong receipt and a wrong logs bloom, and a length check is blind
+   to it. *)
+let test_topic_arity_round_trip () =
+  List.iter
+    (fun arity ->
+      let n = Topic_count.to_int arity in
+      let collected = Log.Topics.collect arity ~pop:(fun k -> Ok (u k, k + 1)) 0 in
+      match collected with
+      | Error _ -> Alcotest.fail "collecting from an infinite source cannot fail"
+      | Ok (topics, consumed) ->
+          Alcotest.(check int) (Printf.sprintf "LOG%d pops its own count" n) n consumed;
+          Alcotest.(check int) "and the shape reports the same arity" n
+            (Topic_count.to_int (Log.Topics.arity topics));
+          Alcotest.(check (list string)) "the topics come back in pop order, first pop first"
+            (List.init n (fun i -> U256.to_hex (u i)))
+            (List.map U256.to_hex (Log.Topics.to_list topics)))
+    Topic_count.all
+
+(* An end-to-end LOG4 with four pairwise-distinct, non-palindromic topics, so the
+   journalled entry witnesses the order through the whole interpreter rather than
+   through {!Log.Topics.collect} in isolation. Pushed 0x44, 0x33, 0x22, 0x11, so
+   the last pushed (0x11) is the top of stack and must come back as topic0. *)
+let test_log4_topic_order_end_to_end () =
+  let outcome =
+    run
+      (asm
+         [ push1 0x44; push1 0x33; push1 0x22; push1 0x11; push1 0x00; push1 0x00;
+           op (Opcode.Log Topic_count.Four); op Opcode.Stop ])
+      allowance
+  in
+  let entry = List.hd (Log_journal.to_list (Effects.logs (effects_or_fail outcome))) in
+  Alcotest.(check (list string)) "topic0 is the top of stack"
+    (List.map U256.to_hex [ u 0x11; u 0x22; u 0x33; u 0x44 ])
+    (List.map U256.to_hex (Log.Topics.to_list (Log.topics entry)))
+
+(* Log_journal.equal, and through it Log.equal and Topics.equal, are load-bearing
+   because {!Effects.equal} folds the journal in and the revert and frame-boundary
+   properties compare whole effects. A length-only journal equality would satisfy
+   every one of those while an entry's address, topics or data was corrupted, so
+   the chain is pinned directly here. *)
+let test_log_journal_equality () =
+  let entry topic = Log.make ~address:self ~topics:(Log.Topics.T1 (u topic)) ~data:"" in
+  let ab = Log_journal.append (Log_journal.append Log_journal.empty (entry 1)) (entry 2) in
+  let ba = Log_journal.append (Log_journal.append Log_journal.empty (entry 2)) (entry 1) in
+  let ab' = Log_journal.append (Log_journal.append Log_journal.empty (entry 1)) (entry 2) in
+  let one_topic_off =
+    Log_journal.append (Log_journal.append Log_journal.empty (entry 1)) (entry 3)
+  in
+  Alcotest.(check bool) "same entries, opposite order, are unequal" false (Log_journal.equal ab ba);
+  Alcotest.(check bool) "a single differing topic is unequal" false
+    (Log_journal.equal ab one_topic_off);
+  Alcotest.(check bool) "identical journals are equal" true (Log_journal.equal ab ab');
+  Alcotest.(check bool) "differing lengths are unequal" false
+    (Log_journal.equal ab (Log_journal.append ab (entry 9)))
+
+(* The five LOG bytes decode to the five arities and back. *)
+let test_log_opcode_round_trip () =
+  List.iter
+    (fun arity ->
+      let byte_value = Opcode.to_byte (Opcode.Log arity) in
+      Alcotest.(check int)
+        (Printf.sprintf "LOG%d is 0xa%d" (Topic_count.to_int arity)
+           (Topic_count.to_int arity))
+        (0xa0 + Topic_count.to_int arity)
+        byte_value;
+      Alcotest.(check bool) "and decodes back to itself" true
+        (match Opcode.decode byte_value with
+        | Some (Opcode.Log decoded) -> Topic_count.equal decoded arity
+        | Some _ | None -> false))
+    Topic_count.all;
+  Alcotest.(check bool) "0xa5 is not a log" true
+    (Option.is_none (Opcode.decode 0xa5))
+
 let () =
   Alcotest.run "tn_evm_host_seam"
     [
@@ -1662,6 +2121,51 @@ let () =
             test_mcopy_expands_at_the_maximum;
           Alcotest.test_case "a revert discards everything" `Quick test_revert_discards_everything;
           Alcotest.test_case "an SSTORE loop terminates" `Quick test_sstore_termination_under_a_loop;
+        ] );
+      ( "keccak256",
+        [
+          Alcotest.test_case "the hash of a stored word" `Quick test_keccak256_of_a_word;
+          Alcotest.test_case "six per word, not three" `Quick test_keccak256_word_rate;
+          Alcotest.test_case "a zero length ignores the offset" `Quick
+            test_keccak256_zero_length_ignores_the_offset;
+        ] );
+      ( "logs",
+        [
+          Alcotest.test_case "LOG1 prices and journals" `Quick test_log1_price_and_journal;
+          Alcotest.test_case "base and per-topic are pinned separately" `Quick
+            test_log_price_by_arity;
+          Alcotest.test_case "each arity pops exactly its topics" `Quick
+            test_log_arity_pops_exactly;
+          Alcotest.test_case "the topics pop after the charge" `Quick
+            test_log_topics_pop_after_the_charge;
+          Alcotest.test_case "a zero length ignores the offset" `Quick
+            test_log_zero_length_ignores_the_offset;
+          Alcotest.test_case "the journal is ordered and counts" `Quick
+            test_log_journal_is_ordered_and_counts;
+          Alcotest.test_case "the arities round-trip in topic order" `Quick
+            test_topic_arity_round_trip;
+          Alcotest.test_case "LOG4 topic order end to end" `Quick
+            test_log4_topic_order_end_to_end;
+          Alcotest.test_case "the journal equality is order and content sensitive" `Quick
+            test_log_journal_equality;
+          Alcotest.test_case "the five bytes round-trip" `Quick test_log_opcode_round_trip;
+        ] );
+      ( "transient storage",
+        [
+          Alcotest.test_case "TSTORE then TLOAD" `Quick test_transient_round_trip;
+          Alcotest.test_case "a zero write is canonical" `Quick
+            test_transient_zero_is_canonical;
+          Alcotest.test_case "keyed by the pair" `Quick test_transient_is_keyed_by_the_pair;
+          Alcotest.test_case "it never reaches the world" `Quick
+            test_transient_does_not_touch_the_world;
+        ] );
+      ( "static frames",
+        [
+          Alcotest.test_case "every write is refused" `Quick
+            test_static_frame_refuses_every_write;
+          Alcotest.test_case "the guard is first" `Quick test_static_guard_precedes_everything;
+          Alcotest.test_case "a revert discards logs and transient writes" `Quick
+            test_revert_discards_logs_and_transient;
         ] );
       ("properties", prop_cases);
     ]

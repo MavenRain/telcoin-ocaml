@@ -275,16 +275,46 @@ are noted.
     bug where an undo entry is pushed for one change and forgotten for another is
     absent because there is no undo code to get wrong. Un-warming on revert, which
     revm implements with `mark_cold` replay, falls out for free
+21. ✅ the hash and the rest of the single frame (`tn_keccak` + `tn_evm`) —
+    Ethereum's Keccak-256 as a leaf library wrapping `Digestif.KECCAK_256`
+    (pinned to published vectors, and to *not* being SHA3-256, whose functor has
+    the identical signature), and the three instruction families it unblocks
+    that still fit inside one frame: `KECCAK256` (`0x20`), the logs
+    (`LOG0`–`LOG4`) and EIP-1153 transient storage (`TLOAD`/`TSTORE`). Five new
+    `tn_evm` modules — `Topic_count`, `Log`, `Log_journal`, `Transient`,
+    `Mutability` — and `Effects` grew from four fields to six.
+
+    Three more things become unrepresentable. **A write in a static frame**:
+    EIP-214's check does not gate a write, it *produces the argument the write
+    demands* — `Mutability.permit` is abstract and constructorless, and
+    `Effects.plan_store`, `Effects.log` and `Effects.transient_store` each take
+    one, so an instruction author who forgets the guard fails to compile rather
+    than silently permitting it. That closed a hole the previous chunk had
+    written down: `SSTORE` carried a comment saying its guard was absent.
+    **More than four topics**: `Log.Topics.t` is a five-constructor sum of
+    *tuples*, so a five-topic log is not rejected, it has no value to be — and
+    because `Opcode.Log` carries the same `Topic_count.t`, one value determines
+    the byte encoded, the words popped, the constructor built and the price
+    charged. **Logs and transient writes surviving a revert**: both ride inside
+    `Effects.t`, which `Reverted` and `Failed` structurally do not carry, so
+    EIP-1153's revert semantics cost zero lines.
+
+    The chunk's own trap, found by mutation rather than by review: the topics
+    are popped *after* the gas charge and after the memory expansion, so a
+    doomed `LOG4` reports `Out_of_gas` and not `Stack_underflow`. Hoisting the
+    pop is invisible on every program except that one
 
 **Still planned.** Now buildable on what is already here: contract code on an
 account and its `EXTCODESIZE`/`EXTCODECOPY` readers, the calls (`CALL`,
-`CALLCODE`, `DELEGATECALL`, `STATICCALL`) with the call depth, static-call flag
-and return-data buffer `Env` deliberately omits, `RETURNDATASIZE`/
-`RETURNDATACOPY`, the logs, `SELFDESTRUCT` (whose `World_state.remove_account`
-already exists, unused), transient storage, and the blob instructions. Blocked on
-the deferred crypto: `KECCAK256`, `EXTCODEHASH`, contract creation
-(`CREATE`/`CREATE2`, whose addresses are keccak-derived), and the trie state root
-and storage root that would replace content equality as the agreement check.
+`CALLCODE`, `DELEGATECALL`, `STATICCALL`) with the call depth and return-data
+buffer `Env` deliberately omits, `RETURNDATASIZE`/`RETURNDATACOPY`,
+`SELFDESTRUCT` (whose `World_state.remove_account` already exists, unused), and
+the blob instructions. The static-call flag itself now exists, as
+`Env.Call.mutability`, because the three writes it governs are here. Blocked on
+code rather than on crypto: `EXTCODEHASH` and contract creation
+(`CREATE`/`CREATE2`, whose addresses are keccak-derived). Blocked on the trie:
+the state root and storage root that would replace content equality as the
+agreement check.
 Blocked on the block-execution layer: `BLOCKHASH`, which reads a history of
 committed block hashes no frame can produce on its own. Blocked on networking:
 that block-execution layer itself — folding each committed sub-DAG's transactions

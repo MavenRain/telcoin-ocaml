@@ -77,12 +77,17 @@ type t =
   | Sload
   | Sstore
   | Mcopy
+  | Keccak256
+  | Tload
+  | Tstore
+  | Log of Topic_count.t
 
 (* The first byte of each contiguous family, from which the family's operand is
    recovered by subtraction. *)
 let push1_byte = 0x60
 let dup1_byte = 0x80
 let swap1_byte = 0x90
+let log0_byte = 0xa0
 
 let to_byte = function
   | Stop -> 0x00
@@ -143,10 +148,14 @@ let to_byte = function
   | Gas -> 0x5a
   | Jumpdest -> 0x5b
   | Mcopy -> 0x5e
+  | Keccak256 -> 0x20
+  | Tload -> 0x5c
+  | Tstore -> 0x5d
   | Push0 -> 0x5f
   | Push n -> push1_byte + Push_bytes.to_int n - 1
   | Dup d -> dup1_byte + Depth.to_int d - 1
   | Swap d -> swap1_byte + Depth.to_int d - 1
+  | Log n -> log0_byte + Topic_count.to_int n
   | Return -> 0xf3
   | Revert -> 0xfd
   | Invalid -> 0xfe
@@ -185,6 +194,7 @@ let decode byte =
   | 0x1b -> Some Shl
   | 0x1c -> Some Shr
   | 0x1d -> Some Sar
+  | 0x20 -> Some Keccak256
   | 0x30 -> Some Address
   | 0x31 -> Some Balance
   | 0x32 -> Some Origin
@@ -216,8 +226,15 @@ let decode byte =
   | 0x59 -> Some Msize
   | 0x5a -> Some Gas
   | 0x5b -> Some Jumpdest
+  | 0x5c -> Some Tload
+  | 0x5d -> Some Tstore
   | 0x5e -> Some Mcopy
   | 0x5f -> Some Push0
+  | 0xa0 -> Some (Log Topic_count.Zero)
+  | 0xa1 -> Some (Log Topic_count.One)
+  | 0xa2 -> Some (Log Topic_count.Two)
+  | 0xa3 -> Some (Log Topic_count.Three)
+  | 0xa4 -> Some (Log Topic_count.Four)
   | 0xf3 -> Some Return
   | 0xfd -> Some Revert
   | 0xfe -> Some Invalid
@@ -240,7 +257,7 @@ let immediate_bytes = function
   | Balance | Origin | Caller | Callvalue | Calldataload | Calldatasize
   | Calldatacopy | Codesize | Codecopy | Gasprice | Coinbase | Timestamp | Number
   | Prevrandao | Gaslimit | Chainid | Selfbalance | Basefee | Sload | Sstore
-  | Mcopy ->
+  | Mcopy | Keccak256 | Tload | Tstore | Log _ ->
       0
 
 (* Two instructions are equal exactly when they encode to the same byte — the
@@ -313,3 +330,7 @@ let to_string = function
   | Sload -> "SLOAD"
   | Sstore -> "SSTORE"
   | Mcopy -> "MCOPY"
+  | Keccak256 -> "KECCAK256"
+  | Tload -> "TLOAD"
+  | Tstore -> "TSTORE"
+  | Log n -> Printf.sprintf "LOG%d" (Topic_count.to_int n)

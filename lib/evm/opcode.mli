@@ -3,19 +3,20 @@
 
     This is the single-frame subset of the EVM: arithmetic, comparison, bitwise
     and shift operations (dispatched to {!Alu}), stack manipulation, memory, gas
-    and control flow, and — since the host seam landed — the instructions that
-    read the block and transaction context, read the calling frame's calldata and
-    its own code, and read and write account storage.
+    and control flow, the instructions that read the block and transaction
+    context, read the calling frame's calldata and its own code, and read and
+    write account storage, and — since the hash landed — [KECCAK256], the logs
+    and EIP-1153 transient storage.
 
-    What remains absent is what needs a {e second} frame or a hash function:
-    [KECCAK256], the external-code and return-data readers, [BLOCKHASH], the blob
-    instructions, transient storage, the logs, the calls, the creations and
-    [SELFDESTRUCT]. Each needs machinery this port does not yet wire up; a code
-    byte naming one of them decodes to [None] exactly as an unassigned byte does,
-    and the interpreter halts on it. That is a {e temporary} divergence from a
-    full node, and the only one: within this subset the byte values, immediate
-    sizes and semantics are those of the real machine (revm's [revm-bytecode]
-    opcode table).
+    What remains absent is what needs a {e second} frame or a piece of state
+    this port has not built: the external-code readers and [EXTCODEHASH] (which
+    need code on an account, and so arrive with [CREATE]), the return-data
+    readers, [BLOCKHASH], the blob instructions, the calls, the creations and
+    [SELFDESTRUCT]. A code byte naming one of them decodes to [None] exactly as
+    an unassigned byte does, and the interpreter halts on it. That is a
+    {e temporary} divergence from a full node, and the only one: within this
+    subset the byte values, immediate sizes and semantics are those of the real
+    machine (revm's [revm-bytecode] opcode table).
 
     Every operand a byte can carry is held in a type that admits only the legal
     range — {!Push_bytes} for the [1, 32] immediate width and {!Depth} for the
@@ -113,6 +114,18 @@ type t =
   | Sload
   | Sstore
   | Mcopy
+  | Keccak256
+  | Tload
+  | Tstore
+  | Log of Topic_count.t
+      (** [LOG0]-[LOG4] as one constructor carrying its arity, because the five
+          bytes [0xa0]-[0xa4] are one instruction with an operand and not five
+          instructions. The operand then determines the byte encoded, the number
+          of topic words popped, the {!Log.Topics.t} constructor built and the
+          price charged, so a [LOG3] that pops two topics is not an
+          implementation that exists. Note the offset is zero-based, unlike
+          {!Push_bytes} and {!Depth}, so this family does not go through the
+          shared one-based helper. *)
 
 val decode : int -> t option
 (** The instruction a code byte names, [None] for a byte that is unassigned or

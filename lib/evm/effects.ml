@@ -9,6 +9,8 @@ type t = {
   base : World_state.t;
   access : Access.t;
   refund : Refund.t;
+  logs : Log_journal.t;
+  transient : Transient.t;
 }
 
 (* [commit] is the write this lookup will perform if the frame can pay for it.
@@ -29,11 +31,22 @@ type 'a load = {
   commit : t -> t;
 }
 
-let start ~world ~access = { world; base = world; access; refund = Refund.zero }
+let start ~world ~access =
+  {
+    world;
+    base = world;
+    access;
+    refund = Refund.zero;
+    logs = Log_journal.empty;
+    transient = Transient.empty;
+  }
+
 let world t = t.world
 let base t = t.base
 let access t = t.access
 let refund t = t.refund
+let logs t = t.logs
+let transient t = t.transient
 let loaded l = l.value
 let warmth l = l.warmth
 let warmed l = l.effects
@@ -61,7 +74,19 @@ let storage t address ~slot =
   let touched, access = Access.touch_slot t.access address slot in
   read t ~touched ~access ~value:(World_state.storage t.world address slot)
 
-let plan_store t address ~slot ~value =
+(* The permit is taken and discarded. Its whole job is to be an argument the
+   caller could not have produced without consulting the frame's mutability, so
+   binding it to [_permit] here is not it being ignored, it is it having already
+   done its work at the call site. *)
+let log t (_permit : Mutability.permit) entry =
+  { t with logs = Log_journal.append t.logs entry }
+
+let transient_load t address ~slot = Transient.get t.transient address ~slot
+
+let transient_store t (_permit : Mutability.permit) address ~slot ~value =
+  { t with transient = Transient.set t.transient address ~slot ~value }
+
+let plan_store t (_permit : Mutability.permit) address ~slot ~value =
   let touched, access = Access.touch_slot t.access address slot in
   (* [original] from [base] and [present] from [world]: the first is the
      transaction's view, the second is this run's, and reading both from the same
@@ -92,3 +117,5 @@ let equal a b =
   && World_state.equal a.base b.base
   && Access.equal a.access b.access
   && Refund.equal a.refund b.refund
+  && Log_journal.equal a.logs b.logs
+  && Transient.equal a.transient b.transient

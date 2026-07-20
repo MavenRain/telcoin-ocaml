@@ -28,11 +28,21 @@
     [NUMBER], [PREVRANDAO], [GASLIMIT], [CHAINID], [BASEFEE]) and the world
     ([BALANCE], [SLOAD], [SSTORE]).
 
-    What is still absent needs a {e second frame} or a hash function: [CALL] and
-    its relatives, [CREATE], [LOG0]–[LOG4], [KECCAK256], [EXTCODE*],
-    [RETURNDATA*], [BLOCKHASH], [SELFDESTRUCT] and the transient-storage pair.
-    Each remains a code byte that simply fails to decode, so a program using one
-    halts rather than silently doing the wrong thing. See {!Opcode}.
+    Since the hash landed it also runs [KECCAK256], the logs ([LOG0]–[LOG4]) and
+    EIP-1153 transient storage ([TLOAD], [TSTORE]). [KECCAK256] and [TLOAD] are
+    pure frame-local instructions with no static-frame interaction: the first
+    only reads memory, the second only reads the transient map. The {e writes}
+    among the new instructions are [TSTORE] and the logs, and they join [SSTORE]
+    as the three that {!Mutability} guards: each is refused in a static frame,
+    and the refusal is an argument they demand rather than a branch each one has
+    to remember. That guarded set is exactly the one {!Mutability} names.
+
+    What is still absent needs a {e second frame} or a piece of state this port
+    has not built: [CALL] and its relatives, [CREATE], [EXTCODE*] and
+    [EXTCODEHASH] (which want code on an account), [RETURNDATA*], [BLOCKHASH],
+    [SELFDESTRUCT] and the blob instructions. Each remains a code byte that
+    simply fails to decode, so a program using one halts rather than silently
+    doing the wrong thing. See {!Opcode}.
 
     {2 Termination}
 
@@ -161,6 +171,26 @@ type error =
           value of {!error} denotes the same observable event, so the distinction
           costs nothing semantic and is worth the one thing it buys — a reader
           debugging a halted frame learns it was the sentry and not the price. *)
+  | Static_state_change
+      (** [SSTORE], [TSTORE] or a [LOG] attempted in a frame entered by
+          [STATICCALL]. EIP-214 makes it an exceptional halt, and revm spells it
+          [require_non_staticcall!] as the first statement of [sstore]
+          ([instructions/host.rs:229]) and [log] ([:319]), and as the statement
+          after the Cancun hardfork check in [tstore] ([:294], the check itself
+          at [:293]); this port has no hardfork gate, so at Prague the two orders
+          coincide.
+
+          Being first is observable, and the tests pin it: a static frame
+          reports this even when the stack could not have supplied the operands
+          and even when the allowance could not have paid, because the refusal
+          precedes both. The guard itself is not a branch an instruction author
+          has to remember — see {!Mutability} — but its {e position} is, and
+          that part is a test obligation.
+
+          It cannot arise in this chunk's own runs, because nothing yet builds a
+          static frame except a test constructing one directly: [STATICCALL] is
+          the calls chunk. It is here now because the write sites are here now,
+          and a guard added after the writes it guards is a guard added late. *)
 
 val error_to_string : error -> string
 

@@ -26,6 +26,7 @@ module Data = Tn_evm.Data
 module Depth = Tn_evm.Depth
 module Effects = Tn_evm.Effects
 module Env = Tn_evm.Env
+module Mutability = Tn_evm.Mutability
 module Gas = Tn_evm.Gas
 module Interpreter = Tn_evm.Interpreter
 module Memory = Tn_evm.Memory
@@ -82,7 +83,8 @@ let base_env =
          ~access_list:[])
     ~call:
       (Env.Call.make ~target:(address_of 0x02) ~caller:(address_of 0x0c)
-         ~value:(u 500_000_000_000_000_000) ~data:Data.empty)
+         ~value:(u 500_000_000_000_000_000) ~data:Data.empty
+         ~mutability:Mutability.Mutable)
 
 let base_effects = Effects.start ~world:World_state.empty ~access:Access.empty
 
@@ -758,12 +760,13 @@ let test_program_invalid_opcode () =
     (Interpreter.Failed (Interpreter.Invalid_opcode 0xfe))
     (run (asm [ op Opcode.Invalid ]) 1_000);
   (* An opcode deferred to a later chunk is refused rather than silently doing
-     something else. 0x54 (SLOAD) used to stand here and now decodes, which is
-     the whole point of the host seam; 0x20 is KECCAK256, deferred with the rest
-     of this port's crypto, and 0xf1 is CALL, which needs a second frame. *)
-  check_outcome "a deferred hash instruction halts"
-    (Interpreter.Failed (Interpreter.Invalid_opcode 0x20))
-    (run (Code.of_string (byte 0x20)) 1_000);
+     something else. Two have now graduated: 0x54 (SLOAD) with the host seam and
+     0x20 (KECCAK256) with the hash, and each stood exactly here before it did.
+     0x3f is EXTCODEHASH, which needs code on an account and so arrives with
+     CREATE, and 0xf1 is CALL, which needs a second frame. *)
+  check_outcome "a deferred external-code instruction halts"
+    (Interpreter.Failed (Interpreter.Invalid_opcode 0x3f))
+    (run (Code.of_string (byte 0x3f)) 1_000);
   check_outcome "a deferred call instruction halts"
     (Interpreter.Failed (Interpreter.Invalid_opcode 0xf1))
     (run (Code.of_string (byte 0xf1)) 1_000)

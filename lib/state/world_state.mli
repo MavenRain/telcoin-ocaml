@@ -14,9 +14,9 @@
     slot surviving the account it belongs to — is not representable here, and it
     is why {!remove_account} cannot forget half of its job.
 
-    A state root (the trie hash that commits the whole map) needs the state trie,
-    RLP and keccak this port defers with the rest of its crypto, so it arrives
-    with that chunk; agreement is checked here by direct content equality. *)
+    A state root (the trie hash that commits the whole map) needs the state trie
+    and RLP, which this port still defers; keccak itself now exists, in
+    {!Tn_keccak}. Agreement is checked here by direct content equality. *)
 
 open Tn_types
 

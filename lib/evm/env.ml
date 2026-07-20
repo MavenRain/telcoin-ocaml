@@ -82,19 +82,24 @@ module Call = struct
     caller : Units.Address.t;
     value : word;
     data : Data.t;
+    mutability : Mutability.t;
   }
 
-  let make ~target ~caller ~value ~data = { target; caller; value; data }
+  let make ~target ~caller ~value ~data ~mutability =
+    { target; caller; value; data; mutability }
+
   let target t = t.target
   let caller t = t.caller
   let value t = t.value
   let data t = t.data
+  let mutability t = t.mutability
 
   let equal a b =
     Units.Address.equal a.target b.target
     && Units.Address.equal a.caller b.caller
     && U256.equal a.value b.value
     && Data.equal a.data b.data
+    && Mutability.equal a.mutability b.mutability
 end
 
 type t = { block : Block.t; tx : Tx.t; call : Call.t }

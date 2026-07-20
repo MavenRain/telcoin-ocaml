@@ -5,8 +5,9 @@
     holdings) and its {!storage} (the contract slots written at that address).
     Rust's account also carries a [code_hash] and a [storage_root]; no account
     this chunk models has code, and the storage {e root} — the trie hash
-    committing the slot map — needs the state trie, RLP and keccak this port
-    defers with the rest of its crypto, so both are left to a later chunk. The
+    committing the slot map — needs the state trie and RLP, which this port
+    still defers. Keccak itself now exists, in {!Tn_keccak}, so the code hash is
+    waiting only on code: it arrives with [CREATE]. The
     slots themselves are present, because the interpreter's [SSTORE] needs
     somewhere to put them. Until code exists every account is empty of code, and
     {!is_empty} is the EIP-161 emptiness test over the fields present. *)

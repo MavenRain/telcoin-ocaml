@@ -1,15 +1,16 @@
 (** Everything an execution frame can change outside itself, as one persistent
     value.
 
-    A frame reads and writes the world, warms accounts and slots, and accrues
-    refunds. revm tracks all three with a mutable state and an undo log it
-    replays backwards on revert ([revm-context-interface]
-    [journaled_state/entry.rs]). It has to: its state is a mutable map and there
-    is no older version left to return to.
+    A frame reads and writes the world, warms accounts and slots, accrues
+    refunds, emits logs, and writes transient storage. revm tracks all five with
+    a mutable state and an undo log it replays backwards on revert
+    ([revm-context-interface] [journaled_state/entry.rs]). It has to: its state
+    is a mutable map and there is no older version left to return to.
 
-    This port has one. {!Tn_state.World_state.t}, {!Access.t} and the refund
-    counter are all persistent, so the value that {e was} the state before a
-    frame ran is still in the caller's hand after it. A checkpoint is a binding,
+    This port has one. {!Tn_state.World_state.t}, {!Access.t}, the refund
+    counter, {!Log_journal.t} and {!Transient.t} are all persistent, so the
+    value that {e was} the state before a frame ran is still in the caller's
+    hand after it. A checkpoint is a binding,
     a revert is using the old binding, and an exceptional halt is dropping the
     new one. Undoing is not an operation, it is the absence of one:
     {!Interpreter.Reverted} and {!Interpreter.Failed} simply carry no {!t}.
@@ -19,7 +20,11 @@
     its success hands one back, so nesting is function composition and a reverted
     child is a value the parent drops. Every class of bug in which an undo entry
     is pushed for one change and forgotten for another is absent because there is
-    no undo code.
+    no undo code. Each field added here inherits that for free: the logs a
+    reverted frame emitted and the transient slots it wrote are discarded by the
+    same act of dropping the value, and neither needed a line of code to say so.
+    A sixth field on {!Interpreter}'s machine would not have got it, because
+    [Reverted] is built from the remaining gas and the popped output alone.
 
     It reproduces revm exactly on the part that is easiest to get wrong: a revert
     {e un-warms}. One might reason that a cold read was genuinely paid for and
@@ -40,7 +45,15 @@
     invalidate: once a nested frame can revert independently, the
     pre-transaction and pre-frame states diverge and [original] must move onto
     the slot, as revm has it. When that happens, this module gains a checkpoint
-    and the pre-transaction world stops being a single value. *)
+    and the pre-transaction world stops being a single value.
+
+    Transient storage has a lifetime this value models only half of, and the
+    half it models is the hard one. EIP-1153 requires a frame's revert to undo
+    its transient writes, which is the drop above, and requires the whole map to
+    be cleared at the end of the {e transaction}, which is the transaction layer
+    letting go of this value. Neither needs a mechanism here. What would need
+    one is the case that does not arise: transient storage surviving a frame it
+    was written in while not surviving the transaction. *)
 
 open Tn_types
 
@@ -70,6 +83,13 @@ val base : t -> Tn_state.World_state.t
 
 val access : t -> Access.t
 val refund : t -> Refund.t
+
+val logs : t -> Log_journal.t
+(** The logs emitted so far, in emission order. *)
+
+val transient : t -> Transient.t
+(** The EIP-1153 transient store as it currently stands. *)
+
 val loaded : 'a load -> 'a
 val warmth : 'a load -> Access.warmth
 
@@ -103,8 +123,38 @@ val storage :
   t -> Units.Address.t -> slot:Tn_state.U256.t -> Tn_state.U256.t load
 (** [SLOAD]: read a slot and warm it. Total — an unwritten slot reads zero. *)
 
+val log : t -> Mutability.permit -> Log.t -> t
+(** [LOG0]-[LOG4]: append an entry to the journal.
+
+    It returns a bare {!t} and no {!Access.warmth}. There is therefore nothing a
+    caller could hand to {!Gas.account_access_cost}, which is correct: a log
+    warms nothing and carries no cold surcharge. This is {!self_balance}'s "no
+    witness escapes" argument used to forbid a price rather than to hide one.
+
+    The {!Mutability.permit} is what makes EIP-214 unforgettable here. It is not
+    read; the caller could not have produced one without consulting the frame's
+    mutability, and that consultation is the guard. *)
+
+val transient_load : t -> Units.Address.t -> slot:Tn_state.U256.t -> Tn_state.U256.t
+(** [TLOAD]: read a transient slot. Total, returning zero for an unwritten slot,
+    and it returns a bare word rather than a [load] because EIP-1153 places
+    transient storage outside EIP-2929: there is no warmth to record and no
+    surcharge to price. *)
+
+val transient_store :
+  t ->
+  Mutability.permit ->
+  Units.Address.t ->
+  slot:Tn_state.U256.t ->
+  value:Tn_state.U256.t ->
+  t
+(** [TSTORE]: write a transient slot. Unlike {!plan_store} there is no plan and
+    commit split, because EIP-1153 gives [TSTORE] a flat price that depends on
+    nothing it would have to look up first. *)
+
 val plan_store :
   t ->
+  Mutability.permit ->
   Units.Address.t ->
   slot:Tn_state.U256.t ->
   value:Tn_state.U256.t ->
@@ -131,8 +181,9 @@ val commit_store : Sstore_state.t load -> t
     drift apart and no caller can apply a write while forgetting its refund. *)
 
 val equal : t -> t -> bool
-(** Exact content equality across the world, the access set and the refund — the
-    property the tests need in order to state "the revert changed nothing".
+(** Exact content equality across the world, the access set, the refund, the log
+    journal and the transient store — the property the tests need in order to
+    state "the revert changed nothing".
 
     Note it is stricter than "same post-state": two runs reaching the same world
     by different access patterns compare unequal here. That is correct, because

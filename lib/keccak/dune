@@ -1,0 +1,7 @@
+; Keccak-256 is a leaf: it depends on nothing else in this port, so both
+; tn_state (for a code hash) and tn_evm (for KECCAK256) can sit above it
+; without either depending on the other.
+(library
+ (name tn_keccak)
+ (public_name telcoin_ocaml.keccak)
+ (libraries digestif))

@@ -29,6 +29,22 @@ let selfbalance = 5
    [revm-interpreter] [instructions.rs:118-119]). *)
 let warm_storage_read = 100
 
+(* [KECCAK256]'s two prices ([cfg/gas.rs:50,52]). The word rate is 6 and is NOT
+   the copy family's 3: an instruction that hashes memory pays for reaching the
+   words (the memory curve's linear 3), and pays 6 for each word it absorbs.
+   Three word prices exist in this schedule, two of which coincide at 3, and
+   aliasing any pair would be a systematic mispricing no single test separates. *)
+let keccak256 = 30
+let keccak256_word = 6
+
+(* The log prices ([cfg/gas.rs:44,46,48]). The base is the table entry every
+   arity shares; the topic price is charged per topic in the body; the data
+   price is per byte and not per word, which is the one place in the schedule
+   where a memory-shaped quantity is not rounded up to a word. *)
+let log_base = 375
+let log_topic = 375
+let log_data_byte = 8
+
 let static_cost = function
   (* The instructions that halt are free; all their cost, where they have any,
      is the memory they touch. *)
@@ -59,6 +75,15 @@ let static_cost = function
      and [SLOAD] used to cost into the cold surcharge, leaving the warm 100 here
      ([instructions.rs:118-119]). *)
   | Opcode.Balance | Opcode.Sload -> warm_storage_read
+  (* EIP-1153 gives both a flat warm-read price and no cold axis at all
+     ([instructions.rs:210-211] writes the 100 as a literal). *)
+  | Opcode.Tload | Opcode.Tstore -> warm_storage_read
+  | Opcode.Keccak256 -> keccak256
+  (* Uniform across the five arities: revm gives every [LOG] the same table
+     entry [gas::LOG] ([instructions.rs:282-286]) and charges the per-topic 375
+     in the body. Splitting it the other way would produce identical totals and
+     an unpinnable ordering, so the table price stays the base alone. *)
+  | Opcode.Log _ -> log_base
   | Opcode.Jumpdest -> jumpdest
 
 let exp_byte_cost = 50
@@ -152,11 +177,33 @@ let word_bytes = 32
    lengths. The count is therefore at most [max_int / 32 + 1] and three times it
    is comfortably representable, which is why this returns an [int] and not an
    [int option]. *)
-let copy_cost length =
+let words_of_length length =
   if length <= 0 then 0
-  else
-    copy_word_cost
-    * ((length / word_bytes) + if length mod word_bytes = 0 then 0 else 1)
+  else (length / word_bytes) + if length mod word_bytes = 0 then 0 else 1
+
+let copy_cost length = copy_word_cost * words_of_length length
+
+(* [KECCAK256]'s dynamic half: 6 per word of input, over the same rounding rule
+   the copy family uses and at a different rate. Sharing the rule and separating
+   the rate is the whole point of the split — the rounding is one fact, as
+   revm's [num_words] is, while [copy_word_cost] and [keccak256_word] are two
+   prices that must be free to differ.
+
+   Returns an [int] rather than an option for [copy_cost]'s reason: the word
+   count is at most [max_int / 32 + 1] and six times it is representable. *)
+let keccak_word_cost length = keccak256_word * words_of_length length
+
+(* A log's dynamic half: 375 per topic plus 8 per byte of data.
+
+   Unlike the two above this is checked, because the per-byte rate is applied to
+   a length rather than to a word count, so the product is eight times larger
+   than anything [copy_cost] forms and a length near [max_int / 8] would wrap. A
+   [None] means the true price exceeds [max_int], which no allowance can meet,
+   so the caller's treatment of it as out of gas is exact. *)
+let log_dynamic_cost ~topics ~length =
+  Option.bind (checked_mul log_data_byte (Int.max 0 length)) (fun data ->
+      Option.bind (checked_mul log_topic (Topic_count.to_int topics))
+        (fun topic -> checked_add topic data))
 
 type sstore_entry_error = Reentrancy_sentry | Insufficient
 

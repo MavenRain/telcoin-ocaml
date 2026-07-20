@@ -1,0 +1,3 @@
+(executable
+ (name probe)
+ (libraries tn_types tn_state tn_evm tn_keccak unix))

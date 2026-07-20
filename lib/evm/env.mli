@@ -134,6 +134,7 @@ module Call : sig
     caller:Units.Address.t ->
     value:word ->
     data:Data.t ->
+    mutability:Mutability.t ->
     t
 
   val target : t -> Units.Address.t
@@ -149,6 +150,19 @@ module Call : sig
 
   val data : t -> Data.t
   (** [CALLDATA...]: the input, read through {!Data}'s zero-extension rule. *)
+
+  val mutability : t -> Mutability.t
+  (** Whether this frame may change anything outside itself (EIP-214).
+
+      It sits here rather than on {!Block} or {!Tx} because staticness is a
+      property of the {e call}: [STATICCALL] makes the frame it enters static and
+      every frame beneath it static too, while the transaction and the block are
+      the same either way. It is therefore replaced by {!with_call} along with
+      the rest of the call context, which is what will make a sub-frame inherit
+      it correctly by default when the calls chunk arrives.
+
+      The interpreter never branches on this directly. It converts it to a
+      {!Mutability.permit}, which is the argument the writes demand. *)
 
   val equal : t -> t -> bool
 end
