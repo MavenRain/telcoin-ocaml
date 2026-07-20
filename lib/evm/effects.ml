@@ -116,9 +116,19 @@ let plan_store t (_permit : Mutability.permit) address ~slot ~value =
   (* [original] from [base] and [present] from [world]: the first is the
      transaction's view, the second is this run's, and reading both from the same
      state is the EIP-2200 bug this split exists to make unwritable. *)
+  (* An account created by this transaction has no pre-transaction storage, so
+     [original] is zero for every slot of it rather than whatever the address
+     held before. revm reaches the same answer from the other side: a
+     newly-created account never consults the database for a slot and reads zero
+     ([inner.rs:754,773-778]), so the value SSTORE nets against is that zero.
+     Without this guard a contract created at an address that already held
+     storage would be net-metered against the previous occupant's values, which
+     misprices EIP-2200 and can pay out a refund that was never earned. *)
   let write =
     Sstore_state.make
-      ~original:(World_state.storage t.base address slot)
+      ~original:
+        (if Lifecycle.created_here t.lifecycle address then Tn_state.U256.zero
+         else World_state.storage t.base address slot)
       ~present:(World_state.storage t.world address slot)
       ~updated:value
   in
@@ -174,6 +184,13 @@ let bump_nonce t address =
      way needs no setter;
    - its code is left alone, for the same reason: that test guarantees there is
      none, so revm's explicit clearing at [inner.rs:419] is a no-op here;
+   - its storage IS cleared, and that is not a no-op. The collision test looks at
+     code and the nonce alone, so an address can hold storage and still be
+     created at. revm gives such a creation an empty storage by answering every
+     slot of a newly-created account with zero instead of reading the database
+     ([inner.rs:754,773-778]), which is the same state reached here by emptying
+     the map. Leaving it would let a fresh contract read the previous occupant's
+     slots;
    - the address is recorded as created in this transaction, which is what a
      later [SELFDESTRUCT] consults for EIP-6780;
    - the endowment moves last, through {!transfer}, so a sender underflow or the
@@ -182,7 +199,11 @@ let bump_nonce t address =
    The permit is EIP-214's: a creation is a state change, and a static frame can
    never produce one. *)
 let begin_creation t (_permit : Mutability.permit) ~creator ~created ~value =
-  let born = Account.increment_nonce (World_state.account t.world created) in
+  let born =
+    Account.with_storage
+      (Account.increment_nonce (World_state.account t.world created))
+      Tn_state.Storage.empty
+  in
   transfer
     {
       t with

@@ -45,16 +45,18 @@
     effects are threaded by value, so a reverting or halting sub-frame is a
     dropped value and needs no checkpoint — see {!Effects}.
 
-    What is still absent needs a piece of state this port has not built: the
-    account creations [CREATE] and [CREATE2], [SELFDESTRUCT], [BLOCKHASH], the
-    blob instructions, and EIP-7702 delegated-code execution. The last is the one
-    caveat on the calls' faithfulness: a call executes its target account's own
-    code directly and resolves no delegation designator, because the account model
-    has none yet, so a target bearing a 7702 designator would run the designator
-    bytes rather than the delegated code. For every non-delegated target the four
-    calls are faithful. Each still-absent opcode remains a code byte that fails to
-    decode, so a program using one halts rather than silently doing the wrong
-    thing. See {!Opcode}.
+    The account creations [CREATE] and [CREATE2], account destruction
+    [SELFDESTRUCT] and [BLOCKHASH] join this set as of this chunk: a frame now
+    spawns a creation frame, deploys what it returns, ends itself, or reads the
+    chain behind this block. What is still absent are the blob instructions and
+    EIP-7702 delegated-code execution. The latter is the one caveat on the calls'
+    faithfulness: a call executes its target account's own code directly and
+    resolves no delegation designator, because the account model has none yet, so
+    a target bearing a 7702 designator would run the designator bytes rather than
+    the delegated code. For every non-delegated target the four calls are
+    faithful. Each still-absent opcode remains a code byte that fails to decode,
+    so a program using one halts rather than silently doing the wrong thing. See
+    {!Opcode}.
 
     {2 Termination}
 
@@ -80,6 +82,11 @@
 
     - {!Stopped} — [STOP], or the program counter walking off the end of the
       code, which is the same thing. Unspent gas survives, and so do the effects.
+      [SELFDESTRUCT] surfaces here too: revm's [InstructionResult::SelfDestruct]
+      is a [return_ok] member ([instruction_result.rs:143-148]) that halts with
+      empty output and preserved gas ([host.rs:425], [interpreter.rs:207-210]), so
+      it is observationally a [STOP] at every merge site and the port adds no
+      variant for it.
     - {!Returned} — [RETURN], with the bytes it selected from memory. Unspent gas
       survives, and so do the effects.
     - {!Reverted} — [REVERT]: the frame's effects are abandoned but the bytes it
@@ -232,7 +239,7 @@ type error =
           gas. *)
   | Initcode_too_large
       (** [CREATE] or [CREATE2] asked to read more init code than EIP-3860
-          allows: revm's [CreateInitCodeSizeLimit] ([contract.rs:44-48]). The
+          allows: revm's [CreateInitCodeSizeLimit] ([contract.rs:48-53]). The
           test is on the requested {e length}, before the meter is charged and
           before any of that memory is reached, so an over-long request never
           pays for the expansion it named. *)

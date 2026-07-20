@@ -13,13 +13,13 @@
     needed, and none of them opens a second frame. The sub-frame message-call
     family — [CALL], [CALLCODE], [DELEGATECALL], [STATICCALL] — and the
     return-data readers [RETURNDATASIZE] and [RETURNDATACOPY] join them as of this
-    chunk: a frame can now open a {e second} frame. What remains absent needs a
-    piece of state this port has not built: [CREATE], [CREATE2], [SELFDESTRUCT],
-    [BLOCKHASH], the blob instructions, and EIP-7702 delegated-code execution (the
-    calls resolve no delegation designator, so their faithfulness holds for a
-    non-delegated target). A code byte naming one of them decodes to
-    [None] exactly as
-    an unassigned byte does, and the interpreter halts on it. That is a
+    chunk: a frame can now open a {e second} frame. The account creations
+    [CREATE] and [CREATE2], account destruction [SELFDESTRUCT] and [BLOCKHASH]
+    join the set as of this chunk too. What remains absent are the blob
+    instructions and EIP-7702 delegated-code execution (the calls resolve no
+    delegation designator, so their faithfulness holds for a non-delegated
+    target). A code byte naming one of the absent instructions decodes to [None]
+    exactly as an unassigned byte does, and the interpreter halts on it. That is a
     {e temporary} divergence from a full node, and the only one: within this
     subset the byte values, immediate sizes and semantics are those of the real
     machine (revm's [revm-bytecode] opcode table).

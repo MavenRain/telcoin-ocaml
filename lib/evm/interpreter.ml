@@ -883,6 +883,87 @@ let merge_call base ~out_off ~out_len ~outcome =
         ~gas:(Gas.give_back (Gas.remaining gas_left) base.gas)
   | Failed _ -> push_zero base ~gas:base.gas
 
+(* The end of a successful creation frame ([revm-handler] [frame.rs:535-593]):
+   what the init code returned becomes the account's code, if it may and if the
+   frame can pay for it.
+
+   Three ways to fail, and all three are alike in the caller: the state the frame
+   built is dropped, zero is pushed and NOT one unit of the forwarded allowance
+   comes back, because all three are errors rather than reverts.
+
+   1. EIP-3541, output beginning with the reserved [0xEF];
+   2. EIP-170, output past {!Tn_state.Bytecode.max_deployed_size};
+   3. EIP-2 point 3, a frame that cannot pay 200 per byte for its own code. That
+      one is the reason the charge is here and not in the frame: a creation that
+      returns code it cannot afford deploys nothing at all rather than a shorter
+      contract.
+
+   An init code that merely [STOP]s returns no bytes, passes all three, pays
+   nothing, and deploys an account with empty code — which is a successful
+   creation, not a failed one. It is a plain [let] rather than a member of the
+   frame-recursion group below: like {!merge_call} it spawns no sub-frame, so it
+   sits beside that function, and [create_op] reaches it by backward reference. *)
+let deposit_code base ~created ~permit ~warmed ~output ~gas_left ~effects =
+  Result.fold
+    ~ok:Fun.id
+    ~error:(fun () -> push_zero { base with effects = warmed } ~gas:base.gas)
+    (let ( let* ) = Result.bind in
+     let* () =
+       Result.map_error (fun _ -> ()) (Tn_state.Bytecode.validate_deployment output)
+     in
+     let* paid =
+       Option.to_result ~none:()
+         (Gas.charge (Gas.code_deposit_cost (String.length output)) gas_left)
+     in
+     Ok
+       (transition
+          (Result.map
+             (fun stack ->
+               {
+                 base with
+                 pc = base.pc + 1;
+                 stack;
+                 effects = Effects.deploy_code effects permit created output;
+                 gas = Gas.give_back (Gas.remaining paid) base.gas;
+                 return_data = Return_data.empty;
+               })
+             (stack_result (Stack.push (Address_word.to_word created) base.stack)))))
+
+(* Merging a finished creation frame into its caller ([revm-handler]
+   [frame.rs:493-527]). It differs from {!merge_call} on every axis, which is why
+   it is a separate function rather than a flag on that one:
+
+   - what is pushed is the created address, not a one;
+   - nothing is copied into an output window, because a creation has none;
+   - the return-data buffer stays EMPTY on success. The deployed code is not
+     return data, and [RETURNDATASIZE] after a successful [CREATE] reads zero
+     ([frame.rs:497-505] populates the buffer only for an exact [Revert]);
+   - a revert hands its leftover gas back AND leaves its output in the buffer,
+     which is the only way a creation ever fills it.
+
+   Like {!deposit_code} it spawns no sub-frame, so it is a plain [let] beside
+   {!merge_call} rather than a member of the frame-recursion group below. *)
+let merge_creation base ~created ~permit ~warmed ~outcome =
+  match outcome with
+  | Stopped { gas_left; effects } ->
+      deposit_code base ~created ~permit ~warmed ~output:"" ~gas_left ~effects
+  | Returned { output; gas_left; effects } ->
+      deposit_code base ~created ~permit ~warmed ~output ~gas_left ~effects
+  | Reverted { output; gas_left } ->
+      transition
+        (Result.map
+           (fun stack ->
+             {
+               base with
+               pc = base.pc + 1;
+               stack;
+               effects = warmed;
+               gas = Gas.give_back (Gas.remaining gas_left) base.gas;
+               return_data = Return_data.of_string output;
+             })
+           (stack_result (Stack.push W.zero base.stack)))
+  | Failed _ -> push_zero { base with effects = warmed } ~gas:base.gas
+
 let rec execute env code depth m = function
   | Opcode.Stop -> Halt (Stopped { gas_left = m.gas; effects = m.effects })
   | Opcode.Add -> binary Alu.add m
@@ -1338,82 +1419,6 @@ and create_op env code depth m ~salted =
                            ~effects:child_effects ~depth:(Call_depth.succ depth)))
                   (Effects.begin_creation warmed permit ~creator ~created ~value))
             (Effects.bump_nonce base.effects creator)))
-
-(* Merging a finished creation frame into its caller ([revm-handler]
-   [frame.rs:493-527]). It differs from {!merge_call} on every axis, which is why
-   it is a separate function rather than a flag on that one:
-
-   - what is pushed is the created address, not a one;
-   - nothing is copied into an output window, because a creation has none;
-   - the return-data buffer stays EMPTY on success. The deployed code is not
-     return data, and [RETURNDATASIZE] after a successful [CREATE] reads zero
-     ([frame.rs:497-505] populates the buffer only for an exact [Revert]);
-   - a revert hands its leftover gas back AND leaves its output in the buffer,
-     which is the only way a creation ever fills it. *)
-and merge_creation base ~created ~permit ~warmed ~outcome =
-  match outcome with
-  | Stopped { gas_left; effects } ->
-      deposit_code base ~created ~permit ~warmed ~output:"" ~gas_left ~effects
-  | Returned { output; gas_left; effects } ->
-      deposit_code base ~created ~permit ~warmed ~output ~gas_left ~effects
-  | Reverted { output; gas_left } ->
-      transition
-        (Result.map
-           (fun stack ->
-             {
-               base with
-               pc = base.pc + 1;
-               stack;
-               effects = warmed;
-               gas = Gas.give_back (Gas.remaining gas_left) base.gas;
-               return_data = Return_data.of_string output;
-             })
-           (stack_result (Stack.push W.zero base.stack)))
-  | Failed _ -> push_zero { base with effects = warmed } ~gas:base.gas
-
-(* The end of a successful creation frame ([revm-handler] [frame.rs:535-593]):
-   what the init code returned becomes the account's code, if it may and if the
-   frame can pay for it.
-
-   Three ways to fail, and all three are alike in the caller: the state the frame
-   built is dropped, zero is pushed and NOT one unit of the forwarded allowance
-   comes back, because all three are errors rather than reverts.
-
-   1. EIP-3541, output beginning with the reserved [0xEF];
-   2. EIP-170, output past {!Tn_state.Bytecode.max_deployed_size};
-   3. EIP-2 point 3, a frame that cannot pay 200 per byte for its own code. That
-      one is the reason the charge is here and not in the frame: a creation that
-      returns code it cannot afford deploys nothing at all rather than a shorter
-      contract.
-
-   An init code that merely [STOP]s returns no bytes, passes all three, pays
-   nothing, and deploys an account with empty code — which is a successful
-   creation, not a failed one. *)
-and deposit_code base ~created ~permit ~warmed ~output ~gas_left ~effects =
-  Result.fold
-    ~ok:Fun.id
-    ~error:(fun () -> push_zero { base with effects = warmed } ~gas:base.gas)
-    (let ( let* ) = Result.bind in
-     let* () =
-       Result.map_error (fun _ -> ()) (Tn_state.Bytecode.validate_deployment output)
-     in
-     let* paid =
-       Option.to_result ~none:()
-         (Gas.charge (Gas.code_deposit_cost (String.length output)) gas_left)
-     in
-     Ok
-       (transition
-          (Result.map
-             (fun stack ->
-               {
-                 base with
-                 pc = base.pc + 1;
-                 stack;
-                 effects = Effects.deploy_code effects permit created output;
-                 gas = Gas.give_back (Gas.remaining paid) base.gas;
-                 return_data = Return_data.empty;
-               })
-             (stack_result (Stack.push (Address_word.to_word created) base.stack)))))
 
 let run ~env ~code ~gas ~effects =
   run_subframe ~env ~code ~gas ~effects ~depth:Call_depth.zero
