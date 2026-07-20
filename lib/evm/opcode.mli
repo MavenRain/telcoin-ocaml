@@ -10,10 +10,14 @@
 
     The external-code readers — [EXTCODESIZE], [EXTCODECOPY] and [EXTCODEHASH] —
     are in as of this chunk: code now lives on an account, which is all they
-    needed, and none of them opens a second frame. What remains absent is what
-    needs a {e second} frame or a piece of state this port has not built: the
-    return-data readers, [BLOCKHASH], the blob instructions, the calls, the
-    creations and [SELFDESTRUCT]. A code byte naming one of them decodes to
+    needed, and none of them opens a second frame. The sub-frame message-call
+    family — [CALL], [CALLCODE], [DELEGATECALL], [STATICCALL] — and the
+    return-data readers [RETURNDATASIZE] and [RETURNDATACOPY] join them as of this
+    chunk: a frame can now open a {e second} frame. What remains absent needs a
+    piece of state this port has not built: [CREATE], [CREATE2], [SELFDESTRUCT],
+    [BLOCKHASH], the blob instructions, and EIP-7702 delegated-code execution (the
+    calls resolve no delegation designator, so their faithfulness holds for a
+    non-delegated target). A code byte naming one of them decodes to
     [None] exactly as
     an unassigned byte does, and the interpreter halts on it. That is a
     {e temporary} divergence from a full node, and the only one: within this
@@ -141,6 +145,29 @@ type t =
           implementation that exists. Note the offset is zero-based, unlike
           {!Push_bytes} and {!Depth}, so this family does not go through the
           shared one-based helper. *)
+  | Returndatasize
+      (** [0x3d]. EIP-211: the size in bytes of the buffer the most recent
+          sub-call returned, zero before any sub-call. Pushes it for a flat 2. *)
+  | Returndatacopy
+      (** [0x3e]. EIP-211: copies a window of that buffer into memory, priced
+          like the copy family ([3 + 3] per word) but with the {e opposite}
+          bounds rule — a window whose end passes the buffer is an [OutOfOffset]
+          halt, never a zero-fill, and that check runs {e before} any gas. *)
+  | Call
+      (** [0xf1]. The message call: enter a sub-frame at another account's code,
+          moving value and passing calldata, and push one on success or zero on
+          failure. Its child runs in the {e callee's} storage. *)
+  | Callcode
+      (** [0xf2]. Like [CALL] but the child runs the callee's code in the {e
+          caller's} own storage — the pre-[DELEGATECALL] way to borrow code.
+          Value still moves, notionally from the account to itself. *)
+  | Delegatecall
+      (** [0xf4]. EIP-7: run the callee's code in the caller's storage {e and}
+          with the caller's own [CALLER] and [CALLVALUE] preserved, moving no
+          value. The library-call primitive. *)
+  | Staticcall
+      (** [0xfa]. EIP-214: like [CALL] with no value and a frame that may not
+          change state — every [SSTORE], [TSTORE] and [LOG] beneath it halts. *)
 
 val decode : int -> t option
 (** The instruction a code byte names, [None] for a byte that is unassigned or

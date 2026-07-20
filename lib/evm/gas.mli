@@ -86,9 +86,10 @@ val warm_storage_read : int
     {!static_cost} before those instructions run, not by them. *)
 
 val call_stipend : int
-(** 2300 — [CALL_STIPEND] ([revm-context-interface] [cfg/gas.rs:108]). Only used
-    here as EIP-2200's sentry threshold; the calls that give it its name are
-    deferred. *)
+(** 2300 — [CALL_STIPEND] ([revm-context-interface] [cfg/gas.rs:108]). It is
+    EIP-2200's sentry threshold, and — since the calls landed — the free gas a
+    value-bearing [CALL]/[CALLCODE] gifts its callee on top of the forwarded
+    allowance ({!call_gas}). *)
 
 val storage_access_cost : Access.warmth -> int
 (** [SLOAD]'s cold surcharge on top of the 100 already charged: 2000 when the
@@ -138,6 +139,20 @@ val copy_cost : int -> int
     Returns an [int] rather than an [int option] and cannot overflow: the word
     count is at most [max_int / 32], so three times it is representable. This is
     unlike {!memory_cost}, whose quadratic term genuinely can leave the range. *)
+
+val copy_cost_verylow : int -> int
+(** [RETURNDATACOPY]'s dynamic price: the VERYLOW base of 3 plus {!copy_cost}'s
+    per-word 3, so [3 + 3 * ceil(len/32)] — revm's [copy_cost_verylow]
+    ([revm-context-interface] [cfg/gas.rs], wired at [revm-interpreter]
+    [instructions/system.rs:232]).
+
+    [CALLDATACOPY] and [CODECOPY] get their VERYLOW base from the [verylow] static
+    group and pay only {!copy_cost} in the body; [RETURNDATACOPY]'s {!static_cost}
+    is zero, so that its [OutOfOffset] bounds check precedes all of its gas, and
+    the base is folded in here instead. Charging bare {!copy_cost} for it would
+    undercharge by a flat 3 on every invocation — a consensus divergence — which
+    is why this helper exists. A zero length still costs the base 3. Cannot
+    overflow, for {!copy_cost}'s reason. *)
 
 val keccak_word_cost : int -> int
 (** Six units per thirty-two-byte word of input to [KECCAK256], rounded up
@@ -240,3 +255,59 @@ val sstore_refund : Sstore_state.t -> int
     The result is unclamped. EIP-3529's cap at a fifth of the gas spent
     ([revm-interpreter] [gas.rs:113-120]) is a property of a whole transaction;
     see {!Refund}. *)
+
+(** {2 The message-call family} *)
+
+val call_value_cost : word -> int
+(** The [CALLVALUE] surcharge a value-bearing [CALL] or [CALLCODE] pays: 9000
+    when the value is nonzero, nothing when it is zero
+    ([revm-context-interface] [cfg/gas.rs:36], gated on
+    [transfers_value = !value.is_zero()] at [call_helpers.rs:63-68]).
+    [DELEGATECALL] and [STATICCALL] never move value and so never pay it. *)
+
+val new_account_cost : value:word -> int
+(** The [NEWACCOUNT] surcharge for bringing an account into existence by sending
+    it value: 25000 when the value is nonzero, nothing when it is zero
+    ([cfg/gas.rs:38]). At Prague [is_spurious_dragon] always holds, so EIP-161
+    collapses [new_account_cost] to this value gate ([gas_params.rs:595-603]).
+
+    The interpreter adds it {e only} for [CALL], and only when the callee is
+    {!Account.is_empty} ([call_helpers.rs:158], [contract.rs:145]); the gate on
+    emptiness is the caller's, this function's gate is on the value alone. *)
+
+val forwardable_gas : t -> int
+(** EIP-150's all-but-one-64th ceiling on a forwarded sub-call allowance:
+    [remaining - remaining / 64] ([gas_params.rs:565-567], divisor 64 at [:209]).
+    Applied to the allowance {e after} the value and account charges
+    ([call_helpers.rs:83]). Below its argument, so representable. *)
+
+type call_gas = {
+  charge : int;  (** What the caller is charged: the capped forwardable gas. *)
+  forwarded : t;  (** What the callee receives: the cap plus the stipend, as a
+                      ready {!t} so no caller unwraps an option. *)
+}
+
+val call_gas : requested:word -> remaining:t -> value:word -> call_gas
+(** The gas a call charges and forwards, in revm's order ([call_helpers.rs:83-97]):
+
+    - [charge] is [min (forwardable_gas remaining) requested] — the EIP-150 cap,
+      further limited by the gas the instruction asked to forward. A [requested]
+      too large to be an [int] leaves the cap at the ceiling. It never exceeds
+      [remaining], so charging it always succeeds.
+    - [forwarded] is that cap plus {!call_stipend} when [value] is nonzero, and
+      the cap alone otherwise. The stipend is gifted on top and is {e not}
+      charged, so a value-bearing call forwards more than a sixty-fourth's-worth
+      past what it took.
+
+    [remaining] is the caller's allowance {e after} {!call_value_cost} and the
+    account and new-account charges have been taken, because revm reads
+    [remaining()] past those deductions ([call_helpers.rs:83]). Passing the
+    pre-charge allowance misprices the boundary of the 63/64 rule. *)
+
+val give_back : int -> t -> t
+(** Credit unused sub-frame gas back to the caller — revm's [Gas::erase_cost]
+    ([revm-handler] [frame.rs:479-481]). Total: the caller's remaining plus the
+    child's leftover never exceeds the allowance the call began with, so it stays
+    representable. Applied to a child's [Stopped], [Returned] or [Reverted]
+    leftover, and to the whole forwarded amount on a frame-entry guard that never
+    ran the child; never on a [Failed] child, which forfeits all of it. *)

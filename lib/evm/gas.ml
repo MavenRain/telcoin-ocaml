@@ -53,6 +53,13 @@ let static_cost = function
      ([instructions.rs:201-203]): its 100 is charged inside [sstore_entry], after
      the EIP-2200 sentry, and charging it here would move that sentry by 100. *)
   | Opcode.Sstore -> zero
+  (* [RETURNDATACOPY]'s table entry is zero: all of its price is dynamic, the
+     [copy_cost_verylow] (VERYLOW base plus per-word copy) charged in the body
+     AFTER its strict [OutOfOffset] bounds check, so that the check runs before
+     any gas ([revm-interpreter] [instructions/system.rs:196-206,232]). Placed in
+     a [-> zero] arm and NOT in the [verylow] group precisely to keep that order:
+     a [verylow] here would charge the base 3 ahead of the bounds check. *)
+  | Opcode.Returndatacopy -> zero
   | Opcode.Add | Opcode.Sub | Opcode.Lt | Opcode.Gt | Opcode.Slt | Opcode.Sgt
   | Opcode.Eq | Opcode.Iszero | Opcode.And | Opcode.Or | Opcode.Xor | Opcode.Not
   | Opcode.Byte | Opcode.Shl | Opcode.Shr | Opcode.Sar | Opcode.Mload
@@ -68,7 +75,7 @@ let static_cost = function
   | Opcode.Address | Opcode.Origin | Opcode.Caller | Opcode.Callvalue
   | Opcode.Calldatasize | Opcode.Codesize | Opcode.Gasprice | Opcode.Coinbase
   | Opcode.Timestamp | Opcode.Number | Opcode.Prevrandao | Opcode.Gaslimit
-  | Opcode.Chainid | Opcode.Basefee ->
+  | Opcode.Chainid | Opcode.Basefee | Opcode.Returndatasize ->
       base
   | Opcode.Selfbalance -> selfbalance
   (* Berlin overrides, not tier members: EIP-2929 moved most of what [BALANCE]
@@ -85,6 +92,13 @@ let static_cost = function
   (* EIP-1153 gives both a flat warm-read price and no cold axis at all
      ([instructions.rs:210-211] writes the 100 as a literal). *)
   | Opcode.Tload | Opcode.Tstore -> warm_storage_read
+  (* The message calls take the EIP-2929 warm base (100) here, the same override
+     [BALANCE] and the external-code readers take ([revm-interpreter]
+     [instructions.rs:123], Berlin overwriting Tangerine's 700). The cold account
+     surcharge, the value-transfer cost, the new-account cost and the forwarded
+     allowance are all dynamic and computed in the interpreter body. *)
+  | Opcode.Call | Opcode.Callcode | Opcode.Delegatecall | Opcode.Staticcall ->
+      warm_storage_read
   | Opcode.Keccak256 -> keccak256
   (* Uniform across the five arities: revm gives every [LOG] the same table
      entry [gas::LOG] ([instructions.rs:282-286]) and charges the per-topic 375
@@ -190,6 +204,16 @@ let words_of_length length =
 
 let copy_cost length = copy_word_cost * words_of_length length
 
+(* [RETURNDATACOPY]'s dynamic price ([revm] [gas::copy_cost_verylow], wired at
+   [instructions/system.rs:232]): the VERYLOW base plus the per-word copy cost,
+   [3 + 3 * ceil(len/32)]. Unlike [CALLDATACOPY]/[CODECOPY], which get their base
+   from the [verylow] static group, [RETURNDATACOPY]'s [static_cost] is zero so
+   that its [OutOfOffset] bounds check can precede all of its gas; the base is
+   therefore folded in here and charged in the body after that check. A zero
+   length still pays the base 3, exactly as revm charges [copy_cost_verylow(0)].
+   Cannot overflow, for [copy_cost]'s reason with the small constant added. *)
+let copy_cost_verylow length = verylow + copy_cost length
+
 (* [KECCAK256]'s dynamic half: 6 per word of input, over the same rounding rule
    the copy family uses and at a different rate. Sharing the rule and separating
    the rate is the whole point of the split — the rounding is one fact, as
@@ -291,3 +315,63 @@ let sstore_refund write =
       else 0
     in
     claw + restore
+
+(* ---------- the message-call family ---------- *)
+
+(* [CALLVALUE] ([revm-context-interface] [cfg/gas.rs:36]): the flat 9000 a
+   [CALL]/[CALLCODE] pays when it moves value, nothing when it does not
+   ([call_helpers.rs:63-68], gated on [transfers_value = !value.is_zero()]). A
+   bare [int]: a constant that cannot overflow. *)
+let call_value = 9000
+let call_value_cost value = if W.is_zero value then 0 else call_value
+
+(* [NEWACCOUNT] ([cfg/gas.rs:38]): the 25000 a [CALL] pays to bring an account
+   into existence by sending it value. A faithful port of
+   [new_account_cost(is_spurious_dragon, transfers_value)]
+   ([gas_params.rs:595-603]): at Prague [is_spurious_dragon] always holds, so
+   EIP-161 collapses the condition to "value moves". The caller adds this ONLY
+   for [CALL] and ONLY when the callee is [Account.is_empty] ([call_helpers.rs:158],
+   [contract.rs:145]); [CALLCODE]/[DELEGATECALL]/[STATICCALL] never do. *)
+let new_account = 25000
+let new_account_cost ~value = if W.is_zero value then 0 else new_account
+
+(* EIP-150's all-but-one-64th ([gas_params.rs:565-567], divisor 64 at [:209]):
+   the ceiling on what a sub-call may be forwarded is the remaining allowance
+   less a sixty-fourth of it. Applied to the allowance AFTER the value and
+   account charges ([call_helpers.rs:83]). The result is below [remaining], so it
+   is representable. *)
+let call_gas_divisor = 64
+let forwardable_gas t = t - (t / call_gas_divisor)
+
+type call_gas = { charge : int; forwarded : t }
+
+(* The gas a call charges its caller and forwards to its callee, in revm's order
+   ([call_helpers.rs:83-97]):
+
+     capped    = min (forwardable_gas remaining) requested   (:88; a [requested]
+                   past [max_int] does not clamp the ceiling, matching revm's
+                   [u64] request being at least the ceiling)
+     charge    = capped                                       (:92, taken from the
+                   caller; [capped <= remaining] so the charge always succeeds)
+     forwarded = capped + (value moves ? call_stipend : 0)    (:95-97, the stipend
+                   is gifted ON TOP of the cap and is not charged)
+
+   [remaining] here is the allowance {e after} the value and account charges, so
+   the caller passes what it has left at that point. [forwarded] is resolved to a
+   {!t} inside this module, where [capped + stipend >= 0] is immediate, so no
+   caller unwraps an option. The combinator for the [min] honours the no-match-on-
+   option rule: an unrepresentable [requested] leaves the ceiling as the cap. *)
+let call_gas ~requested ~remaining ~value =
+  let ceiling = forwardable_gas remaining in
+  let capped = Option.fold ~none:ceiling ~some:(Int.min ceiling) (W.to_int requested) in
+  let stipend = if W.is_zero value then 0 else call_stipend in
+  { charge = capped; forwarded = capped + stipend }
+
+(* Credit unused sub-frame gas back to the caller — revm's [Gas::erase_cost]
+   ([revm-handler] [frame.rs:479-481]), which adds the child's leftover to the
+   caller's remaining. Total: the caller's remaining plus the child's leftover
+   never exceeds the allowance the caller started the call with, so it stays
+   representable. Used on a child's [Stopped]/[Returned]/[Reverted] and, with the
+   full forwarded amount, on a frame-entry guard that never ran the child; NOT on
+   a child's [Failed], which forfeits everything. *)
+let give_back amount t = t + amount

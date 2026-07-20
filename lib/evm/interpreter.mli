@@ -37,14 +37,24 @@
     and the refusal is an argument they demand rather than a branch each one has
     to remember. That guarded set is exactly the one {!Mutability} names.
 
-    The external-code readers [EXTCODESIZE], [EXTCODECOPY] and [EXTCODEHASH]
-    joined this set as of this chunk: code now lives on an account, which is all
-    they wanted, and none of them opens a second frame. What is still absent
-    needs a {e second frame} or a piece of state this port has not built: [CALL]
-    and its relatives, [CREATE], [RETURNDATA*], [BLOCKHASH], [SELFDESTRUCT] and
-    the blob instructions. Each remains a code byte that simply fails to decode,
-    so a program using one halts rather than silently doing the wrong thing. See
-    {!Opcode}.
+    The sub-frame message calls [CALL], [CALLCODE], [DELEGATECALL] and
+    [STATICCALL] joined this set as of this chunk, and with them the return-data
+    readers [RETURNDATASIZE] and [RETURNDATACOPY]: a frame now opens a {e second
+    frame}, recurses into a callee's code through the [let rec ... and ...] seam
+    of {!run}'s implementation, and reads what the child returned. The child's
+    effects are threaded by value, so a reverting or halting sub-frame is a
+    dropped value and needs no checkpoint — see {!Effects}.
+
+    What is still absent needs a piece of state this port has not built: the
+    account creations [CREATE] and [CREATE2], [SELFDESTRUCT], [BLOCKHASH], the
+    blob instructions, and EIP-7702 delegated-code execution. The last is the one
+    caveat on the calls' faithfulness: a call executes its target account's own
+    code directly and resolves no delegation designator, because the account model
+    has none yet, so a target bearing a 7702 designator would run the designator
+    bytes rather than the delegated code. For every non-delegated target the four
+    calls are faithful. Each still-absent opcode remains a code byte that fails to
+    decode, so a program using one halts rather than silently doing the wrong
+    thing. See {!Opcode}.
 
     {2 Termination}
 
@@ -193,6 +203,33 @@ type error =
           static frame except a test constructing one directly: [STATICCALL] is
           the calls chunk. It is here now because the write sites are here now,
           and a guard added after the writes it guards is a guard added late. *)
+  | Out_of_offset
+      (** [RETURNDATACOPY] with a window whose end passes the return-data buffer:
+          revm's [InstructionResult::OutOfOffset] ([instructions/system.rs:203-206]).
+          The check is a strict [>] against the buffer size on a {e saturating}
+          source offset, and it runs {e before} any gas, so a read one byte past
+          the buffer halts the same whether or not the frame could pay to copy.
+
+          This is deliberately {e not} {!Offset_too_large}. That one names memory
+          no allowance could reach and its doc records that no {e source} offset
+          produces it; [RETURNDATACOPY]'s out-of-bounds condition {e is} a source
+          offset into the return buffer, a different fact that happens to be an
+          in-range read of a buffer that is simply too short. Keeping them apart
+          keeps each diagnostic true. *)
+  | Call_not_allowed_inside_static
+      (** A value-bearing [CALL] (or [CALLCODE]) attempted in a frame entered by
+          [STATICCALL]: revm's [CallNotAllowedInsideStatic]
+          ([instructions/contract.rs:131-136]). EIP-214 forbids moving value from
+          a static frame, and revm halts on it before popping the call's memory
+          windows, so a static value-call reports this and not a later
+          stack-underflow.
+
+          It is kept distinct from {!Static_state_change}, which stays the
+          [SSTORE]/[TSTORE]/[LOG] substate guard: this one fires at the call site
+          on the value word, that one on a write instruction, and naming them
+          apart says which rule refused the frame. As with every {!error} the
+          distinction is diagnostic — both discard the frame and consume its
+          gas. *)
 
 val error_to_string : error -> string
 
@@ -204,11 +241,32 @@ type outcome =
 
 val outcome_to_string : outcome -> string
 
+val run_subframe :
+  env:Env.t ->
+  code:Code.t ->
+  gas:Gas.t ->
+  effects:Effects.t ->
+  depth:Call_depth.t ->
+  outcome
+(** Enter a frame at a given call-stack {!Call_depth.t}: a fresh machine at
+    offset zero, empty stack, empty memory and an empty return-data buffer,
+    running [code] against [gas] and [effects]. This is the seam every call
+    instruction bottoms out in — [CALL] and its relatives call it with the
+    child's {!Call_depth.succ} depth and the child's forwarded gas, calldata and
+    effects — and {!run} is its top-level specialisation at {!Call_depth.zero}.
+
+    It is public chiefly so a test can enter a frame already deep in the call
+    stack and pin the EIP-150 depth boundary directly, rather than driving a
+    thousand-deep recursion to reach it. It never re-runs {!Effects.start}, so
+    EIP-2200's [original] stays the pre-transaction value across the nesting; see
+    {!Effects}. *)
+
 val run :
   env:Env.t -> code:Code.t -> gas:Gas.t -> effects:Effects.t -> outcome
 (** Execute [code] from offset zero with an empty stack and empty memory,
     spending at most [gas], reading its context from [env] and threading
-    [effects] through every instruction that touches the world.
+    [effects] through every instruction that touches the world — {!run_subframe}
+    at {!Call_depth.zero}, the transaction's outermost frame.
 
     [effects] is both the input world and the output accumulator: the state the
     frame reads is {!Effects.world} of what is passed in, and what a successful

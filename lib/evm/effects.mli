@@ -190,6 +190,35 @@ val commit_store : Sstore_state.t load -> t
     {!Gas.sstore_refund} of the same triple. One function, so the three cannot
     drift apart and no caller can apply a write while forgetting its refund. *)
 
+val transfer :
+  t ->
+  from:Units.Address.t ->
+  to_:Units.Address.t ->
+  value:Tn_state.U256.t ->
+  t option
+(** Move [value] from one account to another — the balance change a value-bearing
+    [CALL] or [CALLCODE] applies to the sub-frame's effects.
+
+    [None] on either of the two failures {!Tn_state.Account.debit} and
+    {!Tn_state.Account.credit} report: a sender balance below [value] (revm's
+    [InsufficientFunds]) or a recipient balance that [value] would overflow past
+    [2^256] (revm's [OverflowPayment], unreachable at a real total supply). The
+    option is the whole point of the signature: the caller routes a [None] through
+    the same path as its own balance guard — push zero, hand back the forwarded
+    gas, leave the effects as they were — so no failure is ever resolved into a
+    forced state that would create or destroy ether. A total helper that dropped
+    the [None] would break value conservation on exactly those two inputs.
+
+    The label is [to_], not [to], because [to] is an OCaml keyword.
+
+    It threads the world through the debit before reading the recipient, so a
+    self-transfer — a [CALLCODE], whose sender and recipient are the executing
+    account itself — reads the debited balance and credits it straight back,
+    netting to no change and never spuriously overflowing. It moves value only:
+    the access set, refund, logs and transient store pass through untouched,
+    because the target account was already warmed when it was loaded, before this
+    is reached. *)
+
 val equal : t -> t -> bool
 (** Exact content equality across the world, the access set, the refund, the log
     journal and the transient store — the property the tests need in order to

@@ -1,4 +1,5 @@
 module World_state = Tn_state.World_state
+module Account = Tn_state.Account
 
 (* [base] is written once, by [start], and read by [plan_store] alone. There is
    deliberately no [with_base]: EIP-2200's [original] is transaction-scoped, and
@@ -123,6 +124,23 @@ let plan_store t (_permit : Mutability.permit) address ~slot ~value =
   }
 
 let commit_store l = l.commit l.effects
+
+(* The value a [CALL]/[CALLCODE] moves, debited from the sender and credited to
+   the recipient, threading the world so that a self-transfer (a [CALLCODE], where
+   sender and recipient are one account) reads the recipient from the already-
+   debited world and nets to no change. [None] on either failure — a sender
+   underflow (revm [InsufficientFunds]) or a recipient overflow (revm
+   [OverflowPayment]) — because both are total refusals the caller maps to the
+   call failing (push zero, no transfer), never to a forced state that would
+   create or destroy ether. It moves value alone: no account is warmed and the
+   access set, the refund, the logs and the transient store are untouched, since
+   the warming already happened when the target was loaded. *)
+let transfer t ~from ~to_ ~value =
+  Option.bind (Account.debit (World_state.account t.world from) value) (fun debited ->
+      let world = World_state.set_account t.world from debited in
+      Option.map
+        (fun credited -> { t with world = World_state.set_account world to_ credited })
+        (Account.credit (World_state.account world to_) value))
 
 let equal a b =
   World_state.equal a.world b.world

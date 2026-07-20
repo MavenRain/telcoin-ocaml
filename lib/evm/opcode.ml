@@ -84,6 +84,12 @@ type t =
   | Tload
   | Tstore
   | Log of Topic_count.t
+  | Returndatasize
+  | Returndatacopy
+  | Call
+  | Callcode
+  | Delegatecall
+  | Staticcall
 
 (* The first byte of each contiguous family, from which the family's operand is
    recovered by subtraction. *)
@@ -162,6 +168,12 @@ let to_byte = function
   | Dup d -> dup1_byte + Depth.to_int d - 1
   | Swap d -> swap1_byte + Depth.to_int d - 1
   | Log n -> log0_byte + Topic_count.to_int n
+  | Returndatasize -> 0x3d
+  | Returndatacopy -> 0x3e
+  | Call -> 0xf1
+  | Callcode -> 0xf2
+  | Delegatecall -> 0xf4
+  | Staticcall -> 0xfa
   | Return -> 0xf3
   | Revert -> 0xfd
   | Invalid -> 0xfe
@@ -214,6 +226,8 @@ let decode byte =
   | 0x3a -> Some Gasprice
   | 0x3b -> Some Extcodesize
   | 0x3c -> Some Extcodecopy
+  | 0x3d -> Some Returndatasize
+  | 0x3e -> Some Returndatacopy
   | 0x3f -> Some Extcodehash
   | 0x41 -> Some Coinbase
   | 0x42 -> Some Timestamp
@@ -244,6 +258,10 @@ let decode byte =
   | 0xa2 -> Some (Log Topic_count.Two)
   | 0xa3 -> Some (Log Topic_count.Three)
   | 0xa4 -> Some (Log Topic_count.Four)
+  | 0xf1 -> Some Call
+  | 0xf2 -> Some Callcode
+  | 0xf4 -> Some Delegatecall
+  | 0xfa -> Some Staticcall
   | 0xf3 -> Some Return
   | 0xfd -> Some Revert
   | 0xfe -> Some Invalid
@@ -267,7 +285,8 @@ let immediate_bytes = function
   | Calldatacopy | Codesize | Codecopy | Extcodesize | Extcodecopy | Extcodehash
   | Gasprice | Coinbase | Timestamp | Number
   | Prevrandao | Gaslimit | Chainid | Selfbalance | Basefee | Sload | Sstore
-  | Mcopy | Keccak256 | Tload | Tstore | Log _ ->
+  | Mcopy | Keccak256 | Tload | Tstore | Log _ | Returndatasize | Returndatacopy
+  | Call | Callcode | Delegatecall | Staticcall ->
       0
 
 (* Two instructions are equal exactly when they encode to the same byte — the
@@ -347,3 +366,9 @@ let to_string = function
   | Tload -> "TLOAD"
   | Tstore -> "TSTORE"
   | Log n -> Printf.sprintf "LOG%d" (Topic_count.to_int n)
+  | Returndatasize -> "RETURNDATASIZE"
+  | Returndatacopy -> "RETURNDATACOPY"
+  | Call -> "CALL"
+  | Callcode -> "CALLCODE"
+  | Delegatecall -> "DELEGATECALL"
+  | Staticcall -> "STATICCALL"

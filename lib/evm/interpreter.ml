@@ -11,6 +11,8 @@ type error =
   | Offset_too_large
   | Reentrancy_sentry
   | Static_state_change
+  | Out_of_offset
+  | Call_not_allowed_inside_static
 
 let error_to_string = function
   | Out_of_gas -> "out of gas"
@@ -21,6 +23,8 @@ let error_to_string = function
   | Offset_too_large -> "memory offset or length too large"
   | Reentrancy_sentry -> "storage write refused on a call stipend"
   | Static_state_change -> "state change in a static frame"
+  | Out_of_offset -> "return-data read past the end of the buffer"
+  | Call_not_allowed_inside_static -> "value-bearing call from a static frame"
 
 type outcome =
   | Stopped of { gas_left : Gas.t; effects : Effects.t }
@@ -50,6 +54,11 @@ type machine = {
   memory : Memory.t;
   gas : Gas.t;
   effects : Effects.t;
+  (* The buffer the most recent sub-call returned. Like [memory] it evolves step
+     to step — every call replaces it and [RETURNDATASIZE]/[RETURNDATACOPY] read
+     it — so it lives here rather than beside the machine as [Env]/[Code] do. A
+     fresh frame starts with it empty. *)
+  return_data : Return_data.t;
 }
 
 (* One step either produces the next state or ends the run. *)
@@ -78,6 +87,15 @@ let stack_result r = Result.map_error stack_error r
    memory no allowance could pay to reach. *)
 let extent_of_word w =
   Option.fold ~none:(Error Offset_too_large) ~some:(fun n -> Ok n) (W.to_int w)
+
+(* A word as a native offset that {e saturates} rather than failing: a word past
+   [max_int] becomes [max_int]. This is revm's [as_usize_saturated!]
+   ([instructions/system.rs:199]), the rule the {e source} offset of
+   [RETURNDATACOPY] obeys — an enormous source offset is not an error, it simply
+   places the read past the buffer and the strict bounds check refuses it there.
+   The destination offset and the length, by contrast, go through
+   {!extent_of_word} and can halt. *)
+let saturating_int w = Option.value ~default:max_int (W.to_int w)
 
 (* Instruction bodies below work in [(machine, error) result]; this projects that
    into a transition. *)
@@ -591,10 +609,12 @@ let log arity env m =
        Log.Topics.collect arity ~pop:(fun stack -> stack_result (Stack.pop stack)) stack
      in
      let entry = Log.make ~address:(executing env) ~topics ~data in
-     (* Every field of the machine is named here, which is why there is no
-        [m with]: a log is the one instruction that moves all five at once. *)
+     (* Every field of the machine but the return-data buffer is named here, so
+        there is a partial [m with]: a log moves the stack, memory, gas and
+        effects at once, and leaves the buffer of the last sub-call untouched. *)
      Ok
        {
+         m with
          pc = m.pc + 1;
          stack;
          memory;
@@ -690,7 +710,120 @@ let sstore env m =
                      (Effects.loaded planned))
                   entered)))))
 
-let execute env code m = function
+(* ---------- the return-data readers ---------- *)
+
+(* [RETURNDATACOPY] ([instructions/system.rs:193-233]) in revm's exact order, the
+   mirror image of the copy family's [Data] read:
+
+   1. pop [dest; source; length];
+   2. convert the LENGTH ([as_usize_or_fail], [Offset_too_large] if it will not
+      fit) and SATURATE the source offset ([as_usize_saturated]);
+   3. the STRICT bounds check {!Return_data.read}, BEFORE any gas — a window whose
+      end passes the buffer is [Out_of_offset], never a zero-fill;
+   4. only then charge {!Gas.copy_cost_verylow} (the VERYLOW base plus per-word),
+      which a zero length still pays;
+   5. for a nonzero length, convert the destination, pay its expansion and write;
+      a zero length reaches no memory, so an enormous destination succeeds. *)
+let returndatacopy m =
+  Result.fold ~ok:Fun.id
+    ~error:(fun e -> Halt (Failed e))
+    (let ( let* ) = Result.bind in
+     let* dest_word, source_word, length_word, stack = stack_result (Stack.pop3 m.stack) in
+     let* length = extent_of_word length_word in
+     let source = saturating_int source_word in
+     let* bytes =
+       Option.fold ~none:(Error Out_of_offset) ~some:(fun b -> Ok b)
+         (Return_data.read m.return_data ~offset:source ~length)
+     in
+     let* gas = charged (Gas.copy_cost_verylow length) m.gas in
+     let m = { m with stack; gas } in
+     if length = 0 then Ok (Continue { m with pc = m.pc + 1 })
+     else
+       let* dest = extent_of_word dest_word in
+       let* memory, gas = reach m ~offset:dest ~length in
+       Ok
+         (Continue
+            {
+              m with
+              pc = m.pc + 1;
+              memory = Memory.store_bytes memory ~offset:dest bytes;
+              gas;
+            }))
+
+(* ---------- the sub-frame message calls ---------- *)
+
+(* [get_memory_input_and_out_ranges] ([call_helpers.rs:22-49]): pop the input and
+   output windows [in_off; in_len; out_off; out_len] and charge the expansion to
+   reach the input window then the output window. A zero-length window touches no
+   memory and leaves its offset unconverted, so an enormous offset with a zero
+   length is not an error. *)
+let reach_window m ~offset_word ~length_word =
+  let ( let* ) = Result.bind in
+  let* length = extent_of_word length_word in
+  if length = 0 then Ok (m, 0, length)
+  else
+    let* offset = extent_of_word offset_word in
+    let* memory, gas = reach m ~offset ~length in
+    Ok ({ m with memory; gas }, offset, length)
+
+let mem_windows m =
+  let ( let* ) = Result.bind in
+  let* in_off_w, in_len_w, stack = stack_result (Stack.pop2 m.stack) in
+  let* out_off_w, out_len_w, stack = stack_result (Stack.pop2 stack) in
+  let m = { m with stack } in
+  let* m, in_off, in_len = reach_window m ~offset_word:in_off_w ~length_word:in_len_w in
+  let* m, out_off, out_len = reach_window m ~offset_word:out_off_w ~length_word:out_len_w in
+  Ok (m, in_off, in_len, out_off, out_len)
+
+(* The ok and revert classes both copy the child's output head into the caller's
+   output window and hand its leftover gas back; they differ only in the flag
+   pushed (1 for ok, 0 for revert) and whose effects survive. The write is
+   [min out_len |output|] bytes at [out_off] with NO zero-fill of the rest of the
+   window ([frame.rs:481-484]); the window was already reached in {!mem_windows},
+   so this reach charges nothing. *)
+let finish_written base ~out_off ~out_len ~output ~gas ~effects ~pushed =
+  let return_data = Return_data.of_string output in
+  let target_len = Int.min out_len (String.length output) in
+  transition
+    (let ( let* ) = Result.bind in
+     let* memory, gas = reach { base with gas } ~offset:out_off ~length:target_len in
+     let memory =
+       Memory.store_bytes memory ~offset:out_off (String.sub output 0 target_len)
+     in
+     let* stack = stack_result (Stack.push pushed base.stack) in
+     Ok { pc = base.pc + 1; stack; memory; gas; effects; return_data })
+
+(* A call that pushes zero and copies no output: the child halted exceptionally,
+   or a frame-entry guard refused it before it ran. The caller keeps its own
+   memory and effects (no child write, no value transfer survives) and clears the
+   buffer; the gas is whatever the caller hands back — nothing for a [Failed]
+   child, the full forwarded amount for a guard. *)
+let push_zero base ~gas =
+  transition
+    (Result.map
+       (fun stack ->
+         { base with pc = base.pc + 1; stack; gas; return_data = Return_data.empty })
+       (stack_result (Stack.push W.zero base.stack)))
+
+(* revm's ok / revert / error classification of a returned sub-frame
+   ([frame.rs:462,479-486]). [base] is the caller having paid every charge, its
+   effects still the PRE-transfer parent effects, so a dropped child (revert or
+   halt) leaves them and the warming intact while an ok child's effects are
+   adopted whole (transfer, writes, warmings and the refund counter within). *)
+let merge_call base ~out_off ~out_len ~outcome =
+  match outcome with
+  | Stopped { gas_left; effects } ->
+      finish_written base ~out_off ~out_len ~output:"" ~effects ~pushed:W.one
+        ~gas:(Gas.give_back (Gas.remaining gas_left) base.gas)
+  | Returned { output; gas_left; effects } ->
+      finish_written base ~out_off ~out_len ~output ~effects ~pushed:W.one
+        ~gas:(Gas.give_back (Gas.remaining gas_left) base.gas)
+  | Reverted { output; gas_left } ->
+      finish_written base ~out_off ~out_len ~output ~effects:base.effects ~pushed:W.zero
+        ~gas:(Gas.give_back (Gas.remaining gas_left) base.gas)
+  | Failed _ -> push_zero base ~gas:base.gas
+
+let rec execute env code depth m = function
   | Opcode.Stop -> Halt (Stopped { gas_left = m.gas; effects = m.effects })
   | Opcode.Add -> binary Alu.add m
   | Opcode.Mul -> binary Alu.mul m
@@ -809,17 +942,28 @@ let execute env code m = function
   | Opcode.Tload -> tload env m
   | Opcode.Tstore -> tstore env m
   | Opcode.Log arity -> log arity env m
+  (* The return-data readers. [RETURNDATASIZE] pushes the buffer's length for a
+     flat 2; [RETURNDATACOPY] copies a strictly-bounded window of it. *)
+  | Opcode.Returndatasize ->
+      push_value (word_of_int (Return_data.size m.return_data)) m
+  | Opcode.Returndatacopy -> returndatacopy m
+  (* The sub-frame message calls. Each opens a second frame at the callee's code
+     and threads [depth] one deeper. *)
+  | Opcode.Call -> call_op env code depth m
+  | Opcode.Callcode -> callcode_op env code depth m
+  | Opcode.Delegatecall -> delegatecall_op env code depth m
+  | Opcode.Staticcall -> staticcall_op env code depth m
 
 (* One instruction: decode the byte at the program counter, charge the fixed
    price before running it — so an instruction that then fails on its operands
    has still paid, as in revm — and dispatch. A byte naming no instruction halts
    the machine; so does an allowance that cannot pay for one. *)
-let step env code m =
+and step env code depth m =
   let byte = Code.byte_at code m.pc in
   Option.fold ~none:(Halt (Failed (Invalid_opcode byte)))
     ~some:(fun op ->
       Option.fold ~none:(Halt (Failed Out_of_gas))
-        ~some:(fun gas -> execute env code { m with gas } op)
+        ~some:(fun gas -> execute env code depth { m with gas } op)
         (Gas.charge (Gas.static_cost op) m.gas))
     (Opcode.decode byte)
 
@@ -834,11 +978,176 @@ let step env code m =
    still holds of every path, but it holds because of that body rather than
    because of this loop, and nothing in the types would notice an edit that broke
    it. *)
-let rec drive env code m =
-  match step env code m with
-  | Continue next -> drive env code next
+and drive env code depth m =
+  match step env code depth m with
+  | Continue next -> drive env code depth next
   | Halt outcome -> outcome
 
+(* Enter a sub-frame: a fresh machine at offset zero, empty stack and memory, an
+   empty return-data buffer, running [code] at [depth] against [gas] and the
+   effects it was handed. The seam every call opcode bottoms out in — and the one
+   {!run} is a special case of, with [depth = zero]. Never re-[start]s the
+   effects, so EIP-2200's [original] stays the pre-transaction value across the
+   nesting (see {!Effects}). *)
+and run_subframe ~env ~code ~gas ~effects ~depth =
+  drive env code depth
+    {
+      pc = 0;
+      stack = Stack.empty;
+      memory = Memory.empty;
+      gas;
+      effects;
+      return_data = Return_data.empty;
+    }
+
+(* The body every call opcode shares, in revm's exact charge order
+   ([contract.rs], [call_helpers.rs], [frame.rs]). [m] here has the fixed
+   operands (gas limit, address, and value for the value-bearing calls) already
+   popped; the four variants differ only in the arguments they pass:
+
+   - [transfer_value] drives {!Gas.call_value_cost}, the stipend and the transfer:
+     the popped value for [CALL]/[CALLCODE], zero for [DELEGATECALL]/[STATICCALL].
+   - [child_value] is the [CALLVALUE] the sub-frame reads: the popped value, the
+     parent's apparent value for [DELEGATECALL], or zero for [STATICCALL].
+   - [sub_target] is the storage context and the value's destination: the callee
+     for [CALL]/[STATICCALL], the caller itself for [CALLCODE]/[DELEGATECALL].
+   - [is_plain_call] gates the new-account cost to [CALL] alone. *)
+and do_call env code depth m ~requested ~to_addr ~child_value ~transfer_value
+    ~is_plain_call ~sub_target ~sub_caller ~mutability =
+  Result.fold ~ok:Fun.id
+    ~error:(fun e -> Halt (Failed e))
+    (let ( let* ) = Result.bind in
+     (* 4. input and output memory windows, charged input then output. *)
+     let* m, in_off, in_len, out_off, out_len = mem_windows m in
+     (* 5. warm the target in the parent effects and charge the account access;
+        the warming lands here, before the transfer branches, so a reverting
+        child leaves [to_addr] warm. *)
+     let load = Effects.ext_account m.effects to_addr in
+     let callee_account = Effects.loaded load in
+     let m = { m with effects = Effects.warmed load } in
+     let* gas = charged (Gas.account_access_cost (Effects.warmth load)) m.gas in
+     (* 6. the value-transfer cost, zero unless value moves. *)
+     let* gas = charged (Gas.call_value_cost transfer_value) gas in
+     (* 7. the new-account cost: only [CALL], only to an [is_empty] callee that
+        receives value. *)
+     let* gas =
+       charged
+         (if is_plain_call && Account.is_empty callee_account then
+            Gas.new_account_cost ~value:transfer_value
+          else 0)
+         gas
+     in
+     (* 8. the EIP-150 cap on what is left, charged, plus the stipend on top. *)
+     let cg = Gas.call_gas ~requested ~remaining:gas ~value:transfer_value in
+     let* gas = charged cg.Gas.charge gas in
+     let forwarded = cg.Gas.forwarded in
+     let base = { m with gas } in
+     let refuse () = push_zero base ~gas:(Gas.give_back (Gas.remaining forwarded) base.gas) in
+     (* 9. depth guard; 10-11 the transfer, whose [None] (sender underflow or
+        recipient overflow) is the balance guard. Every refusal hands back the
+        whole forwarded gas and runs no child. *)
+     let self_target = Env.Call.target (Env.call env) in
+     let sub_effects =
+       if W.is_zero transfer_value then Some base.effects
+       else
+         Effects.transfer base.effects ~from:self_target ~to_:sub_target
+           ~value:transfer_value
+     in
+     if not (Call_depth.within_limit (Call_depth.succ depth)) then Ok (refuse ())
+     else
+       Ok
+         (Option.fold ~none:(refuse ())
+            ~some:(fun sub_effects ->
+              (* 12. run the callee's code in the sub-frame. *)
+              let calldata =
+                Data.of_string (Memory.slice base.memory ~offset:in_off ~length:in_len)
+              in
+              let callee_code = Code.of_string (Account.code callee_account) in
+              let sub_call =
+                Env.Call.make ~target:sub_target ~caller:sub_caller ~value:child_value
+                  ~data:calldata ~mutability
+              in
+              let outcome =
+                run_subframe ~env:(Env.with_call env sub_call) ~code:callee_code
+                  ~gas:forwarded ~effects:sub_effects ~depth:(Call_depth.succ depth)
+              in
+              (* 13. merge the child's outcome into the caller. *)
+              merge_call base ~out_off ~out_len ~outcome)
+            sub_effects))
+
+(* [CALL] ([contract.rs:122-164]): pop gas, address and value; the EIP-214 static
+   guard (value in a static frame halts, before the window pops); then the shared
+   body, with the callee as both storage context and value destination. *)
+and call_op env code depth m =
+  Result.fold ~ok:Fun.id
+    ~error:(fun e -> Halt (Failed e))
+    (let ( let* ) = Result.bind in
+     let* requested, stack = stack_result (Stack.pop m.stack) in
+     let* to_word, stack = stack_result (Stack.pop stack) in
+     let* value, stack = stack_result (Stack.pop stack) in
+     let parent_mut = Env.Call.mutability (Env.call env) in
+     if Mutability.is_static parent_mut && not (W.is_zero value) then
+       Ok (Halt (Failed Call_not_allowed_inside_static))
+     else
+       let to_addr = Address_word.of_word to_word in
+       let self_target = Env.Call.target (Env.call env) in
+       Ok
+         (do_call env code depth { m with stack } ~requested ~to_addr
+            ~child_value:value ~transfer_value:value ~is_plain_call:true
+            ~sub_target:to_addr ~sub_caller:self_target ~mutability:parent_mut))
+
+(* [CALLCODE] ([contract.rs:173-208]): like [CALL] but the callee's code runs in
+   the caller's OWN storage, so the sub-frame target and both transfer parties are
+   the executing account. No EIP-214 guard (exempt) and no new-account cost. *)
+and callcode_op env code depth m =
+  Result.fold ~ok:Fun.id
+    ~error:(fun e -> Halt (Failed e))
+    (let ( let* ) = Result.bind in
+     let* requested, stack = stack_result (Stack.pop m.stack) in
+     let* to_word, stack = stack_result (Stack.pop stack) in
+     let* value, stack = stack_result (Stack.pop stack) in
+     let to_addr = Address_word.of_word to_word in
+     let parent_mut = Env.Call.mutability (Env.call env) in
+     let self_target = Env.Call.target (Env.call env) in
+     Ok
+       (do_call env code depth { m with stack } ~requested ~to_addr
+          ~child_value:value ~transfer_value:value ~is_plain_call:false
+          ~sub_target:self_target ~sub_caller:self_target ~mutability:parent_mut))
+
+(* [DELEGATECALL] ([contract.rs:217-252]): no value word. The callee's code runs
+   in the caller's storage with the caller's own [CALLER] and [CALLVALUE]
+   preserved (the apparent value), and no value moves. *)
+and delegatecall_op env code depth m =
+  Result.fold ~ok:Fun.id
+    ~error:(fun e -> Halt (Failed e))
+    (let ( let* ) = Result.bind in
+     let* requested, stack = stack_result (Stack.pop m.stack) in
+     let* to_word, stack = stack_result (Stack.pop stack) in
+     let to_addr = Address_word.of_word to_word in
+     let self_target = Env.Call.target (Env.call env) in
+     let self_caller = Env.Call.caller (Env.call env) in
+     let self_value = Env.Call.value (Env.call env) in
+     let parent_mut = Env.Call.mutability (Env.call env) in
+     Ok
+       (do_call env code depth { m with stack } ~requested ~to_addr
+          ~child_value:self_value ~transfer_value:W.zero ~is_plain_call:false
+          ~sub_target:self_target ~sub_caller:self_caller ~mutability:parent_mut))
+
+(* [STATICCALL] ([contract.rs:261-296]): no value word. The child is forced
+   {!Mutability.Static}, moves no value, and runs in the callee's storage as
+   [CALL] does. *)
+and staticcall_op env code depth m =
+  Result.fold ~ok:Fun.id
+    ~error:(fun e -> Halt (Failed e))
+    (let ( let* ) = Result.bind in
+     let* requested, stack = stack_result (Stack.pop m.stack) in
+     let* to_word, stack = stack_result (Stack.pop stack) in
+     let to_addr = Address_word.of_word to_word in
+     let self_target = Env.Call.target (Env.call env) in
+     Ok
+       (do_call env code depth { m with stack } ~requested ~to_addr
+          ~child_value:W.zero ~transfer_value:W.zero ~is_plain_call:false
+          ~sub_target:to_addr ~sub_caller:self_target ~mutability:Mutability.Static))
+
 let run ~env ~code ~gas ~effects =
-  drive env code
-    { pc = 0; stack = Stack.empty; memory = Memory.empty; gas; effects }
+  run_subframe ~env ~code ~gas ~effects ~depth:Call_depth.zero

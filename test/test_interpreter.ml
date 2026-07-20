@@ -762,15 +762,17 @@ let test_program_invalid_opcode () =
   (* An opcode deferred to a later chunk is refused rather than silently doing
      something else. Several have now graduated, and each stood exactly here
      before it did: 0x54 (SLOAD) with the host seam, 0x20 (KECCAK256) with the
-     hash, and 0x3b, 0x3c and 0x3f (the external-code readers) once code landed
-     on an account. 0x3d is RETURNDATASIZE, which needs a return-data buffer only
-     a completed CALL fills, and 0xf1 is CALL, which needs a second frame. *)
-  check_outcome "a deferred return-data instruction halts"
-    (Interpreter.Failed (Interpreter.Invalid_opcode 0x3d))
-    (run (Code.of_string (byte 0x3d)) 1_000);
-  check_outcome "a deferred call instruction halts"
-    (Interpreter.Failed (Interpreter.Invalid_opcode 0xf1))
-    (run (Code.of_string (byte 0xf1)) 1_000)
+     hash, 0x3b, 0x3c and 0x3f (the external-code readers) once code landed on an
+     account, and — as of this chunk — 0x3d/0x3e (the return-data readers) and
+     0xf1/0xf2/0xf4/0xfa (the message calls), which needed a second frame. What
+     is still deferred needs state this port has not built: 0x40 is BLOCKHASH and
+     0xf0 is CREATE. *)
+  check_outcome "a deferred block-hash instruction halts"
+    (Interpreter.Failed (Interpreter.Invalid_opcode 0x40))
+    (run (Code.of_string (byte 0x40)) 1_000);
+  check_outcome "a deferred create instruction halts"
+    (Interpreter.Failed (Interpreter.Invalid_opcode 0xf0))
+    (run (Code.of_string (byte 0xf0)) 1_000)
 
 (* ---------- randomised properties ---------- *)
 
@@ -838,7 +840,16 @@ let test_termination_invariant () =
             List.exists (Opcode.equal decoded)
               [ Opcode.Stop; Opcode.Return; Opcode.Revert; Opcode.Invalid ]
           in
-          let charges_in_its_body = Opcode.equal decoded Opcode.Sstore in
+          (* [SSTORE]'s table price is zero so EIP-2200's sentry reads an
+             undecremented allowance; it charges 100 in its body. [RETURNDATACOPY]
+             is zero in the table so its [OutOfOffset] bounds check precedes all
+             gas; it then charges [copy_cost_verylow] (at least the VERYLOW 3, even
+             for a zero length) in its body. Both restore the strict decrease off
+             the dispatch loop. *)
+          let charges_in_its_body =
+            Opcode.equal decoded Opcode.Sstore
+            || Opcode.equal decoded Opcode.Returndatacopy
+          in
           Alcotest.(check bool)
             (Printf.sprintf "%s is free only if it halts" (Opcode.to_string decoded))
             true
