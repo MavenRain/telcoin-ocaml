@@ -1207,20 +1207,37 @@ and do_call env code depth m ~requested ~to_addr ~child_value ~transfer_value
        Ok
          (Option.fold ~none:(refuse ())
             ~some:(fun sub_effects ->
-              (* 12. run the callee's code in the sub-frame. *)
-              let calldata =
-                Data.of_string (Memory.slice base.memory ~offset:in_off ~length:in_len)
-              in
-              let callee_code = Code.of_string (Account.code callee_account) in
-              let sub_call =
-                Env.Call.make ~target:sub_target ~caller:sub_caller ~value:child_value
-                  ~data:calldata ~mutability
-              in
+              (* 12. run the callee: a precompiled contract at [to_addr], or the
+                 account's own code in a sub-frame. The precompile is dispatched
+                 on the code address, so [DELEGATECALL]/[CALLCODE] to a builtin
+                 reach it too, and its success carries the post-transfer
+                 [sub_effects] unchanged (a precompile touches no world state
+                 beyond the value move already folded in). A precompile that
+                 rejects is an exceptional halt: the whole forwarded allowance is
+                 forfeit, exactly as {!merge_call} treats a [Failed] child. *)
+              let calldata = Memory.slice base.memory ~offset:in_off ~length:in_len in
               let outcome =
-                run_subframe ~env:(Env.with_call env sub_call) ~code:callee_code
-                  ~gas:forwarded ~effects:sub_effects ~depth:(Call_depth.succ depth)
+                match
+                  Precompile.invoke to_addr ~input:calldata
+                    ~gas_limit:(Gas.remaining forwarded)
+                with
+                | Precompile.Succeeded { gas_used; output } ->
+                    Option.fold ~none:(Failed Out_of_gas)
+                      ~some:(fun gas_left ->
+                        Returned { output; gas_left; effects = sub_effects })
+                      (Gas.charge gas_used forwarded)
+                | Precompile.Rejected -> Failed Out_of_gas
+                | Precompile.Not_a_precompile ->
+                    let callee_code = Code.of_string (Account.code callee_account) in
+                    let sub_call =
+                      Env.Call.make ~target:sub_target ~caller:sub_caller
+                        ~value:child_value ~data:(Data.of_string calldata) ~mutability
+                    in
+                    run_subframe ~env:(Env.with_call env sub_call) ~code:callee_code
+                      ~gas:forwarded ~effects:sub_effects
+                      ~depth:(Call_depth.succ depth)
               in
-              (* 13. merge the child's outcome into the caller. *)
+              (* 13. merge the outcome into the caller. *)
               merge_call base ~out_off ~out_len ~outcome)
             sub_effects))
 
