@@ -1,0 +1,6 @@
+; RLP (Recursive Length Prefix) is a leaf codec: it depends on nothing else in
+; this port. Keeping it free of keccak and of the trie lets the later receipt,
+; transaction and header chunks reuse it without pulling in the Merkle trie.
+(library
+ (name tn_rlp)
+ (public_name telcoin_ocaml.rlp))

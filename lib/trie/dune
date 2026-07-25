@@ -1,0 +1,9 @@
+; The Merkle-Patricia-Trie root builder. It is where Keccak, RLP and the nibble
+; path encoding meet: a trie root is [keccak256] of the RLP of a tree whose keys
+; are nibble paths. Keeping it above tn_rlp (a domain-independent codec reused by
+; the later receipt, transaction and header chunks) lets those chunks depend on
+; RLP without pulling in the trie.
+(library
+ (name tn_trie)
+ (public_name telcoin_ocaml.trie)
+ (libraries tn_rlp tn_keccak tn_state tn_types))

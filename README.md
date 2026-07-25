@@ -369,11 +369,32 @@ are noted.
     transactions are deferred, as `Transaction` carries no field for either. Every
     load-bearing rule is pinned by a hand-computed gas vector and confirmed by
     mutation
+27. ✅ RLP and the Merkle-Patricia-Trie root builder (`tn_rlp`, `tn_trie`): a
+    leaf RLP codec (`Rlp`, ported byte-for-byte from alloy-rlp 0.3.13 — the five
+    encoding forms, the scalar-versus-byte-string distinction that keeps the
+    number zero (`0x80`) apart from the one-byte string `0x00`, and a
+    canonicity-enforcing decoder) and a pure trie root over a complete key/value
+    set. `Trie.root` builds the hexary trie recursively (leaf, extension, and a
+    17-slot branch whose slot 16 carries the value of a key that is a strict
+    prefix of another), hex-prefix-encodes each path, and collapses a child to
+    its RLP when that is under 32 bytes or to a `0xa0`-prefixed keccak otherwise,
+    always hashing the root. `secure_root_of` hashes each key first (the state
+    and storage tries), `ordered_trie_root` keys by `RLP(index)` (the
+    transactions and receipts roots), and `account_rlp` lays the account out as
+    `[nonce, balance, storage_root, code_hash]`. This is the piece the port
+    deferred to as "blocked on the trie": it is what will replace `World_state`
+    content equality with the real Ethereum state, storage, receipts and
+    transactions roots. The eleven canonical `ethereum/tests` trie fixtures pass,
+    and byte-compatibility is independently confirmed against the reth pin
+    alloy-trie 0.9.5 — an out-of-tree oracle reproduces every tested root
+    (ordered, state and storage) — with each load-bearing rule confirmed by
+    mutation
 
 **Still planned.** The single frame and the top-level per-transaction state
 transition are now complete; what remains is mostly the layers around them.
-Blocked on the trie: the state root and storage root that would replace content
-equality as the agreement check. Blocked on networking: the block-execution layer
+The trie root builder now exists (step 27); what remains on that track is wiring
+its state and storage roots in as the agreement check, in place of `World_state`
+content equality. Blocked on networking: the block-execution layer
 that folds each committed sub-DAG's transactions through `Executor.execute` (the
 executor is pure and ready, but the batch payloads it would fold are
 networking-deferred), plus EIP-7702 set-code and EIP-4844 blob transactions and
