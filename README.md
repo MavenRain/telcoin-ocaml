@@ -320,28 +320,66 @@ are noted.
     *even for a zero-length copy* — revm's account load sits after the resize
     guard — so a zero-length `EXTCODECOPY` of a cold account is 2500 gas dearer
     than of a warm one, where the frame-local copies would have done nothing at all
+23. ✅ the sub-frame calls (`tn_evm.Interpreter`): `CALL`, `CALLCODE`,
+    `DELEGATECALL` and `STATICCALL`, with the `Call_depth` and return-data buffer
+    `Env` had deliberately omitted and the `RETURNDATASIZE`/`RETURNDATACOPY`
+    readers. A frame now opens a *second* frame, recursing into a callee's code
+    through the `let rec ... and ...` seam of `run`, in revm's exact charge order
+    (memory windows, warm-and-charge the target, value cost, new-account cost, the
+    EIP-150 63/64 cap plus stipend, the depth guard, then the transfer). A
+    reverting or halting child is a dropped `Effects.t`, so its writes, warmings
+    and refunds are undone by construction. The one caveat is EIP-7702: a call
+    executes its target's own code and resolves no delegation designator, because
+    the account model has none yet
+24. ✅ contract creation, destruction and history (`tn_evm` + `tn_state`):
+    `CREATE`/`CREATE2` (keccak-derived addresses, the EIP-684 collision check, the
+    EIP-3541/EIP-170 code validation and the 200-per-byte deposit), `SELFDESTRUCT`
+    (on `World_state.remove_account`), and `BLOCKHASH` (reading a `Block_hashes`
+    history). A creation clears the storage of the address it lands on, and its
+    init run deposits the code it returns; this is the second frame that lets a run
+    deploy code at last
+25. ✅ the Prague precompile set (`tn_evm.Precompile`): `ECRECOVER` (`0x01`),
+    `SHA256` (`0x02`), `RIPEMD160` (`0x03`), `IDENTITY` (`0x04`), `MODEXP` (`0x05`,
+    EIP-2565 repricing) and `BLAKE2F` (`0x09`), dispatched on the callee address
+    from the `CALL` family and reported abstractly (`Succeeded`/`Rejected`/
+    `Not_a_precompile`) so the interpreter turns a builtin into an outcome without
+    knowing which ran. The bn254 pair (`0x06`-`0x08`), KZG point evaluation
+    (`0x0a`) and the BLS12-381 range are deferred to their own chunks and answer
+    `Not_a_precompile`, running the (empty) account code exactly as before
+26. ✅ the transaction executor (`tn_evm`: `Transaction`, `Intrinsic`, `Receipt`,
+    `Executor`): the Prague mainnet single-transaction state transition, the piece
+    `Transfer` and this README deferred to as "the gas and block-execution chunk
+    that owns transaction inclusion." `Executor.execute : World_state.t →
+    block:Env.Block.t → Transaction.t → (Receipt.t * World_state.t, error) result`
+    runs revm's handler end to end: validate the environment and the caller's state
+    (chain id, the per-type fee checks, the block gas limit, EIP-3860 initcode,
+    intrinsic and EIP-7623-floor against the limit, EIP-3607 sender-has-code
+    *before* the nonce, and the balance against `gas_limit * max_fee + value`);
+    deduct the gas fee at the **effective** price while the balance check used the
+    max, bumping the nonce for a call (a creation bumps inside its frame); warm the
+    EIP-2929/2930/3651 set (caller, coinbase, target, precompiles, and the typed
+    access list); run the first frame, a call that transfers value then runs the
+    target's code (or dispatches a precompile at the top frame, as revm does), or a
+    creation that endows and runs the init code then deposits it; then apply the
+    EIP-3529 one-fifth refund cap **before** the EIP-7623 calldata floor, reimburse
+    the caller at the effective price and pay the beneficiary the effective price
+    less the burned base fee. Success, revert and halt are all *committed* (nonce
+    and fee persist; only a revert or halt rolls back value, storage and logs); a
+    validation *rejection* changes nothing. EIP-7702 set-code and EIP-4844 blob
+    transactions are deferred, as `Transaction` carries no field for either. Every
+    load-bearing rule is pinned by a hand-computed gas vector and confirmed by
+    mutation
 
-**Still planned.** Now buildable on what is already here: the calls (`CALL`,
-`CALLCODE`, `DELEGATECALL`, `STATICCALL`) with the call depth and return-data
-buffer `Env` deliberately omits, `RETURNDATASIZE`/`RETURNDATACOPY`,
-`SELFDESTRUCT` (whose `World_state.remove_account` already exists, unused), and
-the blob instructions. The static-call flag itself now exists, as
-`Env.Call.mutability`, because the three writes it governs are here. Blocked on a
-second frame: contract creation (`CREATE`/`CREATE2`, whose keccak-derived
-addresses and code deposit are what will let a run deploy code at last). Blocked on the trie:
-the state root and storage root that would replace content equality as the
-agreement check.
-Blocked on the block-execution layer: `BLOCKHASH`, which reads a history of
-committed block hashes no frame can produce on its own. Blocked on networking:
-that block-execution layer itself — folding each committed sub-DAG's transactions
-through the state transition — plus the transaction layer that owns the
-EIP-2929/2930/3651 pre-warming (`Access.of_transaction` takes it as an argument
-today) and the EIP-3529 one-fifth refund clamp (a property of a whole
-transaction's spend, so applying it per frame would be arithmetically wrong);
-both need batch payloads wired first. Also: real crypto spike + golden vectors
-from a Rust harness; the
-pending-certificate fetcher (buffer-and-fetch on a missing parent — needs the
-network layer); the Eio shell; codec/crypto byte-compat alignment.
+**Still planned.** The single frame and the top-level per-transaction state
+transition are now complete; what remains is mostly the layers around them.
+Blocked on the trie: the state root and storage root that would replace content
+equality as the agreement check. Blocked on networking: the block-execution layer
+that folds each committed sub-DAG's transactions through `Executor.execute` (the
+executor is pure and ready, but the batch payloads it would fold are
+networking-deferred), plus EIP-7702 set-code and EIP-4844 blob transactions and
+the blob instructions. Also: real crypto spike + golden vectors from a Rust
+harness; the pending-certificate fetcher (buffer-and-fetch on a missing parent —
+needs the network layer); the Eio shell; codec/crypto byte-compat alignment.
 
 ## OCaml ecosystem for the full-node goal
 
