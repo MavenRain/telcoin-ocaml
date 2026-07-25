@@ -390,11 +390,29 @@ are noted.
     (ordered, state and storage) — with each load-bearing rule confirmed by
     mutation
 
+28. ✅ the block-commitment roots and the state-root agreement oracle (`tn_evm`:
+    `Bloom`, `Receipt_envelope`, `Block_roots`). `Block_roots.state_root` hashes
+    the world state (each account keyed by its 20-byte address, valued by
+    `[nonce, balance, storage_root, code_hash]` over a nested per-account
+    `storage_root`), and `Block_roots.agree` makes state-root equality the block-
+    import agreement check in place of `World_state` content equality. `Bloom` is
+    the 2048-bit m3:2048 logs filter (a verbatim port of alloy-primitives);
+    `Receipt_envelope` is the EIP-2718 receipt leaf (`[status, cumulative_gas,
+    bloom, logs]`, legacy bare and typed with a one-byte prefix) whose bloom is
+    derived from the receipt's own logs, and `receipts_root` threads the net
+    cumulative-gas prefix-sum through them. `transactions_root` roots caller-
+    supplied signed 2718 envelopes, because the port defers ECDSA and a
+    `Transaction` carries no signature to encode here. Every encoding is
+    byte-checked against the reth pins (alloy-trie 0.9.5, alloy-consensus 2.1.0,
+    alloy-primitives 1.6.0) with an out-of-tree alloy oracle and alloy/reth's own
+    vectors, each load-bearing test confirmed by mutation.
+
 **Still planned.** The single frame and the top-level per-transaction state
 transition are now complete; what remains is mostly the layers around them.
-The trie root builder now exists (step 27); what remains on that track is wiring
-its state and storage roots in as the agreement check, in place of `World_state`
-content equality. Blocked on networking: the block-execution layer
+The trie root builder (step 27) and the block-commitment roots with the state-
+root agreement oracle (step 28) now exist, so agreement is real state-root
+equality rather than `World_state` content equality. Blocked on networking: the
+block-execution layer
 that folds each committed sub-DAG's transactions through `Executor.execute` (the
 executor is pure and ready, but the batch payloads it would fold are
 networking-deferred), plus EIP-7702 set-code and EIP-4844 blob transactions and

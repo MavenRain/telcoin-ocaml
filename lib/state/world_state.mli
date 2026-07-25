@@ -14,9 +14,11 @@
     slot surviving the account it belongs to — is not representable here, and it
     is why {!remove_account} cannot forget half of its job.
 
-    A state root (the trie hash that commits the whole map) needs the state trie
-    and RLP, which this port still defers; keccak itself now exists, in
-    {!Tn_keccak}. Agreement is checked here by direct content equality. *)
+    A state root (the trie hash that commits the whole map) now exists as
+    [Block_roots.state_root] in [tn_evm], with [Block_roots.agree] the state-root
+    agreement oracle for block import. They live one library up because
+    [tn_state] sits below [tn_trie] in the dependency graph. {!equal} is kept as
+    the exact structural equality the canonicity reasoning above relies on. *)
 
 open Tn_types
 

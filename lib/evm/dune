@@ -1,4 +1,4 @@
 (library
  (name tn_evm)
  (public_name telcoin_ocaml.evm)
- (libraries tn_types tn_state tn_keccak zarith digestif))
+ (libraries tn_types tn_state tn_keccak tn_rlp tn_trie zarith digestif))
