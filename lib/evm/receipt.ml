@@ -35,6 +35,11 @@ let gas_used = function
   | Reverted r -> r.gas_used
   | Halted h -> h.gas_used
 
+(* Three arms and no wildcard: a revert rolls the journal back and a halt
+   forfeits everything, so both are the empty list rather than a case every
+   caller has to remember. *)
+let logs = function Success s -> s.logs | Reverted _ -> [] | Halted _ -> []
+
 let to_string = function
   | Success s ->
       Printf.sprintf "Success{gas_used=%d; gas_refunded=%d; logs=%d}" s.gas_used

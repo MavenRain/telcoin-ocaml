@@ -73,6 +73,18 @@ val gas_used : t -> int
 (** The gas the transaction consumed, net of any refund. Defined for all three
     outcomes, since the fee is charged on it regardless. *)
 
+val logs : t -> Log.t list
+(** The logs the transaction emitted, in emission order. Defined for all three
+    outcomes, exactly as {!gas_used} is: {!Reverted} and {!Halted} emit none,
+    because a revert rolls the journal back and a halt forfeits everything.
+
+    It exists so the block logs bloom is one fold and not a match at a call
+    site, the same reason {!gas_used} is total rather than a projection out of
+    {!Success}. It is deliberately NOT paired with a [Bloom.union]: the block
+    bloom is {!Bloom.of_logs} over the concatenation, which is what telcoin
+    computes ([block.rs:957]), and a union would make the OR-of-blooms
+    formulation writable as a second path to the same fact. *)
+
 val to_string : t -> string
 (** Render a receipt as a short human-readable string, naming the outcome and its
     gas, for diagnostics and test failure messages. *)

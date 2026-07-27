@@ -42,6 +42,13 @@ let transactions_root envelopes = Tn_trie.Trie.ordered_trie_root envelopes
 let transactions_root_of envelopes =
   transactions_root (List.map Tx_envelope.encode_2718 envelopes)
 
+(* [ordered_trie_root] (verbatim, [wrap = Fun.id]) for [transactions_root]'s
+   reason: [Withdrawal.encode_rlp] has already produced the four-element list
+   and the leaf node wraps it exactly once. The list order is the caller's and
+   is deliberately not sorted here. *)
+let withdrawals_root withdrawals =
+  Tn_trie.Trie.ordered_trie_root (List.map Withdrawal.encode_rlp withdrawals)
+
 let type_byte tx =
   match Transaction.fee tx with
   | Transaction.Legacy _ -> 0

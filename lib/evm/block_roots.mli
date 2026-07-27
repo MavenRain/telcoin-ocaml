@@ -40,6 +40,26 @@ val transactions_root_of : Tx_envelope.t list -> string
     {!Tx_envelope.decode_2718} accepts nothing else, is the only input this port
     can produce a value from at all. *)
 
+val withdrawals_root : Withdrawal.t list -> string
+(** The withdrawals root: {!Tn_trie.Trie.ordered_trie_root} over
+    {!Withdrawal.encode_rlp} of each withdrawal, in list order. Verbatim RLP
+    bytes, not re-wrapped, which is the same rule {!transactions_root} states
+    and for the same reason: the leaf encoder wraps each value exactly once.
+
+    The empty list gives {!Tn_trie.Trie.empty_root}, which is alloy's
+    [EMPTY_WITHDRAWALS]
+    [0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421], the
+    value telcoin writes on every non-closing block ([block.rs:976-978]);
+    telcoin reaches it through
+    [reth_primitives_traits::proofs::calculate_withdrawals_root]
+    ([block.rs:34, 974]), a different helper from the alloy proofs used for
+    transactions but the same ordered trie underneath.
+
+    The ORDER is the caller's and is load-bearing: telcoin's list comes out of a
+    [BTreeMap<Address, u32>] and is therefore sorted by execution address
+    ascending ([crates/types/src/gas_accumulator.rs:123-158]). This function
+    commits to whatever order it is given and does not sort. *)
+
 val type_byte : Transaction.t -> int
 (** The EIP-2718 type byte from {!Transaction.fee}: [Legacy -> 0],
     [Access_list -> 1], [Dynamic -> 2]. The port stores no type byte; it is
