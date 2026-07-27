@@ -41,4 +41,6 @@ let encode_2718 ~type_byte ~cumulative_gas_used r =
         Tn_rlp.Rlp.encode_list (List.map encode_log logs);
       ]
   in
-  if type_byte = 0 then inner else String.make 1 (Char.chr type_byte) ^ inner
+  (* The type-byte rule is {!Eip2718.frame}, shared verbatim with the
+     transaction envelope so the two sides cannot drift. *)
+  Eip2718.frame ~type_byte inner

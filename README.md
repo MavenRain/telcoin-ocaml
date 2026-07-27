@@ -400,24 +400,74 @@ are noted.
     `Receipt_envelope` is the EIP-2718 receipt leaf (`[status, cumulative_gas,
     bloom, logs]`, legacy bare and typed with a one-byte prefix) whose bloom is
     derived from the receipt's own logs, and `receipts_root` threads the net
-    cumulative-gas prefix-sum through them. `transactions_root` roots caller-
-    supplied signed 2718 envelopes, because the port defers ECDSA and a
-    `Transaction` carries no signature to encode here. Every encoding is
+    cumulative-gas prefix-sum through them. `transactions_root` roots verbatim
+    2718 envelopes, and since step 29 `transactions_root_of` roots
+    `Tx_envelope.t` values the port encodes itself. Every encoding is
     byte-checked against the reth pins (alloy-trie 0.9.5, alloy-consensus 2.1.0,
     alloy-primitives 1.6.0) with an out-of-tree alloy oracle and alloy/reth's own
     vectors, each load-bearing test confirmed by mutation.
+
+29. ✅ signed transaction envelopes and sender recovery (`tn_evm`: `Public_key`,
+    `Eip2718`, `Tx_signature`, `Tx_payload`, `Tx_envelope`, `Tx_recovery`) — the
+    piece steps 26 and 28 both deferred to as "the port defers ECDSA". A
+    `Tx_payload` is the unsigned transaction, one constructor per EIP-2718 type
+    with its fields in **wire** order; `Tx_envelope` pairs it with a signature and
+    produces the three byte strings that matter — the signing pre-image, the
+    verbatim 2718 envelope (the trie leaf and the hash pre-image), and
+    `keccak256` of that envelope — plus the strict decoder that is the typed
+    canonicity layer `Rlp` explicitly leaves to its caller; and `Tx_recovery` runs
+    alloy's pipeline end to end: the EIP-2 low-`s` gate (strictly `>` half the
+    group order), the digest re-derived from the payload rather than from the
+    received bytes, the raw 0/1 parity as the recovery id, and `keccak256` of the
+    tag-stripped 64-byte key truncated to 20. A decoded envelope becomes an
+    executable `Transaction.t`, so `Executor.execute` at last takes a sender that
+    was recovered rather than assumed, and `Block_roots.transactions_root_of`
+    roots envelopes the port encoded itself.
+
+    Four things become unrepresentable. **A legacy transaction with an access
+    list, and a typed one without a chain id**: the payload is three records
+    carrying exactly their own fields, reached through three smart constructors,
+    so neither combination has a value. **A missing EIP-1559 priority fee**:
+    unlike `Transaction.fee`'s optional one, the wire has no absent case, so the
+    encoder cannot be handed one. **A stale transaction hash**: alloy memoises it
+    in a `OnceLock` and `Signed::new_unchecked` can seed it with a wrong value
+    that then propagates into trie roots; here `hash` is a pure function of a
+    persistent value and there is no cache to be wrong. **An unchecked
+    recovery**: alloy exposes one that skips the EIP-2 gate and, under its k256
+    backend, silently normalises `s` and flips the recovery id — returning the
+    same address for a malleated signature. telcoin never calls it, so it is not
+    here to call.
+
+    The chunk's own trap, and the one place the port deliberately diverges: the
+    accept set is **canonical framings only**, which is *narrower* than alloy's.
+    `0x00 ‖ <legacy rlp>` and `0xb8 ‖ len ‖ <typed rlp>` are both **rejected**
+    here and both **accepted** by the envelope decoder telcoin actually runs,
+    which re-encodes and re-hashes them into their canonical twins — so upstream,
+    two byte strings can share one transaction hash. The cause is mechanical
+    rather than intentional: alloy's `TransactionEnvelope` derive tries each
+    variant in declaration order over a buffer it never restores between attempts,
+    while `alloy-rlp`'s header decoder advances the cursor *before* raising
+    `UnexpectedString`. Replicating that would mean emulating a decoder's
+    accidents, so the port refuses and says so in `tx_envelope.mli`. The cost is
+    real and named there: a peer-crafted non-canonical envelope reth would accept
+    is refused here — latent today, since networking is deferred wholesale. The
+    gain is a theorem the lenient form cannot have, that `encode_2718` reproduces
+    its input byte for byte.
 
 **Still planned.** The single frame and the top-level per-transaction state
 transition are now complete; what remains is mostly the layers around them.
 The trie root builder (step 27) and the block-commitment roots with the state-
 root agreement oracle (step 28) now exist, so agreement is real state-root
-equality rather than `World_state` content equality. Blocked on networking: the
-block-execution layer
+equality rather than `World_state` content equality, and signed envelopes and
+sender recovery (step 29) close the "ECDSA deferred" seam, so a transaction can
+now be decoded from the wire and executed under the sender it actually signed
+with. Blocked on networking: the block-execution layer
 that folds each committed sub-DAG's transactions through `Executor.execute` (the
 executor is pure and ready, but the batch payloads it would fold are
 networking-deferred), plus EIP-7702 set-code and EIP-4844 blob transactions and
-the blob instructions. Also: real crypto spike + golden vectors from a Rust
-harness; the pending-certificate fetcher (buffer-and-fetch on a missing parent —
+the blob instructions. Also: the consensus-layer crypto spike (execution-layer
+secp256k1 is now real and oracle-checked, but `tn_crypto` is still a stub and the
+validator BLS keys are not ported); the pending-certificate fetcher (buffer-and-fetch on a missing parent —
 needs the network layer); the Eio shell; codec/crypto byte-compat alignment.
 
 ## OCaml ecosystem for the full-node goal

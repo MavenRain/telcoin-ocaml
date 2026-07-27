@@ -150,6 +150,35 @@ let test_boundary_round_trips () =
   Alcotest.(check string) "list payload > 255 uses 0xf9" "f9" (String.sub (to_hex e) 0 2);
   Alcotest.(check string) "large list round-trips" inner (exact_list_str (Rlp.decode_exact e))
 
+(* A long-form header may declare a payload length as large as [max_int] — the
+   largest value [decode_length]'s overflow guard admits. Adding that to the
+   header width wraps a native int negative, so a bound check written as
+   [start + payload_length > String.length s] passes and [String.sub] is reached
+   with a 2^62 length, raising [Invalid_argument] out of a decoder whose whole
+   contract is totality. Nine bytes are enough to trigger it. alloy-rlp compares
+   without adding ([header.rs:71-72]) and returns [InputTooShort]; so must this.
+
+   Each case is a header alone with no payload, so the only correct answer is
+   [Input_too_short]; the assertion is that it is RETURNED rather than raised. *)
+let test_decode_declared_length_overflow () =
+  let case name bytes =
+    let observed =
+      try
+        Result.fold ~ok:(fun _ -> "Ok (wrongly accepted)") ~error:Rlp.error_to_string
+          (Rlp.decode_exact bytes)
+      with Invalid_argument m -> "RAISED Invalid_argument: " ^ m
+    in
+    Alcotest.(check string) name (Rlp.error_to_string Rlp.Input_too_short) observed
+  in
+  (* 0xbf = long string, 8 length bytes. 0x3fffffffffffffff = max_int on 64-bit. *)
+  case "string, declared length = max_int" "\xbf\x3f\xff\xff\xff\xff\xff\xff\xff";
+  case "string, declared length = max_int - 1" "\xbf\x3f\xff\xff\xff\xff\xff\xff\xfe";
+  (* 0xff = long list, 8 length bytes: the same arithmetic on the list path. *)
+  case "list, declared length = max_int" "\xff\x3f\xff\xff\xff\xff\xff\xff\xff";
+  (* Nested: the overflowing header sits inside a well-formed short list, so the
+     recursive descent reaches it rather than the top-level dispatch. *)
+  case "nested inside a short list" "\xc9\xbf\x3f\xff\xff\xff\xff\xff\xff\xff"
+
 let () =
   Alcotest.run "rlp"
     [
@@ -165,5 +194,7 @@ let () =
           Alcotest.test_case "canonicity errors (G7)" `Quick test_decode_errors;
           Alcotest.test_case "unit round-trips" `Quick test_round_trip_units;
           Alcotest.test_case "length-header boundaries (G4)" `Quick test_boundary_round_trips;
+          Alcotest.test_case "declared length near max_int stays total" `Quick
+            test_decode_declared_length_overflow;
         ] );
     ]

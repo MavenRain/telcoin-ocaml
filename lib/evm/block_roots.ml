@@ -36,6 +36,12 @@ let state_root ws =
 
 let transactions_root envelopes = Tn_trie.Trie.ordered_trie_root envelopes
 
+(* [ordered_trie_root] (verbatim, [wrap = Fun.id]), never [ordered_trie_root_rlp]:
+   the leaf node already wraps the value exactly once, so RLP-wrapping the
+   envelope first would commit to a different root. *)
+let transactions_root_of envelopes =
+  transactions_root (List.map Tx_envelope.encode_2718 envelopes)
+
 let type_byte tx =
   match Transaction.fee tx with
   | Transaction.Legacy _ -> 0

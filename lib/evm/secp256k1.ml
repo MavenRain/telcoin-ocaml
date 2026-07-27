@@ -96,6 +96,12 @@ let sqrt_mod a =
   let cand = Z.powm a sqrt_exp p in
   if Z.equal (fmul cand cand) (fmod a) then Some cand else None
 
+(* [floor(n / 2)] — alloy's [SECP256K1N_HALF] ([crypto.rs:46-53]), derived from
+   the [n] above rather than restated as a second hex literal. *)
+let n_half = Z.div n (Z.of_int 2)
+
+let s_is_high s = Z.gt (z_of_be s) n_half
+
 let recover ~msg ~recid ~r ~s =
   let z = z_of_be msg in
   let r = z_of_be r in

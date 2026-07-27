@@ -17,4 +17,10 @@ val encode_2718 : type_byte:int -> cumulative_gas_used:int -> Receipt.t -> strin
     {!Bloom.of_logs} of the receipt's logs ([0xb90100 || 256 bytes]); [logs] as an
     RLP list of [\[address; topics; data\]]. A [type_byte] of [0] emits the bare
     list; [1] or [2] prepends that single byte. No outer [Header{list:false}] wrap
-    is added — that network form must never reach the trie. *)
+    is added — that network form must never reach the trie.
+
+    The framing is {!Eip2718.frame}, shared with {!Tx_envelope.encode_2718} so the
+    two cannot drift. It is {e total}: only [0], [1] and [2] are meaningful, and a
+    [type_byte] outside [0 .. 255] is reduced modulo [256] rather than raising, as
+    the hand-rolled [Char.chr] this once used would have. No caller in this port
+    passes anything but [0], [1] or [2]. *)

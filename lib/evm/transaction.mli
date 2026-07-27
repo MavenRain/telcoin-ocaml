@@ -4,7 +4,11 @@
     a signed transaction and hands the EVM, minus the two the port still defers.
     The sender is {e pre-recovered} from the signature, a crypto step upstream of
     this pure transition and the same one {!Tn_state.Transfer} already assumes, so
-    it enters as an address rather than a signature. And the scope is the shared
+    it enters as an address rather than a signature. That step is now
+    {!Tx_envelope.decode_2718} followed by {!Tx_recovery.recover}: the first turns
+    raw envelope bytes into a signed envelope, the second recovers its signer and
+    produces exactly this type, so a caller no longer has to assume the sender it
+    passes. And the scope is the shared
     path for the three fee-market transaction types that share a code path in
     revm: Legacy (type 0), EIP-2930 (type 1) and EIP-1559 (type 2). EIP-7702
     set-code transactions and EIP-4844 blob transactions are deferred exactly as

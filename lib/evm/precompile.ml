@@ -99,12 +99,16 @@ let ecrecover ~input ~gas_limit =
       let recid = Char.code inp.[63] - 27 in
       let r = String.sub inp 64 32 in
       let s = String.sub inp 96 32 in
+      (* The keccak-and-truncate step is {!Public_key.to_address}, shared with
+         transaction sender recovery. [Secp256k1.recover] always returns 64
+         bytes, so the width guard inside it never fires and the two [None]
+         cases collapse to the same empty output this precompile already
+         produced. *)
       let output =
         Option.fold ~none:""
-          ~some:(fun pubkey ->
-            let hash = Tn_keccak.to_bytes (Tn_keccak.digest pubkey) in
-            String.make 12 '\000' ^ String.sub hash 12 20)
-          (Secp256k1.recover ~msg ~recid ~r ~s)
+          ~some:(fun addr ->
+            String.make 12 '\000' ^ Tn_types.Units.Address.to_bytes addr)
+          (Option.bind (Secp256k1.recover ~msg ~recid ~r ~s) Public_key.to_address)
       in
       Succeeded { gas_used; output }
 

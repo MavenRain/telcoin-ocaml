@@ -20,11 +20,25 @@ val state_root : Tn_state.World_state.t -> string
     gives {!Tn_trie.Trie.empty_root}. *)
 
 val transactions_root : string list -> string
-(** The transactions root over caller-supplied VERBATIM EIP-2718 transaction
-    envelopes. The port defers ECDSA, so {!Transaction.t} carries no signature and
-    cannot be self-encoded to a signed envelope here; the caller passes
-    already-encoded 2718 byte strings. Thin wrapper over
-    {!Tn_trie.Trie.ordered_trie_root}. Empty gives {!Tn_trie.Trie.empty_root}. *)
+(** The transactions root over VERBATIM EIP-2718 transaction envelopes, in block
+    order. Thin wrapper over {!Tn_trie.Trie.ordered_trie_root}, whose leaf
+    encoder wraps each value exactly once — so the bytes passed in must be the
+    2718 form ({!Tx_envelope.encode_2718}) and never the network form and never
+    an already-RLP-wrapped string. Empty gives {!Tn_trie.Trie.empty_root}. *)
+
+val transactions_root_of : Tx_envelope.t list -> string
+(** {!transactions_root} over {!Tx_envelope.encode_2718} of each envelope, in
+    block order — the typed entry point, now that the port can encode a signed
+    transaction of its own. Identical to calling the two by hand; it exists so
+    the "must be 2718, not network, not re-wrapped" rule has one place it can be
+    got wrong instead of every call site.
+
+    Note that alloy roots the {e re-encoded} bytes of a decoded value
+    ([alloy-consensus src/proofs.rs:19-24] over [Encodable2718]), so a root taken
+    over the bytes as received and a root taken over {!Tx_envelope.t} values
+    agree only for canonically framed input — which, since
+    {!Tx_envelope.decode_2718} accepts nothing else, is the only input this port
+    can produce a value from at all. *)
 
 val type_byte : Transaction.t -> int
 (** The EIP-2718 type byte from {!Transaction.fee}: [Legacy -> 0],

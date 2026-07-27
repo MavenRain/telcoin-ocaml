@@ -148,7 +148,14 @@ and decode_long s len_start len_of_len ~is_list =
       if payload_length < short_limit then Error Non_canonical_size
       else
         let start = len_start + len_of_len in
-        if start + payload_length > String.length s then Error Input_too_short
+        (* Compare by SUBTRACTION, never by forming [start + payload_length]: a
+           declared length may be as large as [max_int] (that is exactly what
+           [decode_length]'s guard admits), and the sum would wrap to a negative
+           int, pass this test, and reach [String.sub] with a 2^62 length —
+           raising [Invalid_argument] out of a total decoder. [decode_length] has
+           already rejected [len_start + len_of_len > String.length s], so
+           [start <= String.length s] and the subtraction cannot underflow. *)
+        if payload_length > String.length s - start then Error Input_too_short
         else if is_list then
           Result.map
             (fun items -> (List items, start + payload_length))
