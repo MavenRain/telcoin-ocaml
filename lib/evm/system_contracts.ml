@@ -41,6 +41,9 @@ let beacon_roots_address = address_of_hex "000f3df6d732807ef1319fb7b8bb8522d0bea
 let history_storage_address =
   address_of_hex "0000f90827f1c53a10cb7a02335b175320002935"
 
+let governance_safe_address =
+  address_of_hex "00000000000000000000000000000000000007a0"
+
 let history_serve_window = 8191
 
 (* 97 bytes. Write path (caller = SYSTEM_ADDRESS): sstore(ts mod 8191, ts) and

@@ -76,7 +76,7 @@ let base_env =
          ~number:(u 15_500_000)
          ~prevrandao:
            (hex "4b7e19a2c05d38f61ea4907c2d5b8e3f016ca94d7b2e58301fc6a9d4e07b3521")
-         ~gas_limit:(u 25_000_000) ~basefee:(u 3_500_000_000)
+         ~gas_limit:(u 25_000_000) ~basefee:(u 3_500_000_000) ~basefee_address:Tn_evm.System_contracts.governance_safe_address
          ~chain_id:(u 4_321) ~hashes:Tn_evm.Block_hashes.empty)
     ~tx:
       (Env.Tx.make ~origin:(address_of 0x01) ~gas_price:(u 9_000_000_000)

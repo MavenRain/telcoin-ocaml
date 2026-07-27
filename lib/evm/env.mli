@@ -46,6 +46,7 @@ module Block : sig
     prevrandao:word ->
     gas_limit:word ->
     basefee:word ->
+    basefee_address:Units.Address.t ->
     chain_id:word ->
     hashes:Block_hashes.t ->
     t
@@ -62,6 +63,16 @@ module Block : sig
 
   val gas_limit : t -> word
   val basefee : t -> word
+
+  val basefee_address : t -> Units.Address.t
+  (** The account {!Executor}'s telcoin fee split credits with the base fee and
+      the gas-limit penalty ([tn-reth/src/evm/handler.rs:28-44]). Chain
+      configuration rather than EVM environment: no opcode reads it ([BASEFEE]
+      reads {!basefee}), and telcoin fixes it once per chain from genesis with
+      the governance safe as the default
+      ([lib.rs:198-210], {!System_contracts.governance_safe_address}). It rides
+      here because this record is the executor's only environment, for the same
+      reason {!chain_id} does. *)
 
   val chain_id : t -> word
   (** [CHAINID]. Held here rather than in a configuration record of its own —

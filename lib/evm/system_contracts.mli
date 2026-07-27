@@ -39,6 +39,16 @@ val history_storage_address : Tn_types.Units.Address.t
 (** [0x0000F90827F1C53a10cb7A02335B175320002935]
     ([alloy-eips-1.8.3/src/eip2935.rs:8]). *)
 
+val governance_safe_address : Tn_types.Units.Address.t
+(** [0x00000000000000000000000000000000000007a0]
+    ([crates/config/src/genesis.rs:37]): telcoin's governance safe, the
+    compile-time default of the chain's basefee address
+    ([tn-reth/src/lib.rs:198-210]), the account [TNEvmHandler] credits with
+    every transaction's base fee and gas-limit penalty. Not a system contract
+    (it holds no code and is never called); it is chain configuration, kept in
+    this module because this is the port's module of well-known addresses. A
+    genesis-config seam owns it whenever one exists. *)
+
 val history_serve_window : int
 (** [8191] ([alloy-eips-1.8.3/src/eip2935.rs:19-20]; changed from 8192 by
     ethereum/EIPs PR 9144, so a port hardcoding 8192 is wrong). Exposed for

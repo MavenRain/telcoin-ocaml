@@ -167,31 +167,21 @@ val apply_pre_block :
     {!Tn_state.World_state.set_account} prunes an {!Tn_state.Account.is_absent}
     account ([world_state.ml:16-17]) and there is no flag to turn that off.
 
-    {2 The fee accounting diverges, inherited rather than introduced}
+    {2 The fee accounting is telcoin's}
 
-    The fold routes every transaction through {!Executor.execute}, which
-    implements revm's {e mainnet} post-execution fee split: the caller is
-    refunded its whole unused allowance and the base fee is burned
-    ([executor.ml:139-140]). Telcoin does not run that handler. Its block
-    executor drives [TNEvmHandler] for every transaction
-    ([evm/mod.rs:147-162]), whose [reimburse_caller] withholds a gas-limit
-    penalty from the refund ([evm/handler.rs:109-131]) and whose
-    [reward_beneficiary] credits [basefee * gas_used] to a configured
-    [basefee_address] ([evm/handler.rs:162-168]) rather than burning it.
-
-    The cost is exact and consensus-visible. For any block carrying a nonzero
-    base fee, or any transaction that spends under a tenth of the gas limit it
-    declared, this port's post-state differs from telcoin's: the caller keeps
-    wei telcoin withholds, and [basefee_address] is absent from the trie where
-    telcoin has credited it. Every root taken over that world differs in turn,
-    so {!Block_header.assemble} emits a header telcoin would reject.
-
-    It is named here rather than fixed here because it is not this module's.
-    It arrives with {!Executor} and is recorded on that module's [PORTING.md]
-    row; closing it means changing {!Executor}'s post-execution and giving
-    {!Block_context} a [basefee_address], which is a change to an already
-    reviewed surface and belongs to its own chunk. This module inherits the
-    divergence wholesale and adds nothing to it. *)
+    The fold routes every transaction through {!Executor.execute}, which since
+    step 31 implements [TNEvmHandler]'s post-execution split rather than the
+    mainnet one it started with: the caller's refund is docked {!Gas_penalty}'s
+    gas-limit penalty, and both that penalty and [basefee * gas_used] are
+    credited to the block's {!Env.Block.basefee_address} instead of the base
+    fee being burned ([evm/handler.rs:78-171]). A system call settles nothing
+    ([handler.rs:85-87]), which this module's pre-block steps already assumed.
+    The address rides {!Env.Block} through {!Block_context} untouched, with
+    {!System_contracts.governance_safe_address} as telcoin's chain default, so
+    a block's post-state, the roots over it and {!Block_header.assemble}'s
+    header now agree with telcoin's for nonzero base fees and for transactions
+    declaring more than ten times their spend. The divergence this section
+    disclosed through step 30 is closed. *)
 
 type outcome
 (** What executing a block's transactions produced. Abstract, and

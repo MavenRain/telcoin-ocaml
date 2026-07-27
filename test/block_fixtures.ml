@@ -27,6 +27,7 @@ module Address = Tn_types.Units.Address
 module Digest = Tn_crypto.Digest
 module Digests = Tn_types.Digests
 module Env = Tn_evm.Env
+module System_contracts = Tn_evm.System_contracts
 module Opcode = Tn_evm.Opcode
 module Block_hashes = Tn_evm.Block_hashes
 module Batch_position = Tn_evm.Batch_position
@@ -161,9 +162,11 @@ let parent_hash = Tn_keccak.digest "chunk-30 parent block"
 let coinbase = address_of 0xc3
 
 let block_env ?(number = 1000) ?(timestamp = 1_700_000_000) ?(gas_limit = 30_000_000)
-    ?(basefee = 0) ?(prevrandao = 0) () =
+    ?(basefee = 0) ?(prevrandao = 0)
+    ?(basefee_address = System_contracts.governance_safe_address) () =
   Env.Block.make ~coinbase ~timestamp:(u timestamp) ~number:(u number) ~prevrandao:(u prevrandao)
-    ~gas_limit:(u gas_limit) ~basefee:(u basefee) ~chain_id:(u 1) ~hashes:Block_hashes.empty
+    ~gas_limit:(u gas_limit) ~basefee:(u basefee) ~basefee_address ~chain_id:(u 1)
+    ~hashes:Block_hashes.empty
 
 let position_of ~batch_index ~worker_id =
   get (Batch_position.of_batch ~batch_index ~worker_id:(get (Units.Worker_id.of_int worker_id)))

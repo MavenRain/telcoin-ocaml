@@ -35,6 +35,7 @@ let system_block block =
     ~number:(Env.Block.number block)
     ~prevrandao:(Env.Block.prevrandao block)
     ~gas_limit:gas_limit_word ~basefee:U256.zero
+    ~basefee_address:(Env.Block.basefee_address block)
     ~chain_id:(Env.Block.chain_id block)
     ~hashes:(Env.Block.hashes block)
 

@@ -98,11 +98,13 @@ let precompile_addresses =
         (String.make (Units.Address.length - 1) '\000' ^ String.make 1 (Char.chr n)))
     [ 1; 2; 3; 4; 5; 6; 7; 8; 9; 10 ]
 
-(* Post-execution: EIP-3529 refund cap, then the EIP-7623 floor, then the two
-   credits. The order is load-bearing ([handler.rs:227-234]): the cap divides the
-   gross spend and runs first, so the floor sees an already-capped refund and can
-   then zero it. *)
-let finalize ~gas_limit ~floor_gas ~effective ~base_fee ~sender ~coinbase outcome =
+(* Post-execution: EIP-3529 refund cap, then the EIP-7623 floor, then telcoin's
+   settlement. The order is load-bearing ([handler.rs:227-234]): the cap divides
+   the gross spend and runs first, so the floor sees an already-capped refund and
+   can then zero it, and [TNEvmHandler]'s two overrides read the gas only after
+   both. *)
+let finalize ~gas_limit ~floor_gas ~effective ~base_fee ~sender ~coinbase
+    ~basefee_address outcome =
   let surviving_world, spent0, refund0, make_receipt =
     match outcome with
     | Ran_success { world; remaining; refund; logs; output; created } ->
@@ -134,18 +136,44 @@ let finalize ~gas_limit ~floor_gas ~effective ~base_fee ~sender ~coinbase outcom
     if spent0 - refund1 < floor_gas then (floor_gas, 0) else (spent0, refund1)
   in
   let used = spent_final - refund_final in
-  (* The caller is reimbursed for [remaining + refunded = gas_limit - used] units
-     at the full effective price; the beneficiary is paid for [used] units at the
-     effective price less the base fee, which is burned. *)
-  let caller_credit = U256.mul effective (word_of_int (gas_limit - used)) in
-  let coinbase_price =
-    Option.value (U256.checked_sub effective base_fee) ~default:U256.zero
-  in
-  let coinbase_credit = U256.mul coinbase_price (word_of_int used) in
-  let world_credited =
-    add_balance (add_balance surviving_world sender caller_credit) coinbase coinbase_credit
-  in
-  (make_receipt ~gas_used:used ~gas_refunded:refund_final, world_credited)
+  (* Telcoin's settlement ([TNEvmHandler], [evm/handler.rs:78-171]), not
+     mainnet's: the caller's refund is docked a gas-limit inefficiency penalty,
+     and both that penalty and the base fee are credited to the block's
+     [basefee_address] instead of the base fee being burned. A system call skips
+     settlement wholesale ([handler.rs:85-87, 145-147]); on the {!System_call}
+     path every price is zero anyway, so the skip is about never touching the
+     three accounts, not about amounts. *)
+  if Units.Address.equal sender System_contracts.system_address then
+    (make_receipt ~gas_used:used ~gas_refunded:refund_final, surviving_world)
+  else
+    (* The penalty prices the pre-refund spend [spent_final] ([gas.spent()] at
+       reimburse time, after the floor), while the reimbursement returns the
+       post-refund remainder ([handler.rs:91-92, 106]): docking a post-refund
+       penalty would grow it exactly when an SSTORE refund shrank the spend.
+       {!Gas_penalty.penalty} is bounded by
+       [gas_limit - spent_final <= gas_limit - used], so the caller's gas
+       cannot go negative. *)
+    let penalty = Gas_penalty.penalty ~gas_limit ~gas_spent:spent_final in
+    let coinbase_price =
+      Option.value (U256.checked_sub effective base_fee) ~default:U256.zero
+    in
+    (* The four credits in [TNEvmHandler]'s order: reimburse the caller and its
+       withheld penalty ([reimburse_caller]), then the priority fee and the
+       redirected base fee ([reward_beneficiary]). A zero credit is the
+       identity under {!add_balance}'s EIP-161 pruning, which is what keeps a
+       zero-fee block from materializing the basefee address. *)
+    let world_credited =
+      List.fold_left
+        (fun world (address, amount) -> add_balance world address amount)
+        surviving_world
+        [
+          (sender, U256.mul effective (word_of_int (gas_limit - used - penalty)));
+          (basefee_address, U256.mul effective (word_of_int penalty));
+          (coinbase, U256.mul coinbase_price (word_of_int used));
+          (basefee_address, U256.mul base_fee (word_of_int used));
+        ]
+    in
+    (make_receipt ~gas_used:used ~gas_refunded:refund_final, world_credited)
 
 let execute world ~block tx =
   let ( let* ) = Result.bind in
@@ -430,4 +458,6 @@ let execute world ~block tx =
               { world = world1; reason = Receipt.Frame_halt Interpreter.Static_state_change }
         | Some permit -> run_create permit)
   in
-  Ok (finalize ~gas_limit ~floor_gas ~effective ~base_fee ~sender ~coinbase outcome)
+  Ok
+    (finalize ~gas_limit ~floor_gas ~effective ~base_fee ~sender ~coinbase
+       ~basefee_address:(Env.Block.basefee_address block) outcome)

@@ -271,7 +271,7 @@ let world_seed pairs =
 
 let block_of ?(number = u 1000) ?(hashes = Block_hashes.empty) () =
   Env.Block.make ~coinbase:(address_of 0xc0) ~timestamp:(u 1_600_000_000) ~number
-    ~prevrandao:U256.zero ~gas_limit:(u 25_000_000) ~basefee:(u 7) ~chain_id:(u 2017)
+    ~prevrandao:U256.zero ~gas_limit:(u 25_000_000) ~basefee:(u 7) ~basefee_address:Tn_evm.System_contracts.governance_safe_address ~chain_id:(u 2017)
     ~hashes
 
 let env_of ?(mutability = Mutability.Mutable) ?number ?hashes () =

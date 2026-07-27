@@ -54,8 +54,9 @@ let world_seed pairs =
 
 let block_of ~coinbase ~basefee =
   Env.Block.make ~coinbase ~timestamp:(u 1_600_000_000) ~number:(u 1000)
-    ~prevrandao:U256.zero ~gas_limit:(u 30_000_000) ~basefee:(u basefee) ~chain_id:(u 1)
-    ~hashes:Block_hashes.empty
+    ~prevrandao:U256.zero ~gas_limit:(u 30_000_000) ~basefee:(u basefee)
+    ~basefee_address:Tn_evm.System_contracts.governance_safe_address
+    ~chain_id:(u 1) ~hashes:Block_hashes.empty
 
 (* ---------- fixed actors ---------- *)
 
@@ -631,6 +632,197 @@ let test_access_list_intrinsic () =
   let s = expect_success receipt in
   Alcotest.(check int) "gas used includes the access-list surcharge" 27200 s.su_gas_used
 
+(* ========================================================================== *)
+(* The telcoin fee split: penalty, redirected base fee, system-sender skip.   *)
+(* ========================================================================== *)
+
+let governance = Tn_evm.System_contracts.governance_safe_address
+
+(* A plain transfer that spends 21000 of a 420_000 limit (5 percent usage), at
+   basefee 0 so every wei the governance safe receives is the penalty alone.
+   Penalty = (10^8 - 10^9*21000/420000)^2 * 399_000 / 10^16 = 99_750, so the
+   caller is reimbursed (399_000 - 99_750)*10 and pays (21_000 + 99_750)*10 +
+   5000 net. Kills the mainnet mutant (refund without the penalty: sender
+   999_785_000 here instead) and the penalty-to-coinbase and penalty-burned
+   mutants (governance 997_500, coinbase 210_000). The raw-byte pin on the
+   governance address makes a drifted constant fail here rather than in a
+   state root. *)
+let test_penalty_docks_refund_and_credits_governance () =
+  let world = world_seed [ (sender, account ~nonce:0 ~balance:1_000_000_000) ] in
+  let tx =
+    Transaction.make ~sender ~nonce:(nonce_of 0) ~gas_limit:420_000
+      ~kind:(Transaction.Call target) ~value:(u 5000) ~data:"" ~access_list:[]
+      ~chain_id:(Some (u 1)) ~fee:(Transaction.Legacy { gas_price = u 10 })
+  in
+  let receipt, world' = exec_ok world ~block:(block_of ~coinbase ~basefee:0) tx in
+  let s = expect_success receipt in
+  Alcotest.(check int) "gas used stays post-refund" 21000 s.su_gas_used;
+  Alcotest.(check bool) "governance safe is 0x...07a0" true
+    (Units.Address.equal governance
+       (get (Units.Address.of_bytes (String.make 18 '\000' ^ "\x07\xa0"))));
+  (* B - (used + penalty)*price - value *)
+  Alcotest.(check int) "sender pays the penalty" 998_787_500 (bal world' sender);
+  Alcotest.(check int) "governance receives the penalty" 997_500 (bal world' governance);
+  Alcotest.(check int) "coinbase is unaffected by the penalty" 210_000
+    (bal world' coinbase);
+  Alcotest.(check int) "recipient" 5000 (bal world' target)
+
+(* The Legacy-transfer vector with a nonzero base fee: the 3*21000 the mainnet
+   split burned is credited to the governance safe, while the sender and the
+   coinbase see figures identical to the mainnet ones (penalty 0 at this
+   limit). Kills the burn-retained mutant (governance absent) and the
+   basefee-to-coinbase mutant (coinbase 210_000 instead of the priority-only
+   147_000). *)
+let test_basefee_credited_not_burned () =
+  let world = world_seed [ (sender, account ~nonce:0 ~balance:1_000_000_000) ] in
+  let tx =
+    Transaction.make ~sender ~nonce:(nonce_of 0) ~gas_limit:100000
+      ~kind:(Transaction.Call target) ~value:(u 5000) ~data:"" ~access_list:[]
+      ~chain_id:(Some (u 1)) ~fee:(Transaction.Legacy { gas_price = u 10 })
+  in
+  let receipt, world' = exec_ok world ~block:(block_of ~coinbase ~basefee:3) tx in
+  let s = expect_success receipt in
+  Alcotest.(check int) "gas used" 21000 s.su_gas_used;
+  Alcotest.(check int) "sender as on mainnet" 999_785_000 (bal world' sender);
+  Alcotest.(check int) "coinbase keeps only the priority fee" 147_000
+    (bal world' coinbase);
+  Alcotest.(check int) "governance receives basefee * gas_used" 63_000
+    (bal world' governance)
+
+(* The two-slot clearer of [test_refund_cap] at limit 400_000: gross spend
+   31_012, capped refund 6_202, net 24_810. The penalty prices the PRE-refund
+   31_012 (ratio 7.753 percent): (10^8 - 77_530_000)^2 * 368_988 / 10^16 =
+   18_630. The caller is reimbursed (375_190 - 18_630)*10 and the governance
+   safe collects 18_630*10 + 3*24_810. Kills the penalty-on-post-refund mutant,
+   whose penalty over 24_810 is 54_106 (sender 999_210_840 instead). *)
+let test_penalty_prices_the_prerefund_spend () =
+  let clear_two =
+    bytes_of
+      [
+        push1 0x00; push1 0x01; op Opcode.Sstore;
+        push1 0x00; push1 0x02; op Opcode.Sstore;
+        op Opcode.Stop;
+      ]
+  in
+  let seeded =
+    Account.set_slot
+      (Account.set_slot (Account.with_code (account ~nonce:0 ~balance:0) clear_two) (u 1) (u 7))
+      (u 2) (u 9)
+  in
+  let world =
+    world_seed [ (sender, account ~nonce:0 ~balance:1_000_000_000); (target, seeded) ]
+  in
+  let tx =
+    Transaction.make ~sender ~nonce:(nonce_of 0) ~gas_limit:400_000
+      ~kind:(Transaction.Call target) ~value:U256.zero ~data:"" ~access_list:[]
+      ~chain_id:(Some (u 1)) ~fee:(Transaction.Legacy { gas_price = u 10 })
+  in
+  let receipt, world' = exec_ok world ~block:(block_of ~coinbase ~basefee:3) tx in
+  let s = expect_success receipt in
+  Alcotest.(check int) "gas refunded still capped" 6202 s.su_gas_refunded;
+  Alcotest.(check int) "gas used still post-refund" 24810 s.su_gas_used;
+  (* B - used*price - penalty*price = B - 248_100 - 186_300 *)
+  Alcotest.(check int) "sender pays the pre-refund-priced penalty" 999_565_600
+    (bal world' sender);
+  Alcotest.(check int) "coinbase priority fee" 173_670 (bal world' coinbase);
+  Alcotest.(check int) "governance: penalty plus redirected basefee" 260_730
+    (bal world' governance)
+
+(* The same clearer at limit 250_000 straddles the regimes: the pre-refund
+   ratio 31_012/250_000 is above ten percent (penalty 0) while the post-refund
+   ratio 24_810/250_000 is below it (penalty 13). Identical to mainnet
+   settlement except the redirected base fee; the post-refund mutant docks 13
+   more gas units and shifts the sender by 130 wei. *)
+let test_penalty_regime_straddle () =
+  let clear_two =
+    bytes_of
+      [
+        push1 0x00; push1 0x01; op Opcode.Sstore;
+        push1 0x00; push1 0x02; op Opcode.Sstore;
+        op Opcode.Stop;
+      ]
+  in
+  let seeded =
+    Account.set_slot
+      (Account.set_slot (Account.with_code (account ~nonce:0 ~balance:0) clear_two) (u 1) (u 7))
+      (u 2) (u 9)
+  in
+  let world =
+    world_seed [ (sender, account ~nonce:0 ~balance:1_000_000_000); (target, seeded) ]
+  in
+  let tx =
+    Transaction.make ~sender ~nonce:(nonce_of 0) ~gas_limit:250_000
+      ~kind:(Transaction.Call target) ~value:U256.zero ~data:"" ~access_list:[]
+      ~chain_id:(Some (u 1)) ~fee:(Transaction.Legacy { gas_price = u 10 })
+  in
+  let receipt, world' = exec_ok world ~block:(block_of ~coinbase ~basefee:3) tx in
+  let s = expect_success receipt in
+  Alcotest.(check int) "gas used" 24810 s.su_gas_used;
+  Alcotest.(check int) "sender pays no penalty above ten percent pre-refund"
+    999_751_900 (bal world' sender);
+  Alcotest.(check int) "governance: redirected basefee only" 74_430
+    (bal world' governance)
+
+(* A system-sender transaction settles NOTHING ([handler.rs:85-87, 145-147]):
+   no reimbursement, no coinbase reward, no governance credit. This must be a
+   direct nonzero-price vector because the {!System_call} path prices
+   everything at zero, where the skip is invisible. The whole 250_000 * 10
+   deduction stays gone; the skip-removed mutant reimburses 2_231_380 and
+   materializes both fee accounts. *)
+let test_system_sender_skips_settlement () =
+  let system = Tn_evm.System_contracts.system_address in
+  let world = world_seed [ (system, account ~nonce:0 ~balance:1_000_000_000) ] in
+  let tx =
+    Transaction.make ~sender:system ~nonce:(nonce_of 0) ~gas_limit:250_000
+      ~kind:(Transaction.Call target) ~value:(u 5000) ~data:"" ~access_list:[]
+      ~chain_id:(Some (u 1)) ~fee:(Transaction.Legacy { gas_price = u 10 })
+  in
+  let receipt, world' = exec_ok world ~block:(block_of ~coinbase ~basefee:3) tx in
+  let s = expect_success receipt in
+  Alcotest.(check int) "gas used" 21000 s.su_gas_used;
+  Alcotest.(check int) "the whole allowance stays deducted" 997_495_000
+    (bal world' system);
+  Alcotest.(check bool) "coinbase untouched" false (present world' coinbase);
+  Alcotest.(check bool) "governance untouched" false (present world' governance);
+  Alcotest.(check int) "the call itself still ran" 5000 (bal world' target);
+  Alcotest.(check int) "nonce still advances" 1 (nonce_int world' system)
+
+(* At basefee 0 with no penalty the governance safe is owed nothing and, being
+   absent, must stay absent: the EIP-161 pruning claim of the .mli extended to
+   the third credit. Kills an executor-level penalty that forgot its 10^16
+   divisor (it would credit 790_000 * 10 here and materialize the account). *)
+let test_zero_fee_block_leaves_governance_absent () =
+  let world = world_seed [ (sender, account ~nonce:0 ~balance:1_000_000_000) ] in
+  let tx =
+    Transaction.make ~sender ~nonce:(nonce_of 0) ~gas_limit:100000
+      ~kind:(Transaction.Call target) ~value:U256.zero ~data:"" ~access_list:[]
+      ~chain_id:(Some (u 1)) ~fee:(Transaction.Legacy { gas_price = u 10 })
+  in
+  let receipt, world' = exec_ok world ~block:(block_of ~coinbase ~basefee:0) tx in
+  let s = expect_success receipt in
+  Alcotest.(check int) "gas used" 21000 s.su_gas_used;
+  Alcotest.(check bool) "governance not materialized" false
+    (present world' governance)
+
+(* The 210_000 gate cannot bite at realistic spends: a 21_000-gas transfer
+   settles identically at limits 210_000 and 210_001, because just past the
+   gate the quotient still floors to zero. The gate's bite is unit-level
+   ({!Gas_penalty}'s own vectors); this pins the executor-level honesty of
+   that note. *)
+let test_gate_boundary_is_settlement_invisible () =
+  let run gas_limit =
+    let world = world_seed [ (sender, account ~nonce:0 ~balance:1_000_000_000) ] in
+    let tx =
+      Transaction.make ~sender ~nonce:(nonce_of 0) ~gas_limit
+        ~kind:(Transaction.Call target) ~value:U256.zero ~data:"" ~access_list:[]
+        ~chain_id:(Some (u 1)) ~fee:(Transaction.Legacy { gas_price = u 10 })
+    in
+    let _, world' = exec_ok world ~block:(block_of ~coinbase ~basefee:3) tx in
+    bal world' sender
+  in
+  Alcotest.(check int) "identical settlement across the gate" (run 210_000)
+    (run 210_001)
+
 let () =
   Alcotest.run "executor"
     [
@@ -658,6 +850,23 @@ let () =
         ] );
       ( "refund",
         [ Alcotest.test_case "EIP-3529 cap over a two-slot clear" `Quick test_refund_cap ] );
+      ( "telcoin-fee-split",
+        [
+          Alcotest.test_case "penalty docks the refund, credits governance" `Quick
+            test_penalty_docks_refund_and_credits_governance;
+          Alcotest.test_case "basefee credited, not burned" `Quick
+            test_basefee_credited_not_burned;
+          Alcotest.test_case "penalty prices the pre-refund spend" `Quick
+            test_penalty_prices_the_prerefund_spend;
+          Alcotest.test_case "regime straddle: pre exempt, post would not be" `Quick
+            test_penalty_regime_straddle;
+          Alcotest.test_case "system sender skips settlement" `Quick
+            test_system_sender_skips_settlement;
+          Alcotest.test_case "zero-fee block leaves governance absent" `Quick
+            test_zero_fee_block_leaves_governance_absent;
+          Alcotest.test_case "the 210k gate is settlement-invisible" `Quick
+            test_gate_boundary_is_settlement_invisible;
+        ] );
       ( "eip161-pruning",
         [
           Alcotest.test_case "zero-reward coinbase not materialized" `Quick

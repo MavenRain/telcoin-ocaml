@@ -11,13 +11,24 @@ module Block = struct
     prevrandao : word;
     gas_limit : word;
     basefee : word;
+    basefee_address : Units.Address.t;
     chain_id : word;
     hashes : Block_hashes.t;
   }
 
-  let make ~coinbase ~timestamp ~number ~prevrandao ~gas_limit ~basefee ~chain_id
-      ~hashes =
-    { coinbase; timestamp; number; prevrandao; gas_limit; basefee; chain_id; hashes }
+  let make ~coinbase ~timestamp ~number ~prevrandao ~gas_limit ~basefee
+      ~basefee_address ~chain_id ~hashes =
+    {
+      coinbase;
+      timestamp;
+      number;
+      prevrandao;
+      gas_limit;
+      basefee;
+      basefee_address;
+      chain_id;
+      hashes;
+    }
 
   let coinbase t = t.coinbase
   let timestamp t = t.timestamp
@@ -25,6 +36,7 @@ module Block = struct
   let prevrandao t = t.prevrandao
   let gas_limit t = t.gas_limit
   let basefee t = t.basefee
+  let basefee_address t = t.basefee_address
   let chain_id t = t.chain_id
   let hashes t = t.hashes
 
@@ -35,6 +47,7 @@ module Block = struct
     && U256.equal a.prevrandao b.prevrandao
     && U256.equal a.gas_limit b.gas_limit
     && U256.equal a.basefee b.basefee
+    && Units.Address.equal a.basefee_address b.basefee_address
     && U256.equal a.chain_id b.chain_id
     && Block_hashes.equal a.hashes b.hashes
 end
