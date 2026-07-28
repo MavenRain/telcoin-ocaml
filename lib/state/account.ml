@@ -26,6 +26,8 @@ let code t = Bytecode.to_string t.code
 let code_length t = Bytecode.length t.code
 let code_hash t = Bytecode.hash t.code
 let with_code t bytes = { t with code = Bytecode.of_string bytes }
+let code_class t = Delegation.classify (code t)
+let delegation t = Option.map Delegation.target (Delegation.of_code (code t))
 
 (* The literal EIP-161 test, now with its third conjunct present: no code. It was
    the two-field test while no account could carry code; code exists as of this
@@ -48,6 +50,19 @@ let increment_nonce t = { t with nonce = Nonce.succ t.nonce }
 
 let increment_nonce_checked t =
   Option.map (fun nonce -> { t with nonce }) (Nonce.succ_checked t.nonce)
+
+(* revm's [delegate] ([revm-context-interface] [journaled_state/account.rs:448-459])
+   as one indivisible move: the code the assignment installs, then the nonce
+   bump that both of its branches perform. Splitting the two would be three
+   chances to forget the bump, and the bump is what keeps a delegated authority
+   out of EIP-161's clearing pass.
+
+   The saturated nonce is a [~default], not a raise: revm's [delegate] calls
+   [bump_nonce] and DISCARDS its boolean ([account.rs:392-400]), so an account
+   at the maximum keeps its nonce and still takes the code. *)
+let delegate t target =
+  let coded = with_code t (Delegation.code_of_assignment (Delegation.assignment target)) in
+  Option.value (increment_nonce_checked coded) ~default:coded
 
 (* revm's create-collision predicate ([revm-context] [journal/inner.rs:409]):
    [code_hash != KECCAK_EMPTY || nonce != 0]. Balance is deliberately absent, and

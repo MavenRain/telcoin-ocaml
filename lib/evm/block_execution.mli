@@ -156,16 +156,41 @@ val apply_pre_block :
 
     The two hardfork gates telcoin carries are ABSENT, not skipped. Telcoin
     gates 4788 on [is_cancun_active_at_timestamp] and 2935 on
-    [is_prague_active_at_timestamp] ([block.rs:643, 698]). This port has no fork
-    schedule ({!Env} targets Prague and says so, [env.mli:21-24]) and TN's own
-    chain configs set [shanghaiTime], [cancunTime] and [pragueTime] all to [0]
+    [is_prague_active_at_timestamp] ([block.rs:643, 698]). This port has no
+    fork schedule: it models TN's TESTNET configuration ({!Env} states the
+    fork scope once, [env.mli:26-53]), whose genesis sets [shanghaiTime],
+    [cancunTime] and [pragueTime] all to [0]
     ([chain-configs/testnet/genesis.yaml:15-17]), so both predicates are true
-    for every block TN can produce. The cost is exact and worth naming: on a
-    chain config with a nonzero [cancunTime] or [pragueTime] this port would
-    make a system call telcoin would skip, and the state roots would diverge
-    from the first block before activation. That input cannot arise from TN's
-    configs, and the check belongs with a fork schedule when one exists, not
+    for every block that chain can produce. TN MAINNET's committed genesis
+    carries [shanghaiTime] alone ([chain-configs/mainnet/genesis.yaml:15]), so
+    on mainnet NEITHER predicate holds and this port would make TWO system
+    calls telcoin skips (4788/Cancun gated at [tn-reth/src/evm/block.rs:643-645],
+    2935/Prague at [:698-700]), and the state roots would diverge from the
+    first block. The check belongs with a fork schedule when one exists, not
     here.
+
+    That absence is wider than these two calls, and the inventory is the
+    worklist such a spec chunk would inherit. The port's unconditional
+    post-Shanghai behaviour spans four mechanically distinct activation
+    layers:
+
+    - {e Opcode dispatch}, where decodability IS the activation mechanism:
+      [TLOAD]/[TSTORE]/[MCOPY] decode unconditionally ([opcode.ml:260-262])
+      and are priced flat ([gas.ml:89, 116]), and [SELFDESTRUCT] applies
+      EIP-6780's Cancun rule ([effects.ml:249-265]). There is nowhere to
+      deactivate them short of a spec parameter on the interpreter.
+    - {e Transaction validation}: the EIP-7623 floor ([intrinsic.ml:43],
+      checked at [executor.ml:283]), EIP-3651's warm coinbase
+      ([executor.ml:359]), and the 25000-per-authorization intrinsic term
+      ([intrinsic.ml:26-37]) with the type-4 envelope acceptance behind it.
+    - {e Block execution}: the two system calls above
+      ([block_execution.ml:82-111], [system_contracts.ml]), the 21-field
+      post-Prague header ([block_header.mli:230-235], which must NOT shrink;
+      the do-not-narrow note there says why), and the Prague precompile set
+      ([precompile.mli:9]).
+    - {e TN's own Rust}, where the gates are on ChainSpec TIMESTAMP
+      activation rather than on [SpecId] ([block.rs:643-645], [:698-700]), a
+      fourth mechanism a [SpecId] ladder alone would not even reach.
 
     Telcoin's [set_state_clear_flag] ([block.rs:771-773]) has no counterpart
     either: EIP-161 pruning is unconditional here, because

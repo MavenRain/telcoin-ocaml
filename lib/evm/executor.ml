@@ -1,6 +1,7 @@
 open Tn_types
 module World_state = Tn_state.World_state
 module Account = Tn_state.Account
+module Delegation = Tn_state.Delegation
 module Bytecode = Tn_state.Bytecode
 module U256 = Tn_state.U256
 module Nonce = Tn_state.Nonce
@@ -10,6 +11,7 @@ type error =
   | Missing_chain_id
   | Gas_price_below_base_fee
   | Priority_fee_above_max_fee
+  | Empty_authorization_list
   | Gas_limit_above_block
   | Init_code_size_limit
   | Intrinsic_gas_above_limit
@@ -24,6 +26,7 @@ let error_to_string = function
   | Missing_chain_id -> "missing chain id"
   | Gas_price_below_base_fee -> "gas price below base fee"
   | Priority_fee_above_max_fee -> "priority fee above max fee"
+  | Empty_authorization_list -> "empty authorization list (EIP-7702)"
   | Gas_limit_above_block -> "gas limit above block gas limit"
   | Init_code_size_limit -> "init code size limit (EIP-3860)"
   | Intrinsic_gas_above_limit -> "intrinsic gas above gas limit"
@@ -104,7 +107,7 @@ let precompile_addresses =
    can then zero it, and [TNEvmHandler]'s two overrides read the gas only after
    both. *)
 let finalize ~gas_limit ~floor_gas ~effective ~base_fee ~sender ~coinbase
-    ~basefee_address outcome =
+    ~basefee_address ~auth_refund outcome =
   let surviving_world, spent0, refund0, make_receipt =
     match outcome with
     | Ran_success { world; remaining; refund; logs; output; created } ->
@@ -124,12 +127,20 @@ let finalize ~gas_limit ~floor_gas ~effective ~base_fee ~sender ~coinbase
           0,
           fun ~gas_used ~gas_refunded:_ -> Receipt.Halted { reason; gas_used } )
   in
+  (* The EIP-7702 authorization refund joins the frame's SSTORE refund HERE,
+     after the outcome match and before the cap: it is computed in pre-execution
+     and applied in post-execution ([handler.rs:150-153, 226-234]), so it is
+     unaffected by how execution ended. The Revert and Halt arms above hardcode
+     [refund0 = 0] because revm discards the frame's SSTORE refund unless the
+     outcome is a success ([handler.rs:353-362]), leaving the 7702 refund ALONE
+     in the pot — and revm still PAYS it. *)
+  let pot = refund0 + auth_refund in
   (* EIP-3529 cap: [min(refund, spent/5)] over the gross spend, integer floor
-     division. A negative counter is unreachable by contract; revm's [as u64] cast
-     wraps it to a huge value that the [min] clamps to [spent/5], reproduced
-     here. *)
+     division ([post_execution.rs:23-29]). A negative counter is unreachable by
+     contract; revm's [as u64] cast wraps it to a huge value that the [min]
+     clamps to [spent/5], reproduced here. *)
   let cap = spent0 / 5 in
-  let refund1 = if refund0 < 0 then cap else min refund0 cap in
+  let refund1 = if pot < 0 then cap else min pot cap in
   (* EIP-7623 floor: if the net spend is below the floor, charge the floor and
      zero the refund. *)
   let spent_final, refund_final =
@@ -142,7 +153,16 @@ let finalize ~gas_limit ~floor_gas ~effective ~base_fee ~sender ~coinbase
      [basefee_address] instead of the base fee being burned. A system call skips
      settlement wholesale ([handler.rs:85-87, 145-147]); on the {!System_call}
      path every price is zero anyway, so the skip is about never touching the
-     three accounts, not about amounts. *)
+     three accounts, not about amounts.
+
+     The 7702 auth refund reaches this split through the same [refund_final]
+     as the SSTORE refund, and TN prices the two sides on DIFFERENT gas
+     quantities ([handler.rs:89-113, 150-168]): the penalty on the pre-refund
+     [spent_final] ([gas.spent()]), the caller's unused base and both the
+     beneficiary and basefee-address credits on the post-refund [used]
+     ([gas.spent_sub_refunded()]). Net: an auth refund enlarges the caller's
+     reimbursement without enlarging the penalty, and SHRINKS both the
+     beneficiary priority fee and the basefee-address credit. *)
   if Units.Address.equal sender System_contracts.system_address then
     (make_receipt ~gas_used:used ~gas_refunded:refund_final, surviving_world)
   else
@@ -199,11 +219,13 @@ let execute world ~block tx =
   let effective_access_list =
     match Transaction.fee tx with
     | Transaction.Legacy _ -> []
-    | Transaction.Access_list _ | Transaction.Dynamic _ -> Transaction.access_list tx
+    | Transaction.Access_list _ | Transaction.Dynamic _ | Transaction.Set_code _ ->
+        Transaction.access_list tx
   in
   let initial_gas =
     Intrinsic.initial_gas ~kind:intrinsic_kind ~data:(Transaction.data tx)
       ~access_list:effective_access_list
+      ~authorizations:(Transaction.authorizations tx)
   in
   let floor_gas = Intrinsic.floor_gas ~data:(Transaction.data tx) in
   (* VALIDATE: environment, then initial-gas, then against-state. *)
@@ -214,7 +236,8 @@ let execute world ~block tx =
     | None -> (
         match Transaction.fee tx with
         | Transaction.Legacy _ -> Ok ()
-        | Transaction.Access_list _ | Transaction.Dynamic _ -> Error Missing_chain_id)
+        | Transaction.Access_list _ | Transaction.Dynamic _ | Transaction.Set_code _ ->
+            Error Missing_chain_id)
   in
   let* () =
     match Transaction.fee tx with
@@ -229,6 +252,29 @@ let execute world ~block tx =
               if U256.compare p mf > 0 then Error Priority_fee_above_max_fee else Ok ()
         in
         if U256.compare mf base_fee < 0 then Error Gas_price_below_base_fee else Ok ()
+    (* A SEPARATE arm, not folded into [Dynamic]: the priority fee is mandatory
+       here, and revm's Eip7702 validation arm runs [validate_priority_fee_for_tx]
+       (priority-vs-max at [validation.rs:47-50], then basefee at [:53-58]) in
+       exactly this order BEFORE the empty-list guard ([validation.rs:191-204]).
+       The order is observable in both directions: a bad priority fee plus an
+       empty list reports the fee error, while an empty list plus an
+       over-the-limit intrinsic reports the empty list, because this whole match
+       precedes the block-gas-limit and gas guards below, as [validate_tx_env]
+       precedes [validate_initial_tx_gas] ([validation.rs:210-254]). The empty
+       list is the ONLY authorization rule that invalidates the transaction;
+       every other defect is a per-entry skip inside the application loop. *)
+    | Transaction.Set_code { max_fee = mf; max_priority; target = _; authorizations }
+      ->
+        let* () =
+          if U256.compare max_priority mf > 0 then Error Priority_fee_above_max_fee
+          else Ok ()
+        in
+        let* () =
+          if U256.compare mf base_fee < 0 then Error Gas_price_below_base_fee else Ok ()
+        in
+        (match authorizations with
+        | [] -> Error Empty_authorization_list
+        | _ :: _ -> Ok ())
   in
   let* () =
     if U256.compare gl_word (Env.Block.gas_limit block) > 0 then Error Gas_limit_above_block
@@ -244,9 +290,21 @@ let execute world ~block tx =
   in
   let* () = if initial_gas > gas_limit then Error Intrinsic_gas_above_limit else Ok () in
   let* () = if floor_gas > gas_limit then Error Gas_floor_above_limit else Ok () in
+  (* EIP-3607 with the EIP-7702 exemption, verbatim from [pre_execution.rs:92-102]:
+     [!bytecode.is_empty() && !bytecode.is_eip7702()]. A delegated sender MUST
+     pass, or every EOA that ever set a delegation is permanently bricked — it
+     could never send the transaction that revokes it. Written as a four-arm
+     match on the classification rather than a boolean so the [Undecodable]
+     decision is taken visibly here: such code is not a designator, so it blocks,
+     the conservative direction ([Delegation.is_contract_code]'s documented
+     divergence). The identical condition shape reappears at the authorization
+     loop's check 5 ([pre_execution.rs:239-245]). *)
   let* () =
-    if Account.code_length (World_state.account world sender) > 0 then Error Sender_has_code
-    else Ok ()
+    match Account.code_class (World_state.account world sender) with
+    | Delegation.Codeless -> Ok ()
+    | Delegation.Delegated _ -> Ok ()
+    | Delegation.Contract -> Error Sender_has_code
+    | Delegation.Undecodable _ -> Error Sender_has_code
   in
   let* () =
     let account_nonce = World_state.nonce world sender in
@@ -267,7 +325,7 @@ let execute world ~block tx =
   (* DEDUCT: debit the gas fee at the effective price, and bump the nonce for a
      call (a creation bumps inside its frame). The debit is validated to succeed. *)
   let deduct_wei = U256.mul gl_word effective in
-  let* world1 =
+  let* world_deducted =
     let account = World_state.account world sender in
     match Account.debit account deduct_wei with
     | None -> Error Insufficient_funds
@@ -282,6 +340,19 @@ let execute world ~block tx =
         in
         Ok (World_state.set_account world sender account')
   in
+  (* AUTH LOOP: after the deduction and nonce bump ([handler.rs:179-185], which
+     is why a self-authorizing sender signs tx.nonce + 1), before any frame
+     exists. [world1] is REBOUND rather than renamed so every downstream site —
+     above all the [Ran_revert]/[Ran_halt] arms — becomes the POST-AUTH world:
+     delegations sit BELOW the frame checkpoint and survive a revert or halt
+     ([frame.rs:166-167]); only the [Error] path above rolls them back. No
+     tx-type gate: the other fee arms carry [[]], the loop's identity
+     ([pre_execution.rs:196-200] holds by construction). *)
+  let auth =
+    Auth_list.apply ~world:world_deducted ~chain_id:(Env.Block.chain_id block)
+      (Transaction.authorizations tx)
+  in
+  let world1 = Auth_list.world auth in
   (* WARM: caller, beneficiary (EIP-3651), the call target, the precompiles, and
      the access list (typed transactions only). The created address is warmed at
      frame construction instead. *)
@@ -289,10 +360,25 @@ let execute world ~block tx =
     Env.Tx.make ~origin:sender ~gas_price:effective ~access_list:effective_access_list
   in
   let al_addresses, al_slots = declared_warm effective_access_list in
-  let base_addresses = sender :: coinbase :: (precompile_addresses @ al_addresses) in
+  (* Check 4's authorities stay warm even when checks 5 or 6 skipped their
+     entries ([pre_execution.rs:234-237] precedes [:239-250]); a warm set has
+     neither order nor multiplicity, so folding {!Auth_list.warmed} in here is
+     exactly equivalent to warming inside the loop. *)
+  let base_addresses =
+    sender :: coinbase :: (precompile_addresses @ al_addresses @ Auth_list.warmed auth)
+  in
+  (* At depth 0 the handler loads BOTH the designator and its delegate outside
+     any gas metering ([handler.rs:314-332]), so a delegated target's delegate
+     is warm for free. The read is from [world1], post-auth, which is what makes
+     a same-transaction delegation visible here. The [Option.to_list] keeps the
+     append CONDITIONAL: an unconditional extra address would warm a spurious
+     account on every plain call and shift its first-access price. *)
   let addresses =
     match Transaction.kind tx with
-    | Transaction.Call target -> target :: base_addresses
+    | Transaction.Call target ->
+        target
+        :: (Option.to_list (Account.delegation (World_state.account world1 target))
+           @ base_addresses)
     | Transaction.Create -> base_addresses
   in
   let effects_start =
@@ -345,7 +431,21 @@ let execute world ~block tx =
             Ran_halt
               { world = world1; reason = Receipt.Frame_halt Interpreter.Out_of_gas }
         | Precompile.Not_a_precompile ->
-            let code = Code.of_string (Account.code (World_state.account world1 target)) in
+            (* Depth-0 one-hop resolution: the SAME {!Call_target} rule as the
+               interpreter's four call opcodes ([handler.rs:317-332] duplicates
+               [call_helpers.rs:165-186]; fixing only the CALL path leaves a
+               transaction sent straight to a delegated EOA wrong, the canonical
+               sponsored shape). {!Call_target.surcharge} is deliberately
+               IGNORED: both loads sit outside any gas metering there and
+               [first_frame_input] has no [Gas] in scope, so designator and
+               delegate are warmed for free at depth 0 (the pre-warm set above
+               already carries both). The frame's [~target] stays [target], so
+               SLOAD/SSTORE/LOG/ADDRESS/SELFBALANCE key on the DELEGATOR. *)
+            let load = Effects.ext_account effects target in
+            let resolved =
+              Call_target.resolve (Effects.warmed load) (Effects.loaded load)
+            in
+            let code = Call_target.code resolved in
             let env =
               Env.make ~block ~tx:tx_env
                 ~call:
@@ -353,7 +453,10 @@ let execute world ~block tx =
                      ~data:(Data.of_string (Transaction.data tx))
                      ~mutability:Mutability.Mutable)
             in
-            (match Interpreter.run ~env ~code ~gas:forwarded ~effects with
+            (match
+               Interpreter.run ~env ~code ~gas:forwarded
+                 ~effects:(Call_target.effects resolved)
+             with
             | Interpreter.Stopped { gas_left; effects } ->
                 Ran_success
                   {
@@ -463,6 +566,9 @@ let execute world ~block tx =
               { world = world1; reason = Receipt.Frame_halt Interpreter.Static_state_change }
         | Some permit -> run_create permit)
   in
+  (* The pot rides [~auth_refund]: pre-execution computes, post-execution pays
+     ([handler.rs:150-153, 226-234]), identically for success, revert, halt. *)
   Ok
     (finalize ~gas_limit ~floor_gas ~effective ~base_fee ~sender ~coinbase
-       ~basefee_address:(Env.Block.basefee_address block) outcome)
+       ~basefee_address:(Env.Block.basefee_address block)
+       ~auth_refund:(Auth_list.refund auth) outcome)

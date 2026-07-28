@@ -70,12 +70,69 @@ val with_code : t -> string -> t
     allocation or (later) [CREATE] deploys through; until [CREATE] lands it is
     reached only by a genesis seeding a pre-deployed contract or by a test. *)
 
+val code_class : t -> Delegation.code_class
+(** What this account's code {e is}, in the four-way classification every reader
+    of account code must make ([revm-bytecode] [bytecode.rs:101-110]).
+
+    Derived from {!code} rather than stored, exactly as {!code_hash} is: a
+    delegated account's code {e is} the twenty-three designator bytes, so there
+    is no class-matches-bytes invariant to keep and no way for the two to drift.
+    Consumers match on all four arms; none of them may assert
+    {!Delegation.Undecodable} away, even though
+    {!World_state.of_genesis_alloc} refuses to admit a world containing one. *)
+
+val delegation : t -> Tn_types.Units.Address.t option
+(** The address this account delegates to, if it delegates at all -
+    {!Delegation.of_code} of its code, read through {!Delegation.target}. The
+    single question EIP-3607, the authorization loop's check 5 and both
+    call-time resolutions ask, asked once. *)
+
+val delegate : t -> Tn_types.Units.Address.t -> t
+(** Install an EIP-7702 delegation - revm's [delegate]
+    ([revm-context-interface] [journaled_state/account.rs:448-459]) as {b one}
+    call carrying all of its effects: set the code from
+    {!Delegation.code_of_assignment}, and bump the nonce.
+
+    {b Both} branches bump, revocation included. The two effects cannot be
+    separated by a caller, and that is the point: the bump is what keeps a
+    delegated authority permanently non-{!is_empty}, hence permanently
+    un-prunable by EIP-161 ([revm-database] [states/cache.rs:193-239]). For a
+    revocation, which leaves no code behind, the nonce bump is the {e only}
+    thing defeating emptiness, so a caller that could skip it would silently
+    delete the account.
+
+    A nonce already at its maximum leaves the nonce {e unchanged} and still sets
+    the code: revm's [delegate] discards the boolean [bump_nonce] returns
+    ([journaled_state/account.rs:392-400]). Implemented as
+    [Option.value (increment_nonce_checked ...) ~default:...], never a raise.
+    The live authorization loop cannot reach that state - check 2 rejects a
+    [u64::MAX] authorization nonce and check 6 forces equality with the
+    account's - but a port that raised, or that skipped the code write when the
+    bump failed, would diverge in an adversarial state that a direct caller can
+    still build.
+
+    It records nothing created-locally. revm's [delegate] never marks the
+    account [CreatedLocal], which is why a [SELFDESTRUCT] executed at a
+    delegated address moves the balance and leaves designator and nonce
+    standing ([revm-context] [journal/inner.rs:534-545]). *)
+
 val is_empty : t -> bool
 (** The EIP-161 emptiness test: zero nonce, zero balance and no code. Storage is
     deliberately {e not} a conjunct, because EIP-161 does not make it one: the
     specification deletes a touched account on nonce, balance and code alone.
     This is the predicate [EXTCODEHASH] folds to zero on (EIP-1052) and the one a
     [CALL]-to-empty surcharge will use, and it must stay literal.
+
+    A {!delegate}d account is never empty, and that follows from the nonce
+    conjunct alone: {!delegate} always bumps, so the authority sits at nonce one
+    or above whether it installed a designator or revoked one. Three
+    consequences hang off that single fact. EIP-161's end-of-transaction
+    clearing can never prune an authority, so authorizing an address that did
+    not exist adds a nonce-one account to the state permanently. A [CALL] to a
+    delegated account never earns the new-account surcharge. And revm's
+    empty-target early return ([revm-handler] [call_helpers.rs:157-163]) can
+    never fire on a designator-bearing account, so it cannot mask a delegation
+    that should have been resolved.
 
     It is {e not} the predicate the world state prunes on. See {!is_absent}. *)
 

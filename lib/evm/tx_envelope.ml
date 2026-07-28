@@ -55,8 +55,16 @@ let enc_access_list access_list =
     access_list
   |> Rlp.encode_list
 
+(* The authorization list is a list of six-item lists, each encoded by the
+   hand-written encoder Authorization carries ([alloy-eip7702]
+   [auth_list.rs:224-233]); the outer header is computed over the verbatim
+   concatenation, no sort and no dedup, like the access list. *)
+let enc_authorization_list l = Rlp.encode_list (List.map Authorization.encode_signed l)
+
 (* The four fields every layout shares, in their common wire position:
-   gas_limit, to, value, input. *)
+   gas_limit, to, value, input. For type 4 [Tx_payload.kind] is [Call to_] by
+   construction, so [enc_kind] writes the mandatory twenty-byte address and an
+   empty-string [to] is unreachable from a payload. *)
 let common_chunks p =
   [
     Rlp.encode_nat (Tx_payload.gas_limit p);
@@ -65,8 +73,13 @@ let common_chunks p =
     Rlp.encode_bytes (Tx_payload.data p);
   ]
 
-(* The body fields, in wire order: 6 for legacy, 8 for type 1, 9 for type 2.
-   Note that type 2 writes the TIP cap before the FEE cap. *)
+(* The body fields, in wire order: 6 for legacy, 8 for type 1, 9 for type 2,
+   10 for type 4. Note that types 2 and 4 write the TIP cap before the FEE cap.
+   The type-4 arm is deliberately NOT folded into the type-2 arm although the
+   nine shared items agree ([eip7702.rs:112-123] against [eip1559.rs:112-122]):
+   a grouped `Eip1559 _ | Eip7702 _` arm would drop the authorization list with
+   no compile error, which is exactly the mistake the differential wire test
+   exists to catch. *)
 let body_chunks p =
   match Tx_payload.variant p with
   | Tx_payload.Legacy { gas_price; chain_id = _ } ->
@@ -79,6 +92,13 @@ let body_chunks p =
       (enc_word chain_id :: enc_nonce (Tx_payload.nonce p)
       :: enc_word max_priority_fee_per_gas :: enc_word max_fee_per_gas :: common_chunks p)
       @ [ enc_access_list (Tx_payload.access_list p) ]
+  | Tx_payload.Eip7702 { chain_id; max_priority_fee_per_gas; max_fee_per_gas } ->
+      (enc_word chain_id :: enc_nonce (Tx_payload.nonce p)
+      :: enc_word max_priority_fee_per_gas :: enc_word max_fee_per_gas :: common_chunks p)
+      @ [
+          enc_access_list (Tx_payload.access_list p);
+          enc_authorization_list (Tx_payload.authorizations p);
+        ]
 
 (* ------------------------------------------------------------------ *)
 (* Signing payload and consensus envelope                              *)
@@ -94,7 +114,7 @@ let signing_tail p =
       Option.fold ~none:[]
         ~some:(fun id -> [ enc_word id; Rlp.encode_nat 0; Rlp.encode_nat 0 ])
         chain_id
-  | Tx_payload.Eip2930 _ | Tx_payload.Eip1559 _ -> []
+  | Tx_payload.Eip2930 _ | Tx_payload.Eip1559 _ | Tx_payload.Eip7702 _ -> []
 
 let signing_payload p =
   Eip2718.frame ~type_byte:(Tx_payload.type_byte p)
@@ -112,7 +132,7 @@ let signature_tail p sg =
   | Tx_payload.Legacy { chain_id; gas_price = _ } ->
       enc_word (Tx_signature.to_eip155_value ~parity:(Tx_signature.parity sg) ~chain_id)
       :: scalars
-  | Tx_payload.Eip2930 _ | Tx_payload.Eip1559 _ ->
+  | Tx_payload.Eip2930 _ | Tx_payload.Eip1559 _ | Tx_payload.Eip7702 _ ->
       Rlp.encode_nat (if Tx_signature.parity sg then 1 else 0) :: scalars
 
 let encode_2718 t =
@@ -271,7 +291,58 @@ let read_access_list item =
   | Tn_rlp.Rlp.Str _ -> Error Unexpected_string
   | Tn_rlp.Rlp.List items -> traverse read_access_item items
 
-(* --- the three per-type readers, positional and wildcard-free --- *)
+(* One signed authorization: a six-item list ([alloy-eip7702]
+   [auth_list.rs:224-233], decode at [:202-221]). Three deliberate deviations
+   from the transaction readers above, each a width the AUTHORIZATION layer has
+   and the transaction layer does not:
+
+   - [chain_id] is a full [U256] ([auth_list.rs:47]), not the transaction's
+     [u64], so its bound is 32 bytes: a chain id of [2^64] decodes here and
+     merely fails the loop's check 1, while the same value one layer down is
+     [Scalar_too_wide].
+   - [y_parity] is a one-byte SCALAR and not the RLP bool [read_parity] reads: a
+     parity of 2 must DECODE and only then make that ONE authorization a no-op
+     ([auth_list.rs:135-141] rejects it at [signature()], on the recover path),
+     whereas [read_parity] would answer [Invalid_bool] and kill the whole
+     envelope. A literal [0x00] is still [Leading_zero_scalar] and two bytes are
+     still [Scalar_too_wide], exactly as for every scalar.
+   - [nonce] stays a WORD bounded to eight bytes, never [read_nonce]'s native
+     [int]: the u64 range must survive in full so the loop's saturation check
+     ([u64::MAX]) stays meaningful.
+
+   No new error constructor: every defect maps onto one alloy also reports. *)
+let read_signed_authorization item =
+  match item with
+  | Tn_rlp.Rlp.Str _ -> Error Unexpected_string
+  | Tn_rlp.Rlp.List fields ->
+      let short = Field_count { expected = 6; got = List.length fields } in
+      let* chain_id, fields = take short (read_word ~max_bytes:32) fields in
+      let* address, fields = take short (read_fixed Address.length) fields in
+      let* nonce, fields = take short (read_word ~max_bytes:8) fields in
+      let* y_parity, fields = take short (read_word ~max_bytes:1) fields in
+      let* r, fields = take short (read_word ~max_bytes:32) fields in
+      let* s, fields = take short (read_word ~max_bytes:32) fields in
+      let* () = finish short fields in
+      (* Exactly [Address.length] bytes by [read_fixed], so unreachable. *)
+      let address = Option.value ~default:Address.zero (Address.of_bytes address) in
+      (* [make] refuses only a nonce at or above [2^64], which the eight-byte
+         bound above already excludes; if the bound ever widened, the honest
+         name for the impossible remainder IS an over-wide scalar. *)
+      let* auth =
+        Option.to_result ~none:Scalar_too_wide
+          (Authorization.make ~chain_id ~address ~nonce)
+      in
+      Ok (Authorization.sign auth ~y_parity ~r ~s)
+
+(* A list of lists, like the access list; an empty one decodes successfully BY
+   DESIGN — its rejection is validation's ([revm-handler]
+   [validation.rs:199-203]), not the decoder's. *)
+let read_authorization_list item =
+  match item with
+  | Tn_rlp.Rlp.Str _ -> Error Unexpected_string
+  | Tn_rlp.Rlp.List items -> traverse read_signed_authorization items
+
+(* --- the four per-type readers, positional and wildcard-free --- *)
 
 let read_legacy items =
   let short = Field_count { expected = 9; got = List.length items } in
@@ -339,6 +410,37 @@ let read_eip1559 items =
             ~gas_limit ~kind ~value ~data ~access_list)
        ~signature:(Tx_signature.make ~parity ~r ~s))
 
+(* Thirteen items: the ten body fields of [eip7702.rs:112-123] — the 1559 nine
+   plus the authorization list appended last — then y_parity, r, s in the SAME
+   list. [to] is [read_fixed] and never [read_kind]: the field is a bare
+   [Address] ([eip7702.rs:58]), so an RLP empty string is a [Fixed_width]
+   rejection and not a "create" reading. The transaction-level y_parity is the
+   RLP bool, exactly as for types 1 and 2. *)
+let read_eip7702 items =
+  let short = Field_count { expected = 13; got = List.length items } in
+  let* chain_id, items = take short (read_word ~max_bytes:8) items in
+  let* nonce, items = take short read_nonce items in
+  let* max_priority_fee_per_gas, items = take short (read_word ~max_bytes:16) items in
+  let* max_fee_per_gas, items = take short (read_word ~max_bytes:16) items in
+  let* gas_limit, items = take short read_int items in
+  let* to_, items = take short (read_fixed Address.length) items in
+  let* value, items = take short (read_word ~max_bytes:32) items in
+  let* data, items = take short read_bytes items in
+  let* access_list, items = take short read_access_list items in
+  let* authorizations, items = take short read_authorization_list items in
+  let* parity, items = take short read_parity items in
+  let* r, items = take short (read_word ~max_bytes:32) items in
+  let* s, items = take short (read_word ~max_bytes:32) items in
+  let* () = finish short items in
+  (* Exactly [Address.length] bytes by [read_fixed], so unreachable. *)
+  let to_ = Option.value ~default:Address.zero (Address.of_bytes to_) in
+  Ok
+    (make
+       ~payload:
+         (Tx_payload.eip7702 ~chain_id ~nonce ~max_priority_fee_per_gas ~max_fee_per_gas
+            ~gas_limit ~to_ ~value ~data ~access_list ~authorizations)
+       ~signature:(Tx_signature.make ~parity ~r ~s))
+
 (* The envelope must be a LIST. A string here is the [0xb8 || len || list]
    framing alloy accepts through its unrestored-cursor fallback and this port
    refuses; see the interface. *)
@@ -362,4 +464,5 @@ let decode_2718 input =
       if b = 0 then Error Zero_type_byte
       else if b = 1 then decode_body rest read_eip2930
       else if b = 2 then decode_body rest read_eip1559
+      else if b = 4 then decode_body rest read_eip7702
       else Error (Unknown_type_byte b)

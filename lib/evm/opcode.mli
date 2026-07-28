@@ -16,9 +16,13 @@
     chunk: a frame can now open a {e second} frame. The account creations
     [CREATE] and [CREATE2], account destruction [SELFDESTRUCT] and [BLOCKHASH]
     join the set as of this chunk too. What remains absent are the blob
-    instructions and EIP-7702 delegated-code execution (the calls resolve no
-    delegation designator, so their faithfulness holds for a non-delegated
-    target). A code byte naming one of the absent instructions decodes to [None]
+    instructions alone: since chunk 33 the calls resolve an EIP-7702
+    delegation designator one hop (see {!Interpreter} and {!Call_target}), so
+    their faithfulness no longer carries a non-delegated qualifier, and [0xEF]
+    REMAINS an undefined byte on purpose, which is exactly what halts the
+    second hop of a delegation chain ([opcode.rs:637-638]). The fork level
+    this table models is stated once, in [env.mli:26-53]. A code byte naming
+    one of the absent instructions decodes to [None]
     exactly as an unassigned byte does, and the interpreter halts on it. That is a
     {e temporary} divergence from a full node, and the only one: within this
     subset the byte values, immediate sizes and semantics are those of the real

@@ -218,6 +218,15 @@ let storage_access_cost warmth =
 let account_access_cost warmth =
   if Access.is_cold warmth then cold_account_additional else 0
 
+(* The EIP-7702 resolution surcharge ([call_helpers.rs:166-184]): 100 warm and
+   2600 cold, written as the sum revm writes ([cost += warm_storage_read_cost]
+   then the cold additional, [call_helpers.rs:167-174]) rather than as fresh
+   literals, so a 2929 schedule change moves both together. [None] means the
+   target bore no designator and no resolution happened, so nothing is
+   charged. *)
+let delegation_cost =
+  Option.fold ~none:0 ~some:(fun w -> warm_storage_read + account_access_cost w)
+
 (* [COPY = 3] per word ([revm-context-interface] [cfg/gas.rs:54]). This is a
    different price from [memory_word_cost] above, which is also 3
    ([cfg/gas.rs:42]) — a copying instruction pays both, one for the words it

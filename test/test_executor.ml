@@ -195,17 +195,18 @@ let test_effective_gas_price () =
 let test_intrinsic_primitive () =
   let data = String.make 100 '\000' in
   Alcotest.(check int) "call intrinsic" 21400
-    (Intrinsic.initial_gas ~kind:Intrinsic.Call ~data ~access_list:[]);
+    (Intrinsic.initial_gas ~kind:Intrinsic.Call ~data ~access_list:[] ~authorizations:[]);
   Alcotest.(check int) "floor" 22000 (Intrinsic.floor_gas ~data);
   (* one nonzero byte = 4 tokens: 4*4 + 21000 = 21016 exec, 4*10 + 21000 floor *)
   Alcotest.(check int) "one nonzero byte exec" 21016
-    (Intrinsic.initial_gas ~kind:Intrinsic.Call ~data:"\x01" ~access_list:[]);
+    (Intrinsic.initial_gas ~kind:Intrinsic.Call ~data:"\x01" ~access_list:[]
+       ~authorizations:[]);
   Alcotest.(check int) "one nonzero byte floor" 21040 (Intrinsic.floor_gas ~data:"\x01");
   (* create over 5 init bytes (tokens 17): 17*4 + 21000 + 32000 + 2*1 = 53070 *)
   Alcotest.(check int) "create intrinsic" 53070
     (Intrinsic.initial_gas ~kind:Intrinsic.Create
        ~data:(bytes_of [ push1 0x01; push1 0x00; op Opcode.Return ])
-       ~access_list:[])
+       ~access_list:[] ~authorizations:[])
 
 (* A data-heavy transfer where the EIP-7623 floor binds. 100 zero bytes give
    intrinsic 21400 and floor 22000; the empty callee spends nothing beyond the

@@ -276,7 +276,7 @@ let test_an_undeployed_target_is_a_silent_no_op () =
   in
   Alcotest.(check bool) "an empty target still succeeds" true (System_call.succeeded outcome);
   Alcotest.(check int) "intrinsic gas of 32 nonzero calldata bytes" 21512
-    (Intrinsic.initial_gas ~kind:Intrinsic.Call ~data ~access_list:[]);
+    (Intrinsic.initial_gas ~kind:Intrinsic.Call ~data ~access_list:[] ~authorizations:[]);
   Alcotest.(check int) "the EIP-7623 floor of the same calldata" 22280
     (Intrinsic.floor_gas ~data);
   Alcotest.(check int) "gas used is the binding floor" 22280
@@ -447,7 +447,7 @@ let test_eip2935_gas_matches_revms_fixture_plus_intrinsic () =
   Alcotest.(check bool) "the call succeeded" true (System_call.succeeded outcome);
   Alcotest.(check int) "frame plus intrinsic" 43655 (Receipt.gas_used (System_call.receipt outcome));
   Alcotest.(check int) "of which the intrinsic charge" 21512
-    (Intrinsic.initial_gas ~kind:Intrinsic.Call ~data ~access_list:[])
+    (Intrinsic.initial_gas ~kind:Intrinsic.Call ~data ~access_list:[] ~authorizations:[])
 
 (* Block zero: the consensus root must be zero, and NEITHER call is made. The
    2935 skip is not hygiene: the contract would compute (0 - 1) mod 8191 in

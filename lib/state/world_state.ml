@@ -28,16 +28,40 @@ let set_account t addr acct =
 
 let remove_account t addr = Addr_map.remove addr t
 
-type alloc_error = Storage_without_code of Units.Address.t
+type alloc_error =
+  | Storage_without_code of Units.Address.t
+  | Malformed_delegation of Units.Address.t * Delegation.decode_error
 
-let error_to_string (Storage_without_code addr) =
-  let hex =
-    String.concat ""
-      (List.map
-         (fun c -> Printf.sprintf "%02x" (Char.code c))
-         (List.of_seq (String.to_seq (Units.Address.to_bytes addr))))
-  in
-  Printf.sprintf "genesis alloc entry 0x%s pre-populates storage but installs no code" hex
+let hex_of_address addr =
+  String.concat ""
+    (List.map
+       (fun c -> Printf.sprintf "%02x" (Char.code c))
+       (List.of_seq (String.to_seq (Units.Address.to_bytes addr))))
+
+let error_to_string e =
+  match e with
+  | Storage_without_code addr ->
+      Printf.sprintf "genesis alloc entry 0x%s pre-populates storage but installs no code"
+        (hex_of_address addr)
+  | Malformed_delegation (addr, d) ->
+      Printf.sprintf "genesis alloc entry 0x%s installs 0xef01-prefixed code that is not a delegation designator: %s"
+        (hex_of_address addr)
+        (Delegation.decode_error_to_string d)
+
+(* The [Undecodable] arm of [Delegation.classify], lifted to an entry. revm
+   reaches those bytes only as a DATABASE DECODE FAILURE
+   ([revm-bytecode] [bytecode.rs:101-110]) and never as executable code, so
+   refusing them at the genesis door is what keeps [Delegation.Undecodable]
+   unreachable from any world a transaction runs against. A WELL-FORMED
+   designator is admitted and is live: classification is on the first two bytes,
+   with no authorization involved. *)
+let malformed_delegation entry =
+  Option.bind (Genesis_account.code entry) (fun code ->
+      match Delegation.classify code with
+      | Undecodable e -> Some e
+      | Codeless -> None
+      | Contract -> None
+      | Delegated _ -> None)
 
 (* One total function of the alloc, but for the single refusal. Each entry
    becomes an [Account.t] by seeding balance and nonce, then storage, then
@@ -68,7 +92,16 @@ let of_genesis_alloc allocs =
             (not (Genesis_account.has_code entry))
             && not (Storage.is_empty (Genesis_account.storage entry))
           in
-          if refused then Error (Storage_without_code addr) else Ok (seed t addr entry)))
+          if refused then Error (Storage_without_code addr)
+          else
+            (* Ordered AFTER the storage refusal, so that error's identity is
+               unchanged for its own input. The [Result.map] keeps [seed] out of
+               an eager [~none:]. *)
+            Result.map
+              (fun () -> seed t addr entry)
+              (Option.fold ~none:(Ok ())
+                 ~some:(fun d -> Error (Malformed_delegation (addr, d)))
+                 (malformed_delegation entry))))
     (Ok empty) allocs
 
 (* The balance-only special case, delegating so genesis stays one function. A

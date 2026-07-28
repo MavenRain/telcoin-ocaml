@@ -477,6 +477,21 @@ let account_projection ~project ~load m =
         (stack_result (Stack.push (project (Effects.loaded load)) m.stack)))
     (Gas.charge (Gas.account_access_cost (Effects.warmth load)) m.gas)
 
+(* An EIP-7702 decision, recorded where a helpful hand would reach first: the
+   EXTCODE* family does NOT follow a delegation designator. revm answers all
+   three from the target's own account — [instructions/host.rs:61-64]
+   ([EXTCODESIZE]), [host.rs:86-103] ([EXTCODEHASH]) and [host.rs:140-142]
+   ([EXTCODECOPY]) load with [load_code = false] semantics or read
+   [account.code] directly, never the resolved delegate — so a LIVE designator
+   reports its own 23 bytes here, not the delegate's code, and AFTER a
+   zero-address revocation reports the EMPTY code the revocation stored. The
+   port needs no branch for either case, because a delegated account's stored
+   code IS the raw 23 bytes: [Account.code_length] below is already the right
+   answer, and an edit that "completes" the follow here would diverge from
+   revm. [BALANCE] ([host.rs:22-24]) and [SELFDESTRUCT]'s beneficiary lookup
+   ([revm-context] [journal/inner.rs:505-508]) are unaffected for the same
+   reason, and none of them charges a delegation surcharge — that price
+   belongs to the call family alone, through {!Call_target}. *)
 let extcodesize m =
   transition
     (Result.bind (stack_result (Stack.pop m.stack)) (fun (word, stack) ->
@@ -492,7 +507,18 @@ let extcodesize m =
    its real code hash, which for empty code IS [KECCAK_EMPTY]. Only an account
    that does not exist reports zero. That zero is a bare word produced here, never
    a digest, so it can never be confused with the [KECCAK_EMPTY] of a real
-   codeless account — the distinction {!Tn_keccak} has no constructor to blur. *)
+   codeless account — the distinction {!Tn_keccak} has no constructor to blur.
+
+   Delegation adds nothing to that fold. A LIVE designator hashes to keccak256
+   of its own 23 bytes — revm's [hash_slow] hashes the ORIGINAL byte slice,
+   which for the Eip7702 variant is the raw designator ([revm-bytecode]
+   [bytecode.rs:61-67,170-181]) — and {!Account.code_hash} derives exactly that
+   from the stored bytes. AFTER a zero-address revocation it is [KECCAK_EMPTY]
+   and NOT the zero word: the revocation bumped the nonce, so [is_empty] is
+   false and the fold above never fires. [EIP7702_MAGIC_HASH]
+   ([eip7702.rs:4-6]), whose doc comment claims it "is used for EXTCODEHASH
+   when called from legacy bytecode", is a trap — it is referenced nowhere in
+   revm, and special-casing it here would diverge. *)
 let extcodehash m =
   transition
     (Result.bind (stack_result (Stack.pop m.stack)) (fun (word, stack) ->
@@ -529,7 +555,14 @@ let charge_ext_account machine address =
    frame-local copies do nothing: [berlin_load_account!] is after the
    [if len != 0] resize, so a zero-length [EXTCODECOPY] still warms and still pays
    the cold surcharge. That is why [Copy_nothing] here charges the account rather
-   than continuing at once. *)
+   than continuing at once.
+
+   Delegation changes nothing here either: the source below is [Account.code],
+   which for a delegated account is the raw 23 designator bytes — copied as
+   [ef0100 || address], zero-padded past 23 by [Data.read]'s window rule — and
+   for a revoked one is empty, so the copy reads zeroes. revm reads the loaded
+   account's code without resolving it ([host.rs:140-142]); following the
+   designator here would diverge. *)
 let extcodecopy m =
   Result.fold ~ok:Fun.id
     ~error:(fun e -> Halt (Failed e))
@@ -1106,7 +1139,19 @@ let rec execute env code depth m = function
 (* One instruction: decode the byte at the program counter, charge the fixed
    price before running it — so an instruction that then fails on its operands
    has still paid, as in revm — and dispatch. A byte naming no instruction halts
-   the machine; so does an allowance that cannot pay for one. *)
+   the machine; so does an allowance that cannot pay for one.
+
+   0xEF must STAY among the bytes naming no instruction. A delegation
+   designator's bytes are handed over as executable code whenever they end up
+   as a frame's bytecode — the second hop of a designator chain, or designator
+   bytes run as a top-level frame ([ext_bytecode.rs:60-69] sets the instruction
+   pointer with no Eip7702 guard) — and revm leaves 0xEF commented out of its
+   table ([revm-bytecode] [opcode.rs:637-638]) precisely so that frame halts on
+   its FIRST byte with [OpcodeNotFound] ([control.rs:120-123]), consuming the
+   whole forwarded allowance ([revm-handler] [handler.rs:353-362]): a halt, not
+   a revert, and no return data. Decoding 0xEF to anything, or rejecting an
+   ef01-prefixed frame at entry, would turn the one-hop rule into something
+   else. *)
 and step env code depth m =
   let byte = Code.byte_at code m.pc in
   Option.fold ~none:(Halt (Failed (Invalid_opcode byte)))
@@ -1186,6 +1231,14 @@ and do_call env code depth m ~requested ~to_addr ~child_value ~transfer_value
           else 0)
          gas
      in
+     (* 7b. one-hop delegation resolution ([call_helpers.rs:165-186]): warm the
+        delegate independently, charge 100 warm / 2600 cold, swap in its code.
+        After step 7 (a delegated callee is never [is_empty], so the charges
+        are exclusive), before the 63/64 cap, which must see the remainder. *)
+     let resolved = Call_target.resolve m.effects callee_account in
+     let m = { m with effects = Call_target.effects resolved } in
+     let* gas = charged (Call_target.surcharge resolved) gas in
+     let callee_code = Call_target.code resolved in
      (* 8. the EIP-150 cap on what is left, charged, plus the stipend on top. *)
      let cg = Gas.call_gas ~requested ~remaining:gas ~value:transfer_value in
      let* gas = charged cg.Gas.charge gas in
@@ -1228,7 +1281,6 @@ and do_call env code depth m ~requested ~to_addr ~child_value ~transfer_value
                       (Gas.charge gas_used forwarded)
                 | Precompile.Rejected -> Failed Out_of_gas
                 | Precompile.Not_a_precompile ->
-                    let callee_code = Code.of_string (Account.code callee_account) in
                     let sub_call =
                       Env.Call.make ~target:sub_target ~caller:sub_caller
                         ~value:child_value ~data:(Data.of_string calldata) ~mutability

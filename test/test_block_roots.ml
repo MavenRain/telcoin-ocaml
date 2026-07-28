@@ -62,7 +62,12 @@ let test_empty_roots () =
 let test_type_byte () =
   Alcotest.(check int) "Legacy -> 0" 0 (Block_roots.type_byte (mk_tx (Transaction.Legacy { gas_price = U256.zero })));
   Alcotest.(check int) "Access_list -> 1" 1 (Block_roots.type_byte (mk_tx (Transaction.Access_list { gas_price = U256.zero })));
-  Alcotest.(check int) "Dynamic -> 2" 2 (Block_roots.type_byte (mk_tx (Transaction.Dynamic { max_fee = U256.zero; max_priority = None })))
+  Alcotest.(check int) "Dynamic -> 2" 2 (Block_roots.type_byte (mk_tx (Transaction.Dynamic { max_fee = U256.zero; max_priority = None })));
+  Alcotest.(check int) "Set_code -> 4" 4
+    (Block_roots.type_byte
+       (mk_tx
+          (Transaction.Set_code
+             { max_fee = U256.zero; max_priority = U256.zero; target = Address.zero; authorizations = [] })))
 
 (* ---- agree = state-root equality ---- *)
 

@@ -48,15 +48,28 @@
     The account creations [CREATE] and [CREATE2], account destruction
     [SELFDESTRUCT] and [BLOCKHASH] join this set as of this chunk: a frame now
     spawns a creation frame, deploys what it returns, ends itself, or reads the
-    chain behind this block. What is still absent are the blob instructions and
-    EIP-7702 delegated-code execution. The latter is the one caveat on the calls'
-    faithfulness: a call executes its target account's own code directly and
-    resolves no delegation designator, because the account model has none yet, so
-    a target bearing a 7702 designator would run the designator bytes rather than
-    the delegated code. For every non-delegated target the four calls are
-    faithful. Each still-absent opcode remains a code byte that fails to decode,
-    so a program using one halts rather than silently doing the wrong thing. See
-    {!Opcode}.
+    chain behind this block.
+
+    And as of chunk 33 the four calls and the executor's depth-0 frame resolve
+    an EIP-7702 delegation designator, exactly ONE hop, through
+    {!Call_target}. The frame runs the DELEGATE's code while everything keyed
+    on the frame's target (its storage, its transient storage, its logs,
+    [ADDRESS] and [SELFBALANCE]) stays the DELEGATOR's ([CALLER] is the one
+    exception, reading the calling frame's address, [system.rs:54-64]).
+    [CODESIZE] and [CODECOPY] read the frame's own bytecode and therefore see
+    the delegate's code: the exact opposite of [EXTCODESIZE]/[EXTCODECOPY] on
+    the same account, and the ONE place the "23 designator bytes versus
+    delegate code" split flips ([system.rs:69-74, 79-101] vs
+    [host.rs:61-64, 140-142]). And running the designator bytes is now
+    CORRECT behaviour for the {e second} hop of a chain rather than a caveat:
+    both revm resolution sites are a single [if let] with no loop
+    ([call_helpers.rs:165-186], [handler.rs:317-332]), so a delegate that is
+    itself delegated executes its 23 bytes and halts on the undecodable
+    [0xEF].
+
+    What is still absent are the blob instructions. Each still-absent opcode
+    remains a code byte that fails to decode, so a program using one halts
+    rather than silently doing the wrong thing. See {!Opcode}.
 
     {2 Termination}
 
@@ -196,8 +209,9 @@ type error =
           [require_non_staticcall!] as the first statement of [sstore]
           ([instructions/host.rs:229]) and [log] ([:319]), and as the statement
           after the Cancun hardfork check in [tstore] ([:294], the check itself
-          at [:293]); this port has no hardfork gate, so at Prague the two orders
-          coincide.
+          at [:293]); this port models a fork level where that check always
+          passes ({!Env} states the scope once, [env.mli:26-53]), so the two
+          orders coincide.
 
           Being first is observable, and the tests pin it: a static frame
           reports this even when the stack could not have supplied the operands

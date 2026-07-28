@@ -23,6 +23,35 @@
     reading always applies, so the field is named for the reading that holds and
     the pre-merge one is not representable.
 
+    {2 The fork level, stated once}
+
+    This is the port's SINGLE statement of its fork scope; every other module
+    that needs the claim cites this paragraph rather than restating it. Prague
+    is the level of TN {e testnet} (chain 2017) and of the TN test suite:
+    [chain-configs/testnet/genesis.yaml:15-17] sets [shanghaiTime],
+    [cancunTime] and [pragueTime] all to [0], and every test genesis routes
+    through [set_genesis_defaults], which backfills [prague_time]
+    ([crates/types/src/genesis.rs:24, 71-74]). TN {e mainnet} (chain 487) runs
+    at [SpecId::SHANGHAI]: its committed genesis declares [shanghaiTime] as
+    its only timestamp fork ([chain-configs/mainnet/genesis.yaml:15]),
+    [Config::load_mainnet] deserialises it directly, never calling
+    [set_genesis_defaults] ([crates/config/src/node.rs:155-156]), and reth
+    filter-maps an absent fork time to [ForkCondition::Never]
+    ([reth] [chainspec/src/spec.rs:896-901]), which is never active. On that
+    chain a type-[0x04] transaction is rejected with [Eip7702NotSupported]
+    before pre-execution ([revm-handler] [validation.rs:191-195]),
+    [TLOAD]/[TSTORE]/[MCOPY] halt [NotActivated], and neither BEACON_ROOTS
+    nor HISTORY_STORAGE is ever written, because telcoin's own gates are
+    timestamp-driven ([tn-reth/src/evm/block.rs:643-645, 698-700]). This port
+    models the TESTNET configuration, unconditionally; the enumerated
+    inventory of what a mainnet-faithful fork schedule would have to gate
+    lives in [block_execution.mli].
+
+    Before chunk 33 the port rejected a type-4 transaction as
+    [Unknown_type_byte 4], which agreed with TN mainnet for the wrong reason.
+    It now executes one. That accidental agreement is deliberately given up in
+    exchange for modelling the chain the port actually targets.
+
     Two fields the real machine has are absent, and their absence is the point.
     There is no static-call flag, so [SSTORE]'s [require_non_staticcall] guard
     ([instructions/host.rs:229]) has nothing to test and is not written; it

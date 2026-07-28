@@ -18,7 +18,30 @@
     [Block_roots.state_root] in [tn_evm], with [Block_roots.agree] the state-root
     agreement oracle for block import. They live one library up because
     [tn_state] sits below [tn_trie] in the dependency graph. {!equal} is kept as
-    the exact structural equality the canonicity reasoning above relies on. *)
+    the exact structural equality the canonicity reasoning above relies on.
+
+    Two facts about membership that EIP-7702 makes load-bearing, recorded here
+    because they are properties of this map rather than of any one function.
+
+    First, an entry {b exists} in this map exactly when
+    [not (Account.is_absent (account t addr))]. {!set_account} prunes every
+    {!Account.is_absent} account ([world_state.ml:26-27]) and
+    {!of_genesis_alloc} routes through it, so the two questions have one answer
+    and this module deliberately offers no second membership predicate to
+    disagree with the first. That equivalence is what lets EIP-7702's refund
+    test - revm asks whether the authority was loaded as not existing
+    ([revm-handler] [pre_execution.rs:252-259]) - key on {!Account.is_absent}
+    here. The single state it costs is revm's "present in the database with an
+    all-zero account info", which this representation cannot express at all;
+    on a post-Spurious-Dragon chain such accounts are cleared, so the gap is
+    latent rather than live.
+
+    Second, once an authorization has been applied, the authority is
+    materialised {b permanently}: {!Account.delegate} always bumps the nonce, so
+    the account sits at nonce one or above and EIP-161's clearing pass can never
+    prune it again ([revm-database] [states/cache.rs:193-239]). Revoking does
+    not undo it. Authorizing an address that held nothing therefore adds a
+    nonce-one account to the state for good. *)
 
 open Tn_types
 
@@ -36,17 +59,36 @@ val of_alloc : (Units.Address.t * U256.t) list -> t
     one function; a balance-only entry cannot carry storage, so the delegation
     cannot hit {!alloc_error}. *)
 
-type alloc_error = Storage_without_code of Units.Address.t
-    (** The alloc entry at this address pre-populates storage but installs no
-        code. Refused rather than seeded: an account with storage and neither
-        nonce, balance nor code is the exact class on which this module's
-        pruning rule ({!set_account}'s {!Account.is_absent}) diverges from
-        revm's EIP-161 touch-clearing, and refusing it at the genesis door
-        keeps that divergence unreachable from any loaded alloc - see the
-        comment at [world_state.ml]'s [set_account]. No committed telcoin
-        alloc has such an entry (every storage-carrying account in
-        [chain-configs/testnet/genesis.yaml] and [mainnet/genesis.yaml]
-        carries code), so nothing representable is lost. *)
+type alloc_error =
+  | Storage_without_code of Units.Address.t
+      (** The alloc entry at this address pre-populates storage but installs no
+          code. Refused rather than seeded: an account with storage and neither
+          nonce, balance nor code is the exact class on which this module's
+          pruning rule ({!set_account}'s {!Account.is_absent}) diverges from
+          revm's EIP-161 touch-clearing, and refusing it at the genesis door
+          keeps that divergence unreachable from any loaded alloc - see the
+          comment at [world_state.ml]'s [set_account]. No committed telcoin
+          alloc has such an entry (every storage-carrying account in
+          [chain-configs/testnet/genesis.yaml] and [mainnet/genesis.yaml]
+          carries code), so nothing representable is lost. *)
+  | Malformed_delegation of Units.Address.t * Delegation.decode_error
+      (** The alloc entry at this address installs code beginning [0xEF 0x01]
+          that is not a well-formed {!Delegation.length}-byte designator.
+
+          revm reaches such bytes only as a {e database decode failure}
+          ([revm-bytecode] [bytecode.rs:101-110]), never as executable code, so
+          refusing them here is what makes {!Delegation.Undecodable} unreachable
+          from any world a transaction runs against - and therefore what lets
+          the sites that classify account code treat that arm as a documented
+          divergence rather than a live case.
+
+          Ordered {e after} {!Storage_without_code}, so that error's identity is
+          unchanged for an entry which would trip both.
+
+          A {b well-formed} designator in a genesis allocation is accepted, and
+          it is {b live}: classification keys on the first two bytes, so such an
+          account delegates with no authorization anywhere in the transaction
+          that calls it. *)
 
 val error_to_string : alloc_error -> string
 (** Render an {!alloc_error} for diagnostics. *)

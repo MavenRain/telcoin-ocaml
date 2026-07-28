@@ -54,6 +54,7 @@ let type_byte tx =
   | Transaction.Legacy _ -> 0
   | Transaction.Access_list _ -> 1
   | Transaction.Dynamic _ -> 2
+  | Transaction.Set_code _ -> 4
 
 (* [cumulative_gas_used] is the running prefix-sum of [Receipt.gas_used] (NET of
    refund), threaded by [fold_left] with no mutation. The root uses

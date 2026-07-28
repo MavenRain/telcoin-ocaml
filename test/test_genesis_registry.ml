@@ -177,7 +177,14 @@ let test_storage_without_code_refused () =
           Alcotest.(check bool)
             (name ^ ": error names the address")
             true
-            (Units.Address.equal addr registry_address))
+            (Units.Address.equal addr registry_address)
+      (* Chunk 33 added this constructor, and the exhaustive match is why the
+         addition had to be looked at here rather than compiling silently. The
+         arm asserts the check ORDER: the storage refusal is decided first and
+         keeps its identity, so a codeless entry can never come back as a
+         delegation complaint. *)
+      | Error (World_state.Malformed_delegation _) ->
+          Alcotest.fail (name ^ ": expected Storage_without_code, got Malformed_delegation"))
     [ ("no code", None); ("empty code", Some "") ];
   (* The refusal is precise: one byte of code admits the same storage, and a
      codeless entry without storage is plain balance seeding. *)

@@ -254,6 +254,19 @@ val encode_rlp : t -> string
     from a payload that always supplies it ([payload.rs:117-120]). The
     narrowing, stated: this port cannot encode a foreign pre-Prague header.
 
+    DO NOT NARROW this list on account of the fork level. TN mainnet runs at
+    [SpecId::SHANGHAI] ({!Env} states the fork scope once, [env.mli:26-53]),
+    and the tempting "consistency fix" is to drop the four post-Shanghai
+    fields for it. It would be wrong: TN's assembler writes
+    [parent_beacon_block_root], [blob_gas_used], [excess_blob_gas] and
+    [requests_hash] unconditionally, with no fork gate of any kind
+    ([tn-reth/src/evm/block.rs:998-1001]), and nothing downstream rejects the
+    fork-inconsistent header, because [TNExecution]'s
+    HeaderValidator/Consensus/FullConsensus impls are unconditional [Ok(())]
+    ([tn-reth/src/traits.rs:50-53]). TN mainnet headers are therefore
+    post-Prague-SHAPED even at Shanghai semantics, and the 21-element list
+    above is correct for BOTH networks as it stands.
+
     {2 Where the field order came from, and how it is certified}
 
     The order above is the protocol-canonical post-Prague header order, taken

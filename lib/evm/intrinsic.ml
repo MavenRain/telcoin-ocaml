@@ -18,13 +18,23 @@ let tokens data =
   let nonzero_bytes = String.length data - zero_bytes in
   zero_bytes + (4 * nonzero_bytes)
 
-let initial_gas ~kind ~data ~access_list =
+(* PER_EMPTY_ACCOUNT_COST ([revm-primitives] [eip7702.rs:5-9]), wired under
+   PRAGUE at [cfg/gas_params.rs:306-311]. Not 12500: PER_AUTH_BASE_COST is never
+   charged, it is only the refund difference. *)
+let per_empty_account_cost = 25000
+
+let initial_gas ~kind ~data ~access_list ~authorizations =
   let addresses = List.length access_list in
   let slots =
     List.fold_left (fun acc (_, slots) -> acc + List.length slots) 0 access_list
   in
+  (* The authorization term counts the LISTED entries, never the applied ones:
+     [calculate_initial_tx_gas] receives [tx.authorization_list_len()]
+     ([cfg/gas.rs:181-188]) and sums it at [cfg/gas_params.rs:729-731], so a
+     later-skipped entry still costs the full 25000. *)
   let shared =
     (tokens data * 4) + (2400 * addresses) + (1900 * slots) + 21000
+    + (List.length authorizations * per_empty_account_cost)
   in
   match kind with
   | Call -> shared

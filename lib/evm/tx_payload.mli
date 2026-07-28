@@ -3,25 +3,31 @@
     {!Transaction.t} is the {e executable} transaction: its sender is
     pre-recovered, so it cannot be the thing a signature is taken over. This is
     that thing: one constructor per EIP-2718 type, carrying precisely the fields
-    that type has and no others, ported from alloy-consensus 1.8.3's three
+    that type has and no others, ported from alloy-consensus 1.8.3's four
     structs ([src/transaction/legacy.rs:19-71], [src/transaction/eip2930.rs:16-65],
-    [src/transaction/eip1559.rs:16-79]). {!to_transaction} closes the loop once
-    {!Tx_recovery} has produced a sender.
+    [src/transaction/eip1559.rs:16-79], [src/transaction/eip7702.rs:24-77]).
+    {!to_transaction} closes the loop once {!Tx_recovery} has produced a sender.
 
     {b The wire order is deliberately not alloy's struct order.} alloy declares
     [max_fee_per_gas] before [max_priority_fee_per_gas] and [access_list] before
     [input], while the wire puts the priority fee first ([eip1559.rs:112-122])
     and [input] seventh, the access list eighth ([eip2930.rs:94-103],
     [eip1559.rs:112-122]). Both fee fields have the same type, so mirroring the
-    struct compiles, decodes and silently inverts the fee semantics. The
-    constructors below take their arguments in wire order, the implementation's
-    records are declared in wire order, and {!variant} hands the encoder the
-    per-type fields already discriminated, so the trap has nowhere to live.
+    struct compiles, decodes and silently inverts the fee semantics. The type-4
+    struct is where the trap is worst: it declares [gas_limit] before both fee
+    caps and the authorization list before [input], while its wire order is the
+    1559 order plus [authorization_list] appended {e last}, after [access_list]
+    ([eip7702.rs:112-123]). The constructors below take their arguments in wire
+    order, the implementation's records are declared in wire order, and
+    {!variant} hands the encoder the per-type fields already discriminated, so
+    the trap has nowhere to live.
 
-    Two illegal states are absent by construction rather than by check: a legacy
-    transaction cannot carry an access list (no constructor takes one), and a
-    typed transaction cannot omit its chain id (it is a {!word}, not an
-    option). *)
+    Three illegal states are absent by construction rather than by check: a
+    legacy transaction cannot carry an access list (no constructor takes one), a
+    typed transaction cannot omit its chain id (it is a {!word}, not an option),
+    and a type-4 transaction cannot be a creation ({!eip7702} takes
+    [~to_:Units.Address.t], never a {!Transaction.kind} — alloy's bare
+    [Address], [eip7702.rs:58]). *)
 
 open Tn_types
 
@@ -42,6 +48,15 @@ type variant =
           [Dynamic], the priority fee is not an option: the wire format has no
           absent case, so an encoder that must write the field can never be
           handed one that is missing. *)
+  | Eip7702 of { chain_id : word; max_priority_fee_per_gas : word; max_fee_per_gas : word }
+      (** Type 4 (EIP-7702). The same three discriminating fields as
+          {!Eip1559} — relative to type 2 the wire's only additions are the
+          mandatory address and the trailing authorization list
+          ([eip7702.rs:112-123]), and those are read through {!kind} and
+          {!authorizations} like every shared field. Keeping the arm separate
+          from {!Eip1559} is what lets the encoder append the authorization
+          list without a wildcard and what makes forgetting it a compile
+          error. *)
 
 type t
 (** An unsigned transaction. Abstract: built by {!legacy}/{!eip2930}/{!eip1559}
@@ -104,15 +119,36 @@ val eip1559 :
 (** A type-2 (EIP-1559) transaction: the nine wire fields in order, the priority
     fee before the max fee. *)
 
+val eip7702 :
+  chain_id:word ->
+  nonce:Tn_state.Nonce.t ->
+  max_priority_fee_per_gas:word ->
+  max_fee_per_gas:word ->
+  gas_limit:int ->
+  to_:Units.Address.t ->
+  value:word ->
+  data:string ->
+  access_list:(Units.Address.t * word list) list ->
+  authorizations:Authorization.signed list ->
+  t
+(** A type-4 (EIP-7702) transaction: the ten wire fields in order
+    ([eip7702.rs:112-123]). [to_] is an address and never a {!Transaction.kind},
+    so a set-code creation cannot be written down at the one place a transaction
+    enters the port from the wire; an RLP empty string in that slot is a
+    {!Tx_envelope.Fixed_width} decode error, not a "create" reading. The
+    authorization list comes last, exactly where the wire puts it, and it MAY be
+    empty: the empty list is legal RLP and its rejection belongs to
+    validation. *)
+
 val variant : t -> variant
-(** The fields that differ between the three layouts — the chain id and the fee
+(** The fields that differ between the four layouts — the chain id and the fee
     caps — already discriminated by type. This is the encoder's entry point: a
-    match on it names all three EIP-2718 types the port carries, so no layout can
+    match on it names all four EIP-2718 types the port carries, so no layout can
     be reached by defaulting an absent field. Every {e shared} field is read
     through the accessors below. *)
 
 val type_byte : t -> int
-(** The EIP-2718 type: [0], [1] or [2]. For type 0 this byte is {e never} written
+(** The EIP-2718 type: [0], [1], [2] or [4]. For type 0 this byte is {e never} written
     (see {!Eip2718.frame}); it exists so a caller can classify a payload, and so
     {!Block_roots.type_byte}'s receipt-side counterpart has a transaction-side
     twin. *)
@@ -145,12 +181,20 @@ val access_list : t -> (Units.Address.t * word list) list
     duplicate addresses and repeated keys round-trip byte for byte and
     canonicalising would change the transaction hash. *)
 
+val authorizations : t -> Authorization.signed list
+(** The authorization list, empty for every type but 4 — the absence of the
+    field, not a defaulted value, exactly as {!access_list} answers for a legacy
+    payload. For type 4 it is the wire's trailing item, unvalidated: parity 2,
+    r zero and s above the curve order all ride through, because alloy's decoder
+    checks nothing cryptographic ([alloy-eip7702] [auth_list.rs:202-221]). *)
+
 val fee : t -> Transaction.fee
 (** The payload's fee fields as the executor's {!Transaction.fee}: {!Legacy} and
     {!Eip2930} map to their [gas_price], {!Eip1559} to
-    [Dynamic { max_fee; max_priority = Some _ }]. The [Some] is total — a wire
-    payload always has a priority fee — and is the only place the two fee models
-    differ. *)
+    [Dynamic { max_fee; max_priority = Some _ }], {!Eip7702} to
+    [Set_code { target; authorizations; _ }] with its mandatory priority fee.
+    The [Some] is total — a wire payload always has a priority fee — and is the
+    only place the two fee models differ. *)
 
 val to_transaction : t -> sender:Units.Address.t -> Transaction.t
 (** The executable transaction, given the sender {!Tx_recovery} recovered.

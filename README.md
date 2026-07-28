@@ -328,9 +328,10 @@ are noted.
     (memory windows, warm-and-charge the target, value cost, new-account cost, the
     EIP-150 63/64 cap plus stipend, the depth guard, then the transfer). A
     reverting or halting child is a dropped `Effects.t`, so its writes, warmings
-    and refunds are undone by construction. The one caveat is EIP-7702: a call
-    executes its target's own code and resolves no delegation designator, because
-    the account model has none yet
+    and refunds are undone by construction. Since chunk 33 every call also
+    resolves an EIP-7702 delegation designator, exactly one hop, through
+    `Call_target`, so a delegated EOA runs its delegate's code while keeping its
+    own storage and identity
 24. ✅ contract creation, destruction and history (`tn_evm` + `tn_state`):
     `CREATE`/`CREATE2` (keccak-derived addresses, the EIP-684 collision check, the
     EIP-3541/EIP-170 code validation and the 200-per-byte deposit), `SELFDESTRUCT`
@@ -347,7 +348,10 @@ are noted.
     (`0x0a`) and the BLS12-381 range are deferred to their own chunks and answer
     `Not_a_precompile`, running the (empty) account code exactly as before
 26. ✅ the transaction executor (`tn_evm`: `Transaction`, `Intrinsic`, `Receipt`,
-    `Executor`): the Prague mainnet single-transaction state transition, the piece
+    `Executor`): the Prague single-transaction state transition of revm's
+    Ethereum-*mainnet* handler ("mainnet" here names revm's handler, never the TN
+    mainnet chain, which runs Shanghai; `lib/evm/env.mli` states the port's fork
+    scope once), the piece
     `Transfer` and this README deferred to as "the gas and block-execution chunk
     that owns transaction inclusion." `Executor.execute : World_state.t →
     block:Env.Block.t → Transaction.t → (Receipt.t * World_state.t, error) result`
@@ -365,8 +369,11 @@ are noted.
     the caller at the effective price and pay the beneficiary the effective price
     less the burned base fee. Success, revert and halt are all *committed* (nonce
     and fee persist; only a revert or halt rolls back value, storage and logs); a
-    validation *rejection* changes nothing. EIP-7702 set-code and EIP-4844 blob
-    transactions are deferred, as `Transaction` carries no field for either. Every
+    validation *rejection* changes nothing. Since chunk 33 the type-4 EIP-7702
+    set-code transaction executes here too: its authorization loop applies
+    delegation designators in pre-execution, below the frame checkpoint, so they
+    survive a revert or a halt. Only the EIP-4844 blob transaction remains
+    deferred, as `Transaction` carries no blob field. Every
     load-bearing rule is pinned by a hand-computed gas vector and confirmed by
     mutation
 27. ✅ RLP and the Merkle-Patricia-Trie root builder (`tn_rlp`, `tn_trie`): a
@@ -464,7 +471,7 @@ now be decoded from the wire and executed under the sender it actually signed
 with. Blocked on networking: the block-execution layer
 that folds each committed sub-DAG's transactions through `Executor.execute` (the
 executor is pure and ready, but the batch payloads it would fold are
-networking-deferred), plus EIP-7702 set-code and EIP-4844 blob transactions and
+networking-deferred), plus EIP-4844 blob transactions and
 the blob instructions. Also: the consensus-layer crypto spike (execution-layer
 secp256k1 is now real and oracle-checked, but `tn_crypto` is still a stub and the
 validator BLS keys are not ported); the pending-certificate fetcher (buffer-and-fetch on a missing parent —

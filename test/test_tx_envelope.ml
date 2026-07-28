@@ -78,9 +78,22 @@ let variant_equal a c =
       U256.equal x.chain_id y.chain_id
       && U256.equal x.max_priority_fee_per_gas y.max_priority_fee_per_gas
       && U256.equal x.max_fee_per_gas y.max_fee_per_gas
-  | Tx_payload.Legacy _, (Tx_payload.Eip2930 _ | Tx_payload.Eip1559 _) -> false
-  | Tx_payload.Eip2930 _, (Tx_payload.Legacy _ | Tx_payload.Eip1559 _) -> false
-  | Tx_payload.Eip1559 _, (Tx_payload.Legacy _ | Tx_payload.Eip2930 _) -> false
+  | Tx_payload.Eip7702 x, Tx_payload.Eip7702 y ->
+      U256.equal x.chain_id y.chain_id
+      && U256.equal x.max_priority_fee_per_gas y.max_priority_fee_per_gas
+      && U256.equal x.max_fee_per_gas y.max_fee_per_gas
+  | Tx_payload.Legacy _, (Tx_payload.Eip2930 _ | Tx_payload.Eip1559 _ | Tx_payload.Eip7702 _)
+    ->
+      false
+  | Tx_payload.Eip2930 _, (Tx_payload.Legacy _ | Tx_payload.Eip1559 _ | Tx_payload.Eip7702 _)
+    ->
+      false
+  | Tx_payload.Eip1559 _, (Tx_payload.Legacy _ | Tx_payload.Eip2930 _ | Tx_payload.Eip7702 _)
+    ->
+      false
+  | Tx_payload.Eip7702 _, (Tx_payload.Legacy _ | Tx_payload.Eip2930 _ | Tx_payload.Eip1559 _)
+    ->
+      false
 
 let payload_equal a c =
   variant_equal (Tx_payload.variant a) (Tx_payload.variant c)

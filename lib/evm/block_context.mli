@@ -84,11 +84,14 @@ val make :
       passing an actual beacon root a type error. It is NOT an option: on the
       build path [TNPayload::parent_beacon_block_root] is always [Some]
       ([payload.rs:117-120]), and telcoin's [MissingParentBeaconBlockRoot] fires
-      only when Cancun is active, which in this Prague-only port is always. The
+      only when Cancun is active: always at the testnet fork level this port
+      models ({!Env} states the scope once, [env.mli:26-53]), and never on TN
+      mainnet, whose committed genesis stops at Shanghai, though the build
+      path supplies the root there too ([block.rs:998-1001]). The
       [None] case is therefore EXCLUDED, not deferred: the rejection set is
-      identical, it just moves from execution to construction. If a
-      fork-configurable spec ever lands, this must become an option again and
-      that error variant must return.
+      identical {e at the modelled fork level}, it just moves from execution
+      to construction. If a fork-configurable spec ever lands, this must
+      become an option again and that error variant must return.
     - [nonce] is a {!Tn_types.Units.Sequence_number.t}, which already {e is} the
       [(epoch << 32) | round] packing the header nonce carries
       ([units.mli:76-88], [crates/types/src/primary/header.rs:163-166]); the

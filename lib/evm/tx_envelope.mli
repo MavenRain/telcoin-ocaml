@@ -27,10 +27,14 @@
     {2 The accept set is canonical framings only, and that is narrower than alloy}
 
     {!decode_2718} accepts exactly two shapes: a bare RLP {e list} of nine items
-    (legacy, no type byte, no outer header), and a single type byte [0x01] or
-    [0x02] followed by an RLP list of eleven or twelve items. Everything else is
-    an {!error}, and two of those rejections are a {b deliberate narrowing of
-    what alloy accepts}, not a decoder bug:
+    (legacy, no type byte, no outer header), and a single type byte [0x01],
+    [0x02] or [0x04] followed by an RLP list of eleven, twelve or thirteen
+    items. A type-4 envelope is ONE thirteen-item list covering body {e and}
+    signature — never a nested [\[body, sig\]] — and both framing narrowings
+    below apply to it verbatim, or the round-trip theorem would hold for three
+    types and not four. Everything else is an {!error}, and two of those
+    rejections are a {b deliberate narrowing of what alloy accepts}, not a
+    decoder bug:
 
     - [0xb8 ‖ len ‖ L], where [L] is a well-formed signed typed transaction. The
       leading byte is above [0x7f], so there is no type byte, and the payload is
@@ -62,15 +66,19 @@
 
     Framing is not the only place this decoder is narrower than alloy's, and it
     would be dishonest to imply otherwise. On {e canonically framed} input it
-    also refuses every EIP-4844 (type [0x03]) and EIP-7702 (type [0x04])
-    envelope, which alloy decodes and which are real transactions on a Prague
-    chain. That is this port's standing deferral of the blob and delegation
-    transaction types, stated in {!Transaction} and in the README, surfacing at
-    the decoder; it is a larger gap than the framing one and it closes only when
-    those chunks land. A wide scalar is {e not} such a case: a [chain_id],
+    also refuses every EIP-4844 (type [0x03]) envelope, which alloy decodes and
+    which is a real transaction on a Prague chain. That is this port's standing
+    deferral of the blob transaction type, stated in {!Transaction} and in the
+    README, surfacing at the decoder; it closes only when that chunk lands.
+    (EIP-7702 was such a deferral until chunk 33 narrowed the gap by exactly one
+    type byte.) A wide scalar is {e not} such a case: a [chain_id],
     [nonce] or [gas_limit] above [2^64] is refused here as {!Scalar_too_wide}
     and refused by alloy while decoding the integer into its [u64], so the two
-    agree on the verdict and differ only in which error they name.
+    agree on the verdict and differ only in which error they name. Nor is the
+    empty authorization list: it {b decodes successfully by design}, because
+    alloy's [Vec<SignedAuthorization>] does, and its rejection is a validation
+    identity ([revm-handler] [validation.rs:199-203]) that a decoder error here
+    would silently move and diverge.
 
     The decoder is otherwise the {e typed} layer {!Tn_rlp.Rlp} explicitly leaves
     to its caller: [Rlp] enforces structural canonicity (header forms, lengths,
@@ -111,9 +119,12 @@ val signing_payload : Tx_payload.t -> string
     so they are [0x80] each and never [0x00] — writing literal zero bytes changes
     the digest and therefore every recovered address.
 
-    Type 1 is [0x01] then the eight-item list and type 2 is [0x02] then the
-    nine-item list ([eip2930.rs:226-234], [eip1559.rs:259-272]); the type byte is
-    written raw, not RLP-wrapped. *)
+    Type 1 is [0x01] then the eight-item list, type 2 is [0x02] then the
+    nine-item list, and type 4 is [0x04] then the ten-item list — the 1559 nine
+    with the authorization list appended after the access list
+    ([eip2930.rs:226-234], [eip1559.rs:259-272], [eip7702.rs:240-247]); the type
+    byte is written raw, not RLP-wrapped, and the body is a LIST with no outer
+    string header. *)
 
 val signature_hash : Tx_payload.t -> string
 (** [keccak256] of {!signing_payload} — the 32-byte digest that is signed and
@@ -129,9 +140,12 @@ val encode_2718 : t -> string
     Type 0 is the bare nine-item RLP list
     [\[nonce; gas_price; gas_limit; to; value; input; v; r; s\]] with {b no} type
     byte, where [v] is {!Tx_signature.to_eip155_value}; type 1 is [0x01] then an
-    eleven-item list and type 2 is [0x02] then a twelve-item list, each the body
-    fields followed by [y_parity], [r], [s]. No outer string header is added —
-    that is the network form, and it must never reach the trie.
+    eleven-item list, type 2 is [0x02] then a twelve-item list and type 4 is
+    [0x04] then a thirteen-item list, each the body fields followed by
+    [y_parity], [r], [s] — ONE list covering body and signature together, never
+    a nested [\[body, sig\]] ([rlp.rs:53-69]). The transaction hash is keccak
+    over these BARE 2718 bytes ([rlp.rs:104-108]). No outer string header is
+    added — that is the network form, and it must never reach the trie.
 
     Feed the result straight to {!Block_roots.transactions_root}, which wraps it
     exactly once inside the leaf node, or use
@@ -169,17 +183,18 @@ type error =
           narrowing, and it is the reason {!encode_2718} recovers its input
           exactly rather than merely up to framing. *)
   | Unknown_type_byte of int
-      (** A leading byte at or below [0x7f] that is not [0], [1] or [2] — an
-          EIP-4844 ([3]) or EIP-7702 ([4]) transaction, or an unassigned type.
-          Those two are out of scope here exactly as they are for
-          {!Transaction} and {!Executor}. *)
+      (** A leading byte at or below [0x7f] that is not [0], [1], [2] or [4] —
+          an EIP-4844 ([3]) transaction, or an unassigned type. The blob type is
+          out of scope here exactly as it is for {!Transaction} and {!Executor};
+          type 4 stopped being so in chunk 33, which narrowed this constructor
+          by exactly one byte. *)
   | Outer_string
       (** The envelope, after any type byte, is an RLP byte string rather than a
           list: the [0xb8 ‖ len ‖ list] framing alloy accepts and this port
           refuses. See the module comment. *)
   | Unexpected_string
       (** A byte string where a list was required {e inside} the envelope: the
-          access list, or one of its items. *)
+          access list or the authorization list, or one of either's items. *)
   | Unexpected_list
       (** A list where a byte string was required: any scalar, the [to] field,
           the calldata, an address or a storage key. *)
@@ -198,7 +213,16 @@ type error =
   | Scalar_too_wide
       (** An integer field wider than its type: over 8 bytes for a chain id,
           nonce or gas limit, over 16 for a gas price, a fee cap or a legacy [v],
-          over 32 for a value or for [r]/[s]. alloy's [Error::Overflow]. *)
+          over 32 for a value or for [r]/[s]. alloy's [Error::Overflow].
+
+          Inside an {e authorization} the widths differ, because the types do:
+          its [chain_id] is a full [U256] ([alloy-eip7702] [auth_list.rs:47]),
+          so 32 bytes decode and a transaction-fatal chain id like [2^64] merely
+          fails the loop's chain check; its [nonce] is a [u64] (8 bytes); and
+          its [y_parity] is a one-byte {e scalar}, not the RLP bool — a parity
+          of 2 decodes and no-ops that one authorization at recovery
+          ([auth_list.rs:135-141]), where {!Invalid_bool} would have killed the
+          whole envelope. *)
   | Unrepresentable_scalar
       (** A [u64] field — the nonce or the gas limit — above [Int.max_int]. alloy
           accepts the full [u64] range; OCaml's native [int] is 63 bits, so the
@@ -217,7 +241,9 @@ type error =
       (** A typed transaction's [y_parity] that is neither [0x80] nor [0x01]
           ([alloy-rlp-0.3.13/src/decode.rs:48-57]). A literal [0x00] is
           {!Leading_zero_scalar} instead, which is exactly where alloy puts
-          it. *)
+          it. The {e authorization}-level [y_parity] can never reach this
+          constructor: it is a one-byte scalar there, and a value above one is a
+          decode {e success} — see {!Scalar_too_wide}. *)
   | Invalid_parity_value
       (** A legacy [v] outside [{27, 28}] and [\[35, ..\]], or one whose derived
           chain id exceeds [u64::MAX]. alloy's [Custom("invalid parity value")]
@@ -236,10 +262,11 @@ val decode_2718 : string -> (t, error) result
     offered: in a consensus decoder that is a footgun, not a feature.
 
     Routing follows [eip2718.rs:84-125]: a leading byte at or below [0x7f] is a
-    type flag and is stripped, and anything else — in practice a list header — is
+    type flag and is stripped — [0x01], [0x02] and [0x04] have readers, the rest
+    are {!Unknown_type_byte} — and anything else, in practice a list header, is
     the untagged legacy form. The two non-canonical framings alloy additionally
     accepts are {!Zero_type_byte} and {!Outer_string}; the module comment says
-    why.
+    why, and both apply to a type-4 envelope exactly as to the other three.
 
     Because the accept set is exactly the canonical framings, the round trip
     holds on the nose: [encode_2718 e = b] for every [b] this function decodes to

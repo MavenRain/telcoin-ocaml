@@ -122,6 +122,26 @@ val account_access_cost : Access.warmth -> int
     [cfg/gas_params.rs:270-271], charged at [revm-interpreter]
     [instructions/macros.rs:54-62]). *)
 
+val delegation_cost : Access.warmth option -> int
+(** The EIP-7702 resolution surcharge ([call_helpers.rs:166-184]). [None] —
+    no designator — is [0]; [Some w] is
+    [warm_storage_read + account_access_cost w], i.e. 100 warm and 2600 cold.
+
+    Written as that SUM rather than as the literal 2600, mirroring
+    [call_helpers.rs:167-174] where [cost += warm_storage_read_cost] precedes
+    the cold additional, so a change to the 2929 schedule moves both together
+    and the "always +100, plus 2500 only if cold" structure is visible at the
+    definition. Note {!account_access_cost} is the SURCHARGE (0 warm / 2500
+    cold), not the total.
+
+    An OPTION and not a [bool] and not a bare {!Access.warmth}, mirroring
+    revm's [AccountLoad.is_delegate_account_cold] tri-state
+    ([journaled_state.rs:454-459]): a target that bore no designator cannot be
+    charged for a resolution that did not happen, because there is no value of
+    the argument type that says so. The warmth is the DELEGATE's, never the
+    designator's. As of the intrinsic stage of chunk 33 this is defined and not
+    yet called; the call-resolution stage wires it into the frame paths. *)
+
 val copy_cost : int -> int
 (** Three units per thirty-two-byte word copied, rounded up — the price
     [CALLDATACOPY], [CODECOPY] and [MCOPY] share

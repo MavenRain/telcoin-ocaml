@@ -88,7 +88,18 @@ val validate_deployment : string -> (unit, deployment_error) result
 
     Neither test is folded into {!of_string}. Code arriving from genesis or from
     a test fixture is not subject to either limit — only a [CREATE] output is —
-    so making the constructor reject them would refuse states the chain permits. *)
+    so making the constructor reject them would refuse states the chain permits.
+
+    The EIP-7702 designator install path deliberately BYPASSES this function:
+    {!Account.delegate} writes the 23 designator bytes directly, and the
+    [Reserved_prefix] rule here would reject their leading [0xEF] if it were
+    consulted. That is not a conflict between the two EIPs. EIP-3541 governs
+    what a creation's OUTPUT may become, tested on the first byte alone and
+    gated from London ([revm-handler] [frame.rs:551-559]); a designator is
+    written by the authorization loop and never passes through a creation
+    frame, so the two rules never meet on the same bytes. Routing the install
+    through this function is the natural wrong "fix", and it would reject
+    every delegation ever attempted. *)
 
 val equal : t -> t -> bool
 (** Byte equality. Exact as content equality: the representation is the bytes

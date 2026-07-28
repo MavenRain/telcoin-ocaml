@@ -103,6 +103,9 @@ let fee_tag fee =
   | Transaction.Dynamic { max_fee; max_priority } ->
       "dynamic:" ^ U256.to_hex max_fee ^ ":"
       ^ Option.fold ~none:"none" ~some:U256.to_hex max_priority
+  | Transaction.Set_code { max_fee; max_priority; target = _; authorizations } ->
+      "set_code:" ^ U256.to_hex max_fee ^ ":" ^ U256.to_hex max_priority ^ ":"
+      ^ string_of_int (List.length authorizations)
 
 let test_fee_bridge () =
   let of_case (c : Tx_vectors.case) =
