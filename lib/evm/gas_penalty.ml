@@ -5,7 +5,7 @@
 let min_gas_limit_threshold = 210_000
 let precision = Z.of_int 1_000_000_000
 let threshold = Z.of_int 100_000_000
-let threshold_squared = Z.of_int 10_000_000_000_000_000
+let threshold_squared = Z.mul threshold threshold
 
 let penalty ~gas_limit ~gas_spent =
   if gas_limit <= min_gas_limit_threshold then 0

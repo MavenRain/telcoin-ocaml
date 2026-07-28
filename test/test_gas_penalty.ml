@@ -44,9 +44,12 @@ let test_gate () =
   check ~gas_limit:210_001 ~gas_spent:10_000 54_876;
   check ~gas_limit:210_001 ~gas_spent:21_000 0
 
-(* Ten percent usage is exempt, exactly and by flooring: 99_999/1_000_000
-   floors onto the threshold. The nonzero near-anchors (9.9 and 9 percent)
-   kill threshold-constant drift from the exempt side. *)
+(* Ten percent usage (100_000/1_000_000) puts the ratio exactly on the
+   threshold, exempt via [geq]. At 99_999 the ratio computes exactly (no
+   flooring) to just below the threshold, so the PENALTY branch runs and the
+   zero comes from the final quotient [10^6 * 900_001 / 10^16] flooring away.
+   The nonzero near-anchors (9.9 and 9 percent) kill threshold-constant drift
+   from the exempt side. *)
 let test_threshold () =
   check ~gas_limit:1_000_000 ~gas_spent:100_000 0;
   check ~gas_limit:300_000 ~gas_spent:30_000 0;

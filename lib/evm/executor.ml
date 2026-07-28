@@ -159,9 +159,14 @@ let finalize ~gas_limit ~floor_gas ~effective ~base_fee ~sender ~coinbase
     in
     (* The four credits in [TNEvmHandler]'s order: reimburse the caller and its
        withheld penalty ([reimburse_caller]), then the priority fee and the
-       redirected base fee ([reward_beneficiary]). A zero credit is the
-       identity under {!add_balance}'s EIP-161 pruning, which is what keeps a
-       zero-fee block from materializing the basefee address. *)
+       redirected base fee ([reward_beneficiary]). The basefee address appears
+       twice on purpose, one entry per Rust journal credit, not summed. A zero
+       credit is the identity under {!add_balance}'s EIP-161 pruning, which is
+       what keeps a zero-fee block from materializing the basefee address.
+       Rust saturates each price product at [u128::MAX]
+       ([handler.rs:119, 125] [saturating_mul]) where these products are exact;
+       the first divergent input needs a caller balance near [2e37] wei,
+       hundreds of times the TEL supply, so the saturation is left unported. *)
     let world_credited =
       List.fold_left
         (fun world (address, amount) -> add_balance world address amount)

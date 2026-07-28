@@ -12,7 +12,15 @@ let account t addr = Option.value (Addr_map.find_opt addr t) ~default:Account.em
    pruning on it would silently drop an [SSTORE] into a zero-nonce zero-balance
    account and [equal] would stop being exact — two states differing in that
    slot would compare equal. [is_absent] covers every field [Account.equal]
-   compares, which is what canonicity needs. *)
+   compares, which is what canonicity needs.
+
+   The named divergence this buys: revm's EIP-161 touch-clearing DELETES a
+   touched zero-nonce zero-balance code-less account even when it holds
+   storage, where this prune keeps it. Such an account is unconstructible
+   here today ([of_alloc] cannot seed storage and execution cannot leave
+   storage on a code-less account), so the two rules agree on every reachable
+   state; if the genesis loader ever grows storage support, this is the
+   invariant to revisit. *)
 let set_account t addr acct =
   if Account.is_absent acct then Addr_map.remove addr t else Addr_map.add addr acct t
 
