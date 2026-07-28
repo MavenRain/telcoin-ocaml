@@ -44,6 +44,9 @@ let history_storage_address =
 let governance_safe_address =
   address_of_hex "00000000000000000000000000000000000007a0"
 
+let consensus_registry_address =
+  address_of_hex "07e17e17e17e17e17e17e17e17e17e17e17e17e1"
+
 let history_serve_window = 8191
 
 (* 97 bytes. Write path (caller = SYSTEM_ADDRESS): sstore(ts mod 8191, ts) and

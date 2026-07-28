@@ -49,6 +49,19 @@ val governance_safe_address : Tn_types.Units.Address.t
     this module because this is the port's module of well-known addresses. A
     genesis-config seam owns it whenever one exists. *)
 
+val consensus_registry_address : Tn_types.Units.Address.t
+(** [0x07E17e17E17e17E17e17E17E17E17e17e17E17e1]
+    ([crates/tn-reth/src/system_calls.rs:22-23]): the ConsensusRegistry, the
+    contract every epoch-close system call targets. Unlike the two EIP
+    contracts above, its runtime bytecode is not a constant of this module: it
+    is a 28381-byte alloc entry of the committed testnet genesis (pinned by
+    keccak as [CONSENSUS_REGISTRY_PRE_FORK_CODE_HASH],
+    [crates/types/src/forks.rs:23-24], re-derived in
+    [test_genesis_registry.ml]), seeded through
+    [Tn_state.World_state.of_genesis_alloc] from a fixture rather than baked
+    in here. Same pinned-literal honesty note as the other addresses: the
+    exact hex is asserted by test, not by the type. *)
+
 val history_serve_window : int
 (** [8191] ([alloy-eips-1.8.3/src/eip2935.rs:19-20]; changed from 8192 by
     ethereum/EIPs PR 9144, so a port hardcoding 8192 is wrong). Exposed for

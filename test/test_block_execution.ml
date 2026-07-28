@@ -816,6 +816,301 @@ let test_both_calls_see_nonce_zero () =
     "the system address is absent throughout" false
     (present (System_call.world second) System_contracts.system_address)
 
+(* ================================================================== *)
+(* 6. finish: the epoch-close arm of the spine.                        *)
+(* ================================================================== *)
+
+module Block_header = Tn_evm.Block_header
+module Epoch_close = Tn_evm.Epoch_close
+module Registry_abi = Tn_evm.Registry_abi
+module Withdrawal = Tn_evm.Withdrawal
+module Hash32 = Tn_evm.Hash32
+module Finished = Block_execution.Finished
+
+(* The pinned pre-fork registry world, built exactly as
+   test_genesis_registry.ml builds it: the closing arm's applyIncentives and
+   concludeEpoch run against the real 28381-byte bytecode. *)
+let registry = System_contracts.consensus_registry_address
+let u256_short s = get (U256.of_hex (String.make (64 - String.length s) '0' ^ s))
+let u256_full s = get (U256.of_hex s)
+
+let registry_world =
+  let entry =
+    Tn_state.Genesis_account.make ~nonce:Nonce.zero
+      ~balance:(u256_short Registry_genesis.balance_hex)
+      ~code:(Some (hex Registry_genesis.code_hex))
+      ~storage:
+        (List.map (fun (s, v) -> (u256_full s, u256_full v)) Registry_genesis.storage_hex)
+  in
+  get_ok (World_state.of_genesis_alloc [ (registry, entry) ])
+
+let finish_envelopes =
+  [
+    legacy_envelope ~signer:41 ~gas_limit:60_000 ~gas_price:100 ~value:1_234 ();
+    legacy_envelope ~signer:42 ~gas_limit:60_000 ~gas_price:100 ~value:5_678 ();
+  ]
+
+(* Predeploy + the live registry + funded senders: a world on which BOTH the
+   open and the closing paths run whole. *)
+let finish_world () = fund (System_contracts.predeploy registry_world) finish_envelopes
+
+let close_randomness = get (Hash32.of_bytes (String.init 32 (fun i -> Char.chr (0xc0 + i))))
+
+(* The five testnet validators, ASCENDING by execution address (the order
+   Rewards_counter.address_counts produces and the withdrawals root commits
+   to), with five DISTINCT counts, so reward pairs derived from anything but
+   these exact records cannot reproduce the applyIncentives calldata. Real
+   validators, because the fixture registry must accept the call. *)
+let close_withdrawals =
+  List.map
+    (fun (address_hex, amount) ->
+      get
+        (Withdrawal.make ~index:0 ~validator_index:0
+           ~address:(get (Address.of_bytes (hex address_hex)))
+           ~amount))
+    [
+      ("0033a370616805b1fd275b7ffab83fc41d665ccb", 1);
+      ("3518b301b86ceb53b5a3dff62e55cd43ef59d024", 2);
+      ("7489025dfbaad94f2366d88a62989147d9c8b5d3", 3);
+      ("89dab9f6fdc569c1bcdbd6493f25b7040b55dc79", 4);
+      ("efaacf04b92298a88200aa50aa6bb7bfce587b17", 5);
+    ]
+
+let closing_boundary =
+  Epoch_boundary.Closing { randomness = close_randomness; withdrawals = close_withdrawals }
+
+let assembled = function
+  | Ok header -> header
+  | Error e -> Alcotest.failf "unexpected assembly error: %s" (Block_header.error_to_string e)
+
+(* finish on an Open boundary is an IDENTITY re-wrap: the world comes through
+   EQUAL (pinned by World_state.equal, not by a root comparison), no
+   disposition exists, and the outcome rides along untouched. The world
+   deliberately CONTAINS the live registry, so a close arm run
+   unconditionally does not die on a decode error but succeeds, writes, and
+   visibly diverges the world this equality pins. *)
+let test_finish_on_open_is_identity () =
+  let ctx = context () in
+  let _, outcome =
+    run_ok (Block_execution.execute (finish_world ()) ~context:ctx finish_envelopes)
+  in
+  let finished = run_ok (Block_execution.finish outcome ~context:ctx) in
+  Alcotest.(check bool) "the world is identical, by equality" true
+    (World_state.equal (Finished.world finished) (Block_execution.world outcome));
+  Alcotest.(check bool) "no disposition: no call was made" true
+    (Option.is_none (Finished.close_disposition finished));
+  Alcotest.(check int) "the outcome rides along untouched: receipts"
+    (List.length (Block_execution.receipts outcome))
+    (List.length (Block_execution.receipts (Finished.outcome finished)));
+  Alcotest.(check int) "the outcome rides along untouched: gas"
+    (Block_execution.gas_used outcome)
+    (Block_execution.gas_used (Finished.outcome finished))
+
+(* The end-to-end closing header over the REAL registry: finish derives the
+   applyIncentives pairs FROM the boundary's withdrawal records (the
+   single-sourcing the .mli discloses), runs both mandatory calls, and
+   assemble roots the post-close world while committing the randomness and
+   the records the boundary decided. The replay decode closes the loop. *)
+let test_closing_header_end_to_end () =
+  let ctx = context ~boundary:closing_boundary () in
+  let _, outcome =
+    run_ok (Block_execution.execute (finish_world ()) ~context:ctx finish_envelopes)
+  in
+  let finished = run_ok (Block_execution.finish outcome ~context:ctx) in
+  let d =
+    match Finished.close_disposition finished with
+    | Some d -> d
+    | None -> Alcotest.fail "a closing block must carry a disposition"
+  in
+  Alcotest.(check string)
+    "first calldata = applyIncentives(the boundary records' pairs)"
+    (to_hex
+       (Registry_abi.apply_incentives_calldata
+          (List.map (fun w -> (Withdrawal.address w, Withdrawal.amount w)) close_withdrawals)))
+    (to_hex (Epoch_close.first_calldata d));
+  Alcotest.(check bool) "applyIncentives succeeded on the real bytecode" true
+    (System_call.succeeded (Epoch_close.rewards_outcome d));
+  Alcotest.(check bool) "concludeEpoch succeeded on the real bytecode" true
+    (System_call.succeeded (Epoch_close.conclude_outcome d));
+  let h = assembled (Block_header.assemble ~context:ctx ~finished) in
+  Alcotest.(check string)
+    "extra_data is the 32 randomness bytes VERBATIM, never a hash of them"
+    (to_hex (Hash32.to_bytes close_randomness))
+    (to_hex (Block_header.extra_data h));
+  Alcotest.(check bool) "the header carries the boundary records" true
+    (List.equal Withdrawal.equal close_withdrawals (Block_header.withdrawals h));
+  Alcotest.(check string) "withdrawals_root is the records' root"
+    (to_hex (Block_roots.withdrawals_root close_withdrawals))
+    (Tn_evm.Hash32.to_hex (Block_header.withdrawals_root h));
+  Alcotest.(check bool) "and not the empty-withdrawals constant" false
+    (String.equal (Hash32.to_hex (Block_header.withdrawals_root h)) (to_hex Trie.empty_root));
+  (* The replay decode: the header's own extra_data and withdrawals
+     reproduce the boundary, config.rs:157-167's 0/32/error discipline. *)
+  let round =
+    match
+      Epoch_boundary.of_extra_data (Block_header.extra_data h)
+        ~withdrawals:(Block_header.withdrawals h)
+    with
+    | Ok b -> b
+    | Error e ->
+        Alcotest.failf "the closing header does not decode: %s"
+          (Epoch_boundary.error_to_string e)
+  in
+  Alcotest.(check bool) "of_extra_data round-trips to the same boundary" true
+    (Epoch_boundary.equal round closing_boundary);
+  (* The state root: the POST-close world's, not the pre-close outcome's. *)
+  Alcotest.(check string) "the state root is the post-close world's"
+    (to_hex (Block_roots.state_root (Finished.world finished)))
+    (Hash32.to_hex (Block_header.state_root h));
+  Alcotest.(check bool) "which differs from the pre-close world's" false
+    (String.equal
+       (to_hex (Block_roots.state_root (Block_execution.world outcome)))
+       (Hash32.to_hex (Block_header.state_root h)));
+  (* extra_data, withdrawals and withdrawals_root are the ONLY fields the
+     boundary decides (block.rs:969-978; every other field is assembled
+     identically): against the same block on an Open boundary, everything
+     else agrees except the state root, which differs only because the close
+     WROTE state, never because the assembler branched. *)
+  let open_ctx = context () in
+  let _, open_outcome =
+    run_ok (Block_execution.execute (finish_world ()) ~context:open_ctx finish_envelopes)
+  in
+  let open_finished = run_ok (Block_execution.finish open_outcome ~context:open_ctx) in
+  let oh = assembled (Block_header.assemble ~context:open_ctx ~finished:open_finished) in
+  Alcotest.(check bool) "parent hash unchanged" true
+    (Tn_keccak.equal (Block_header.parent_hash oh) (Block_header.parent_hash h));
+  Alcotest.(check string) "transactions root unchanged"
+    (Hash32.to_hex (Block_header.transactions_root oh))
+    (Hash32.to_hex (Block_header.transactions_root h));
+  Alcotest.(check string) "receipts root unchanged"
+    (Hash32.to_hex (Block_header.receipts_root oh))
+    (Hash32.to_hex (Block_header.receipts_root h));
+  Alcotest.(check bool) "logs bloom unchanged" true
+    (Bloom.equal (Block_header.logs_bloom oh) (Block_header.logs_bloom h));
+  Alcotest.(check int) "gas_used unchanged" (Block_header.gas_used oh) (Block_header.gas_used h);
+  Alcotest.(check int) "number unchanged" (Block_header.number oh) (Block_header.number h);
+  Alcotest.(check int) "gas_limit unchanged" (Block_header.gas_limit oh) (Block_header.gas_limit h);
+  Alcotest.(check int) "timestamp unchanged" (Block_header.timestamp oh) (Block_header.timestamp h);
+  Alcotest.(check bool) "nonce unchanged" true
+    (Units.Sequence_number.equal (Block_header.nonce oh) (Block_header.nonce h))
+
+(* Row 17, the grafted invisibility test: the closing block's gas_used,
+   receipts, receipts_root and logs_bloom are byte-identical to the SAME
+   block's with the close arm stubbed. The stubbed close arm IS the Open
+   boundary: finish makes no call there, so the open run is the closing run
+   minus exactly the epoch calls. Telcoin commits their state and drops
+   their result on the floor (block.rs:184-187, 221-226); receipts are
+   pushed only in commit_transaction (block.rs:896). *)
+let test_the_epoch_calls_leave_no_receipt_trace () =
+  let world = finish_world () in
+  let open_ctx = context () in
+  let closing_ctx = context ~boundary:closing_boundary () in
+  let _, open_outcome = run_ok (Block_execution.execute world ~context:open_ctx finish_envelopes) in
+  let _, closing_outcome =
+    run_ok (Block_execution.execute world ~context:closing_ctx finish_envelopes)
+  in
+  let open_finished = run_ok (Block_execution.finish open_outcome ~context:open_ctx) in
+  let closing_finished = run_ok (Block_execution.finish closing_outcome ~context:closing_ctx) in
+  let o = Finished.outcome open_finished in
+  let c = Finished.outcome closing_finished in
+  Alcotest.(check int) "gas_used is identical" (Block_execution.gas_used o)
+    (Block_execution.gas_used c);
+  Alcotest.(check int) "the receipt count is identical"
+    (List.length (Block_execution.receipts o))
+    (List.length (Block_execution.receipts c));
+  Alcotest.(check string) "the receipts root is byte-identical"
+    (to_hex (Block_roots.receipts_root (Block_execution.receipts o)))
+    (to_hex (Block_roots.receipts_root (Block_execution.receipts c)));
+  Alcotest.(check bool) "the logs bloom is byte-identical" true
+    (Bloom.equal (Block_execution.logs_bloom o) (Block_execution.logs_bloom c));
+  (* Non-vacuity: the close really ran and really wrote. *)
+  Alcotest.(check bool) "the close ran: a disposition exists" true
+    (Option.is_some (Finished.close_disposition closing_finished));
+  Alcotest.(check bool) "the close wrote: the finished worlds differ" false
+    (World_state.equal (Finished.world open_finished) (Finished.world closing_finished))
+
+(* The stage-3-mode fixture close, pinned. A REGRESSION pin computed by this
+   port once (the predeployed_state_root_hex discipline above): the registry
+   world alone, no transactions, the closing boundary. It freezes the whole
+   close arm's state effect, and any variant that roots, returns or commits
+   the pre-close world lands on the OLD root and goes red against it. *)
+let post_close_state_root_hex =
+  "4ed7776b3a2efb948533ab23cd0946875a23bd09cf9f946297adc4d199de3208"
+
+(* LIVE ORACLE, fetched 2026-07-27 from the public adiri testnet RPC at
+   https://rpc.adiri.tel (the same node answers at https://adiri.tel), by
+   eth_getBlockByNumber(0x122): block 290,
+   hash 0x725705f6ff227979f8812d8c395e9a048c5e97877462e8c12513dcda66cc01d5,
+   is the closing block of epoch 0 (the nonce's epoch field flips at 291).
+   Every value pinned below is the network's own published byte.
+
+   What this certifies that no fixture can: the network stores the 32
+   close-epoch randomness bytes in extra_data VERBATIM (a port that stored
+   keccak256(randomness) reproduces neither pin), the withdrawal records
+   carry index 0, validator_index 0 and RAW leader counts (0xbea = 3050
+   consensus headers, never gwei or wei), and the withdrawals root over
+   exactly those records is the withdrawalsRoot the network published. *)
+let adiri_closing_extra_data_hex =
+  "79c83fb02b2be370843ee8c56a78af35e52151f5049633a35f351b1870b587e2"
+
+let adiri_closing_withdrawals_root_hex =
+  "fcf24eff33c2eb21422218c75c0c94a36c9a60f4a911e6911cbf48be8e1325d5"
+
+(* The published records: ascending by address, amounts raw counts. *)
+let adiri_closing_withdrawals =
+  List.map
+    (fun (address_hex, amount) ->
+      get
+        (Withdrawal.make ~index:0 ~validator_index:0
+           ~address:(get (Address.of_bytes (hex address_hex)))
+           ~amount))
+    [
+      ("0033a370616805b1fd275b7ffab83fc41d665ccb", 0xbea);
+      ("3518b301b86ceb53b5a3dff62e55cd43ef59d024", 0xaa7);
+      ("7489025dfbaad94f2366d88a62989147d9c8b5d3", 0x2f3);
+      ("89dab9f6fdc569c1bcdbd6493f25b7040b55dc79", 0x9fc);
+      ("efaacf04b92298a88200aa50aa6bb7bfce587b17", 0xa27);
+    ]
+
+let test_live_adiri_closing_block () =
+  let boundary =
+    match
+      Epoch_boundary.of_extra_data
+        (hex adiri_closing_extra_data_hex)
+        ~withdrawals:adiri_closing_withdrawals
+    with
+    | Ok b -> b
+    | Error e ->
+        Alcotest.failf "the live extra_data does not decode: %s"
+          (Epoch_boundary.error_to_string e)
+  in
+  let commitment = Epoch_boundary.commitment boundary in
+  Alcotest.(check string)
+    "extra_data is the network's 32 bytes VERBATIM"
+    adiri_closing_extra_data_hex
+    (to_hex (Epoch_boundary.extra_data commitment));
+  Alcotest.(check string)
+    "the commitment reproduces the network's withdrawalsRoot"
+    adiri_closing_withdrawals_root_hex
+    (to_hex (Epoch_boundary.withdrawals_root commitment));
+  Alcotest.(check string)
+    "and Block_roots agrees over the raw-count records"
+    adiri_closing_withdrawals_root_hex
+    (to_hex (Block_roots.withdrawals_root adiri_closing_withdrawals))
+
+let test_the_fixture_close_pins_the_post_close_state_root () =
+  let ctx = context ~boundary:closing_boundary () in
+  let _, outcome = run_ok (Block_execution.execute registry_world ~context:ctx []) in
+  let finished = run_ok (Block_execution.finish outcome ~context:ctx) in
+  Alcotest.(check string) "the empty fold left the fixture untouched"
+    (to_hex (Block_roots.state_root registry_world))
+    (to_hex (Block_roots.state_root (Block_execution.world outcome)));
+  Alcotest.(check string) "the post-close state root is pinned"
+    post_close_state_root_hex
+    (to_hex (Block_roots.state_root (Finished.world finished)));
+  Alcotest.(check bool) "and differs from the pre-close root" false
+    (String.equal post_close_state_root_hex (to_hex (Block_roots.state_root registry_world)))
+
 let () =
   Alcotest.run "block-execution"
     [
@@ -870,4 +1165,17 @@ let () =
         ] );
       ( "spine",
         [ Alcotest.test_case "one block, end to end" `Quick test_spine_end_to_end ] );
+      ( "finish",
+        [
+          Alcotest.test_case "finish on Open is an identity re-wrap" `Quick
+            test_finish_on_open_is_identity;
+          Alcotest.test_case "the closing header, end to end" `Quick
+            test_closing_header_end_to_end;
+          Alcotest.test_case "the epoch calls leave no receipt trace" `Quick
+            test_the_epoch_calls_leave_no_receipt_trace;
+          Alcotest.test_case "the fixture close pins the post-close state root" `Quick
+            test_the_fixture_close_pins_the_post_close_state_root;
+          Alcotest.test_case "live adiri closing block 290, byte identity" `Quick
+            test_live_adiri_closing_block;
+        ] );
     ]

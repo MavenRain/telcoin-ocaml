@@ -99,20 +99,22 @@ val make :
     - [batch_digest] is the header's [ommers_hash] and has nothing to do with
       the body's ommers, which are always empty.
     - [position] replaces the packed [difficulty] word.
-    - [boundary] replaces [close_epoch] and folds in what the deferred rewards
-      counter will supply.
+    - [boundary] replaces [close_epoch] and folds in what
+      {!Rewards_counter.generate_withdrawals} supplies.
 
-    The seventh Rust field, [rewards_counter], is not modelled: it is a shared
-    handle ([gas_accumulator.rs:89-96]) the executor reads only inside the
-    close-epoch branch of [finish] ([block.rs:793-831]). Its one in-scope
-    consequence, the withdrawals list, is carried by {!Epoch_boundary.Closing}
-    as DATA, so deferring the counter cannot silently produce an empty
-    withdrawals list on a closing block. Recorded for the later chunk:
-    [get_address_counts] returns an EMPTY map when the committee handle is
-    [None] ([gas_accumulator.rs:123-142]), which is a silent empty withdrawals
-    list upstream, and its [BTreeMap<Address, u32>] iteration is what makes the
-    list ascending by execution address, an ordering the withdrawals root
-    commits to.
+    The seventh Rust field, [rewards_counter], is not carried HERE: it is a
+    shared handle ([gas_accumulator.rs:89-96]) the executor reads only inside
+    the close-epoch branch of [finish] ([block.rs:793-831]), and its image,
+    {!Rewards_counter}, lives with the driver that accumulates it. Its one
+    in-scope consequence, the withdrawals list, is carried by
+    {!Epoch_boundary.Closing} as DATA, and {!Block_execution.finish} derives
+    the [applyIncentives] pairs from that same list, so the context cannot
+    pay rewards its own header does not commit to. The two upstream hazards
+    once recorded here now have named homes: [get_address_counts]'s silent
+    EMPTY map with no committee handle ([gas_accumulator.rs:123-142]) is
+    {!Rewards_counter.address_counts}'s documented no-committee behaviour,
+    and the [BTreeMap<Address, u32>] ascending iteration is that same
+    function's pinned ordering.
 
     The three narrowings run before the genesis rule, because the rule is a
     statement about block {e zero} and there is no block number to compare

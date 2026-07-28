@@ -4,9 +4,12 @@
     Two illegal states are removed by SHAPE rather than by rule. There is no
     [caller] parameter, so a system call from anything but
     {!System_contracts.system_address} is unnameable. And the raw post-call
-    world never escapes, so committing an account other than the target is
-    unnameable: {!world} is the only way out and it has already done the
-    [retain].
+    world never escapes: the only ways out are {!world}, which has already
+    done the [retain], and {!world_keeping_all_but_system}, which has already
+    done the [remove], so a world committed under no rule at all is
+    unnameable. One module holds both rules so their environment cannot
+    drift, yet the two accessors cannot be confused for one another at a call
+    site.
 
     Execution goes through the port's existing {!Executor.execute} on a
     synthetic Legacy transaction, because that IS telcoin's full-pipeline shape.
@@ -96,9 +99,25 @@ val world : outcome -> Tn_state.World_state.t
     zero, which is what lets the 4788 and the 2935 call both pass the nonce
     check inside one block.
 
-    Note the epoch-close paths use [res.state.remove(&SYSTEM_ADDRESS)] instead
-    ([block.rs:185]), KEEPING every other touched account. That is a different
-    commit rule, so the later chunk must not reuse this function. *)
+    The epoch-close paths commit under the other rule,
+    {!world_keeping_all_but_system}; the two-contract fixture in
+    [test_epoch_close.ml] is what tells the two apart. *)
+
+val world_keeping_all_but_system : outcome -> Tn_state.World_state.t
+(** The post-call world with {!System_contracts.system_address}'s account
+    restored to its PRE-call value and every OTHER touched account kept: the
+    image of [res.state.remove(&SYSTEM_ADDRESS)] followed by
+    [db.commit(res.state)], the commit rule of BOTH epoch-close writes
+    ([block.rs:184-187, 224-226]). The system account's nonce bump is a
+    caller touch, not a state change telcoin commits, and an account absent
+    before the call is absent again after it ([world_state.ml:26-27] prunes
+    what [remove] deletes).
+
+    DISTINCT from {!world}: under the [retain] a sub-call's write to a third
+    account is dropped, under this rule it survives, which is the entire
+    reason [applyIncentives] can move balances out of the governance safe
+    ([block.rs:145-147]). {!Epoch_close} is the only intended production
+    caller; the pre-block 4788/2935 writes stay on {!world}. *)
 
 val run :
   Tn_state.World_state.t ->

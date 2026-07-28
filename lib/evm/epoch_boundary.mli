@@ -18,8 +18,10 @@ type t =
           EXECUTION-ADDRESS order, which is what
           [RewardsCounter::get_address_counts]'s [BTreeMap<Address, u32>]
           iteration produces ([gas_accumulator.rs:123-158]) and what the
-          withdrawals root commits to; producing that list is the deferred
-          rewards machinery's job and ordering it is this port's obligation.
+          withdrawals root commits to; {!Rewards_counter.generate_withdrawals}
+          produces exactly that list, and {!Block_execution.finish} derives
+          the [applyIncentives] reward pairs FROM these records, so the
+          payment and the header commitment cannot name different rewards.
 
           Exposed rather than abstract because a boundary is a SHAPE and not a
           capability, which is {!Mutability.t}'s argument. What must be
@@ -49,9 +51,11 @@ val error_to_string : error -> string
 
 val of_extra_data : string -> withdrawals:Withdrawal.t list -> (t, error) result
 (** The replay-path decode: [""] with no withdrawals is {!Open}, 32 bytes is
-    {!Closing}, any other length is an {!error}. This is the 0/32/error length
-    discipline the spine owes for [close_epoch] even though the epoch-close
-    state transitions are deferred. *)
+    {!Closing}, any other length is an {!error}. This is the 0/32/error
+    length discipline of [config.rs:157-167], and it is what makes
+    {!Block_execution.finish}'s single-sourcing coherent on replay: a
+    header's [extra_data] and withdrawals decode back to the boundary whose
+    commitment they came from. *)
 
 type commitment
 (** The three header fields a boundary decides, derived together. Abstract and

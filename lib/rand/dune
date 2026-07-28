@@ -1,0 +1,9 @@
+; rand 0.9.2's StdRng (ChaCha12) restricted to what the epoch-close committee
+; shuffle consumes: the keystream, the u32/u64 draws, the usize range sampler
+; and the choose_multiple reservoir. Depends on tn_hash32 only for the seed
+; type (the close-epoch randomness arrives as that 32-byte gate); tn_evm sits
+; ABOVE this library since chunk 32, because the committee shuffle calls it.
+(library
+ (name tn_rand)
+ (public_name telcoin_ocaml.rand)
+ (libraries tn_hash32))

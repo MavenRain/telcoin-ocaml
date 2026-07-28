@@ -18,11 +18,16 @@ let gas_limit = 30_000_000
    [Rejected], a LOUD failure, never a wrong state root. *)
 let gas_limit_word = Option.value ~default:U256.zero (U256.of_int gas_limit)
 
-type outcome = { receipt : Receipt.t; world : World_state.t }
+type outcome = {
+  receipt : Receipt.t;
+  world : World_state.t;
+  world_keeping_all_but_system : World_state.t;
+}
 
 let receipt o = o.receipt
 let succeeded o = Receipt_envelope.status o.receipt
 let world o = o.world
+let world_keeping_all_but_system o = o.world_keeping_all_but_system
 
 (* Telcoin's two [core::mem::swap]s ([evm/mod.rs:194-212]) expressed as a
    rebuild, because [Env.Block] has no updater. The other six fields are carried
@@ -46,6 +51,17 @@ let system_block block =
 let retain_target ~before ~after ~contract =
   World_state.set_account before contract (World_state.account after contract)
 
+(* The OTHER commit rule, [res.state.remove(&SYSTEM_ADDRESS)] then
+   [db.commit(res.state)] ([block.rs:184-187, 224-226]): the post-call world
+   with the system address's account put back to its pre-call value, every
+   other touched account kept. [World_state.set_account] prunes an absent
+   account ([world_state.ml:26-27]), so a system address that was absent
+   before the call is absent again after it, exactly what [remove] leaves in
+   the Rust map. *)
+let keep_all_but_system ~before ~after =
+  World_state.set_account after System_contracts.system_address
+    (World_state.account before System_contracts.system_address)
+
 let run before ~block ~contract ~data =
   let tx =
     Transaction.make ~sender:System_contracts.system_address
@@ -57,4 +73,8 @@ let run before ~block ~contract ~data =
   Executor.execute before ~block:(system_block block) tx
   |> Result.map_error (fun e -> Rejected e)
   |> Result.map (fun (receipt, after) ->
-         { receipt; world = retain_target ~before ~after ~contract })
+         {
+           receipt;
+           world = retain_target ~before ~after ~contract;
+           world_keeping_all_but_system = keep_all_but_system ~before ~after;
+         })

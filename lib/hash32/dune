@@ -1,0 +1,9 @@
+; The 32-byte gate as a leaf. It lived in tn_evm until chunk 32, when the
+; committee shuffle put tn_rand BELOW tn_evm (the shuffle consumes the RNG),
+; while tn_rand still needs this type for its seed; a leaf both can see is
+; the only acyclic home. tn_evm re-exports it as Tn_evm.Hash32, so every
+; existing reference and the type equality survive the move.
+(library
+ (name tn_hash32)
+ (public_name telcoin_ocaml.hash32)
+ (libraries tn_keccak))

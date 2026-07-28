@@ -4,6 +4,9 @@
    test_interpreter test_host_seam test_keccak test_extcode test_calls
    test_creation test_precompile test_executor test_rlp test_trie test_bloom
    test_receipt_envelope test_block_roots test_tx_envelope test_tx_recovery
-   test_block_execution test_block_header test_gas_penalty)
+   test_block_execution test_block_header test_gas_penalty test_rand
+   test_registry_abi test_genesis_registry test_rewards_counter
+   test_committee_shuffle test_epoch_close)
  (libraries tn_std tn_codec tn_types tn_crypto tn_vertex tn_consensus tn_sim
-   tn_execution tn_state tn_evm tn_keccak tn_rlp tn_trie zarith alcotest qcheck))
+   tn_execution tn_state tn_evm tn_keccak tn_rlp tn_trie tn_rand zarith
+   alcotest qcheck))

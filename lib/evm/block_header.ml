@@ -21,14 +21,11 @@ let root_field_to_string = function
   | Receipts_root -> "receipts root"
   | Withdrawals_root -> "withdrawals root"
 
-type error = Root_unrepresentable of root_field | Epoch_close_state_deferred
+type error = Root_unrepresentable of root_field
 
 let error_to_string = function
   | Root_unrepresentable field ->
       Printf.sprintf "%s is not 32 bytes" (root_field_to_string field)
-  | Epoch_close_state_deferred ->
-      "the epoch-close state transitions are deferred, so a closing block's \
-       state root is not yet computable"
 
 (* The two pinned constants are decoded through [U256.of_hex] rather than
    through a second hand-rolled decoder: it already refuses anything but exactly
@@ -87,53 +84,54 @@ let ( let* ) = Result.bind
 let gate field root =
   Option.to_result ~none:(Root_unrepresentable field) (Hash32.of_bytes root)
 
-let assemble ~context ~outcome =
-  let boundary = Block_context.boundary context in
-  match boundary with
-  | Epoch_boundary.Closing _ -> Error Epoch_close_state_deferred
-  | Epoch_boundary.Open ->
-      let commitment = Epoch_boundary.commitment boundary in
-      let block = Block_context.block context in
-      let* state_root =
-        gate State_root (Block_roots.state_root (Block_execution.world outcome))
-      in
-      let* transactions_root =
-        gate Transactions_root
-          (Block_roots.transactions_root_of
-             (Block_execution.transactions outcome))
-      in
-      let* receipts_root =
-        gate Receipts_root
-          (Block_roots.receipts_root (Block_execution.receipts outcome))
-      in
-      let* withdrawals_root =
-        gate Withdrawals_root (Epoch_boundary.withdrawals_root commitment)
-      in
-      Ok
-        {
-          parent_hash = Block_context.parent_hash context;
-          ommers_hash = Block_context.batch_digest context;
-          beneficiary = Env.Block.coinbase block;
-          state_root;
-          transactions_root;
-          receipts_root;
-          logs_bloom = Block_execution.logs_bloom outcome;
-          position = Block_context.position context;
-          number = Block_context.number context;
-          gas_limit = Block_context.gas_limit context;
-          gas_used = Block_execution.gas_used outcome;
-          timestamp = Block_context.timestamp context;
-          extra_data = Epoch_boundary.extra_data commitment;
-          mix_hash = Env.Block.prevrandao block;
-          nonce = Block_context.nonce context;
-          base_fee_per_gas = Env.Block.basefee block;
-          withdrawals = Epoch_boundary.withdrawals commitment;
-          withdrawals_root;
-          parent_beacon_block_root = Block_context.consensus_root context;
-          blob_gas_used = 0;
-          excess_blob_gas = 0;
-          requests_hash = empty_requests_hash;
-        }
+(* The state root is taken over the FINISHED world (epoch-close writes
+   included); everything the transaction fold produced is read off the
+   outcome the token carries, so the roots and the bloom commit the same
+   block the state root does. *)
+let assemble ~context ~finished =
+  let commitment = Epoch_boundary.commitment (Block_context.boundary context) in
+  let outcome = Block_execution.Finished.outcome finished in
+  let block = Block_context.block context in
+  let* state_root =
+    gate State_root
+      (Block_roots.state_root (Block_execution.Finished.world finished))
+  in
+  let* transactions_root =
+    gate Transactions_root
+      (Block_roots.transactions_root_of (Block_execution.transactions outcome))
+  in
+  let* receipts_root =
+    gate Receipts_root
+      (Block_roots.receipts_root (Block_execution.receipts outcome))
+  in
+  let* withdrawals_root =
+    gate Withdrawals_root (Epoch_boundary.withdrawals_root commitment)
+  in
+  Ok
+    {
+      parent_hash = Block_context.parent_hash context;
+      ommers_hash = Block_context.batch_digest context;
+      beneficiary = Env.Block.coinbase block;
+      state_root;
+      transactions_root;
+      receipts_root;
+      logs_bloom = Block_execution.logs_bloom outcome;
+      position = Block_context.position context;
+      number = Block_context.number context;
+      gas_limit = Block_context.gas_limit context;
+      gas_used = Block_execution.gas_used outcome;
+      timestamp = Block_context.timestamp context;
+      extra_data = Epoch_boundary.extra_data commitment;
+      mix_hash = Env.Block.prevrandao block;
+      nonce = Block_context.nonce context;
+      base_fee_per_gas = Env.Block.basefee block;
+      withdrawals = Epoch_boundary.withdrawals commitment;
+      withdrawals_root;
+      parent_beacon_block_root = Block_context.consensus_root context;
+      blob_gas_used = 0;
+      excess_blob_gas = 0;
+      requests_hash = empty_requests_hash;
+    }
 
 let parent_hash t = t.parent_hash
 let ommers_hash t = t.ommers_hash

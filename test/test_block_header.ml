@@ -99,7 +99,8 @@ let spine_world () = fund (System_contracts.predeploy World_state.empty) spine_e
 
 let assemble_with ctx =
   let pre, outcome = run_ok (Block_execution.execute (spine_world ()) ~context:ctx spine_envelopes) in
-  (pre, outcome, Block_header.assemble ~context:ctx ~outcome)
+  let finished = run_ok (Block_execution.finish outcome ~context:ctx) in
+  (pre, outcome, Block_header.assemble ~context:ctx ~finished)
 
 (* ================================================================== *)
 (* 1. The epoch boundary decides three fields together.                *)
@@ -325,22 +326,53 @@ let test_state_root_and_transactions_root_come_from_one_outcome () =
     (Block_execution.gas_used outcome)
     (Block_header.gas_used h)
 
-(* A closing block's world has not had the epoch-close state transitions
-   applied, so its state root would be a lie. The refusal is at the ASSEMBLER
-   and not in the fold: the fold is genuinely correct for a closing block, which
-   the second half asserts by running both and comparing everything. *)
-let test_a_closing_block_will_not_be_assembled () =
-  let randomness = hash32 (String.init 32 (fun i -> Char.chr (0xb0 + i))) in
-  let closing =
-    Epoch_boundary.Closing
-      {
-        randomness;
-        withdrawals = [ withdrawal ~index:0 ~validator_index:0 ~address:alice ~amount:4 ];
-      }
+(* The registry account from the pinned pre-fork genesis fixture, built
+   exactly as test_genesis_registry.ml builds it, so the closing arm's system
+   calls below run against the real 28381-byte bytecode. *)
+let registry = System_contracts.consensus_registry_address
+let u256_short s = get (U256.of_hex (String.make (64 - String.length s) '0' ^ s))
+let u256_hex s = get (U256.of_hex s)
+
+let registry_world =
+  let entry =
+    Tn_state.Genesis_account.make ~nonce:Nonce.zero
+      ~balance:(u256_short Registry_genesis.balance_hex)
+      ~code:(Some (hex Registry_genesis.code_hex))
+      ~storage:
+        (List.map (fun (s, v) -> (u256_hex s, u256_hex v)) Registry_genesis.storage_hex)
   in
+  get_ok (World_state.of_genesis_alloc [ (registry, entry) ])
+
+(* A closing block now ASSEMBLES, rooting the POST-close world. The fold is
+   still boundary-blind (asserted first, unchanged from the deferral era);
+   what changed is strictly downstream: [Block_execution.finish] runs the
+   epoch-close calls and [Block_header.assemble] takes the [Finished.t] that
+   proves they ran, so the state root that used to be refused as a lie is now
+   the truth by construction.
+
+   This test also discharges the {12, 17, 18} obligation recorded above
+   [test_header_rlp_is_a_21_element_list_in_the_pinned_order]: with a
+   nonempty extra_data, position 12 carries the 32 randomness bytes while 17
+   and 18 stay empty, so a transposition among the three is RED here. *)
+let test_a_closing_block_roots_the_post_close_world () =
+  let randomness = hash32 (String.init 32 (fun i -> Char.chr (0xb0 + i))) in
+  (* Two of the five testnet validators, ascending by address, with distinct
+     nonzero counts. Real validators, because the fixture registry's
+     applyIncentives must succeed for the close to finish. *)
+  let w0 =
+    withdrawal ~index:0 ~validator_index:0
+      ~address:(address_of_hex "0033a370616805b1fd275b7ffab83fc41d665ccb")
+      ~amount:3
+  in
+  let w1 =
+    withdrawal ~index:0 ~validator_index:0
+      ~address:(address_of_hex "3518b301b86ceb53b5a3dff62e55cd43ef59d024")
+      ~amount:5
+  in
+  let closing = Epoch_boundary.Closing { randomness; withdrawals = [ w0; w1 ] } in
   let open_ctx = context () in
   let closing_ctx = context ~boundary:closing () in
-  let world = spine_world () in
+  let world = fund (System_contracts.predeploy registry_world) spine_envelopes in
   let open_pre, open_outcome =
     run_ok (Block_execution.execute world ~context:open_ctx spine_envelopes)
   in
@@ -360,15 +392,48 @@ let test_a_closing_block_will_not_be_assembled () =
     "and the pre-block phase is identical too"
     (to_hex (Block_roots.state_root (Block_execution.Pre_block.world open_pre)))
     (to_hex (Block_roots.state_root (Block_execution.Pre_block.world closing_pre)));
+  (* finish, then assemble from the Finished token. *)
+  let closing_finished = run_ok (Block_execution.finish closing_outcome ~context:closing_ctx) in
+  let open_finished = run_ok (Block_execution.finish open_outcome ~context:open_ctx) in
+  let h = assembled (Block_header.assemble ~context:closing_ctx ~finished:closing_finished) in
   Alcotest.(check string)
-    "the closing block is refused at the assembler"
-    "the epoch-close state transitions are deferred, so a closing block's state \
-     root is not yet computable"
-    (Result.fold ~ok:(fun _ -> "assembled") ~error:Block_header.error_to_string
-       (Block_header.assemble ~context:closing_ctx ~outcome:closing_outcome));
+    "extra_data is the randomness verbatim"
+    (to_hex (Hash32.to_bytes randomness))
+    (to_hex (Block_header.extra_data h));
+  Alcotest.(check string)
+    "the state root is the POST-close world's"
+    (to_hex (Block_roots.state_root (Block_execution.Finished.world closing_finished)))
+    (Hash32.to_hex (Block_header.state_root h));
   Alcotest.(check bool)
-    "while the otherwise identical open block assembles" true
-    (Result.is_ok (Block_header.assemble ~context:open_ctx ~outcome:open_outcome))
+    "and NOT the pre-close outcome world's" false
+    (String.equal
+       (Hash32.to_hex (Block_header.state_root h))
+       (to_hex (Block_roots.state_root (Block_execution.world closing_outcome))));
+  (* Positions 12, 17 and 18, no longer mutually indistinguishable. *)
+  let items =
+    match Rlp.decode_exact (Block_header.encode_rlp h) with
+    | Ok (Rlp.List items) -> items
+    | Ok (Rlp.Str _) -> Alcotest.fail "a header must encode as a list"
+    | Error e -> Alcotest.failf "header RLP does not decode: %s" (Rlp.error_to_string e)
+  in
+  let render = function
+    | Rlp.Str s -> to_hex s
+    | Rlp.List _ -> "nested"
+  in
+  Alcotest.(check string) "position 12 is the randomness"
+    (to_hex (Hash32.to_bytes randomness))
+    (render (List.nth items 12));
+  Alcotest.(check string) "position 17 stays empty" "" (render (List.nth items 17));
+  Alcotest.(check string) "position 18 stays empty" "" (render (List.nth items 18));
+  (* The otherwise identical open block assembles too, rooting its own world
+     unchanged. *)
+  let open_h = assembled (Block_header.assemble ~context:open_ctx ~finished:open_finished) in
+  Alcotest.(check string)
+    "the open header roots the outcome world unchanged"
+    (to_hex (Block_roots.state_root (Block_execution.world open_outcome)))
+    (Hash32.to_hex (Block_header.state_root open_h));
+  Alcotest.(check int) "and its extra_data stays empty" 0
+    (String.length (Block_header.extra_data open_h))
 
 (* ================================================================== *)
 (* 3. The header RLP.                                                  *)
@@ -432,23 +497,16 @@ let test_encode_rlp_agrees_with_the_certified_encoder () =
    collapse to the single byte 0x80), the difficulty is a trimmed scalar, and
    number, gas_limit, gas_used and timestamp are four different integers.
 
-   HONEST LIMIT: the mutually indistinguishable class is THREE positions, not
-   the two first recorded here. 17 (blob_gas_used) and 18 (excess_blob_gas) are
-   both the constant zero, and 12 (extra_data) joins them because
-   [Block_header.assemble] refuses every Closing boundary, so extra_data is
-   provably the empty string in any header this port can currently build, and
-   [Rlp.encode_bytes ""] is the same single byte 0x80 as [Rlp.encode_nat 0]. A
-   transposition among {12, 17, 18} is therefore invisible to BOTH halves of the
-   argument above: the golden half never runs the port's encoder, and the
-   agreement half compares two encoders that both see 0x80 in all three slots.
-
-   That is latent rather than harmless. The moment the epoch-close arm lands,
-   telcoin puts 32 bytes of close-epoch randomness in extra_data
-   ([block.rs:970]), and a 12-for-17 transposition would serialise that
-   randomness where blob_gas_used belongs, producing a wrong block hash with no
-   test turning red. Closing it needs a header whose extra_data is nonempty,
-   which needs the deferred Closing arm; it is recorded here so the chunk that
-   lands that arm inherits the obligation rather than rediscovering it. *)
+   On an OPEN boundary, positions 12 (extra_data), 17 (blob_gas_used) and 18
+   (excess_blob_gas) are mutually indistinguishable: [Rlp.encode_bytes ""] is
+   the same single byte 0x80 as [Rlp.encode_nat 0], so a transposition among
+   the three is invisible to both this test and both halves of the
+   golden-vector argument. That obligation, recorded here while the Closing
+   arm was deferred, is now DISCHARGED by
+   [test_a_closing_block_roots_the_post_close_world]: with the epoch-close
+   arm landed, telcoin puts 32 bytes of close-epoch randomness in extra_data
+   ([block.rs:970]), and that test pins position 12 as those bytes while 17
+   and 18 stay empty, so a 12-for-17 transposition is RED there. *)
 let test_header_rlp_is_a_21_element_list_in_the_pinned_order () =
   let d = batch_digest32 (String.init 32 (fun i -> Char.chr (0x60 + i))) in
   let ctx =
@@ -525,8 +583,8 @@ let () =
           Alcotest.test_case "the three repurposed fields" `Quick test_the_three_repurposed_fields;
           Alcotest.test_case "state root and transactions root come from one outcome" `Quick
             test_state_root_and_transactions_root_come_from_one_outcome;
-          Alcotest.test_case "a closing block will not be assembled" `Quick
-            test_a_closing_block_will_not_be_assembled;
+          Alcotest.test_case "a closing block roots the post-close world" `Quick
+            test_a_closing_block_roots_the_post_close_world;
         ] );
       ( "header-rlp",
         [

@@ -69,16 +69,8 @@ let equal a b =
   && Topics.equal a.topics b.topics
   && String.equal a.data b.data
 
-let hex_digit n = String.get "0123456789abcdef" n
-
-let to_hex s =
-  String.init (2 * String.length s) (fun j ->
-      let b = Char.code (String.get s (j / 2)) in
-      let nibble = if j land 1 = 0 then b lsr 4 else b land 0x0f in
-      hex_digit nibble)
-
 let to_string t =
   Printf.sprintf "log(%s, topics=[%s], data=%s)"
-    (to_hex (Units.Address.to_bytes t.address))
+    (Hex.of_bytes (Units.Address.to_bytes t.address))
     (String.concat "; " (List.map U256.to_hex (Topics.to_list t.topics)))
-    (to_hex t.data)
+    (Hex.of_bytes t.data)

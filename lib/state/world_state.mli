@@ -28,30 +28,39 @@ val empty : t
 (** No accounts — every address reads as {!Account.empty}. *)
 
 val of_alloc : (Units.Address.t * U256.t) list -> t
-(** The genesis state: fund each listed address with the given balance at nonce
-    zero {e and empty storage} — the port of Rust's genesis [alloc] restricted to
-    [GenesisAccount::with_balance]. A repeated address takes its last allocation;
-    a zero allocation stores no entry.
+(** The balance-only genesis: fund each listed address at nonce zero, no code,
+    empty storage - the port of Rust's [GenesisAccount::with_balance]. A
+    repeated address takes its last allocation; a zero allocation stores no
+    entry. This is now the special case of {!of_genesis_alloc} over
+    {!Genesis_account.balance_only} entries, delegating there so genesis stays
+    one function; a balance-only entry cannot carry storage, so the delegation
+    cannot hit {!alloc_error}. *)
 
-    That restriction is a real gap, not a simplification. Reth's
-    [GenesisAccount] carries a storage map, a nonce and code alongside the
-    balance, and a pair of address and balance can express none of it: an
-    allocation with pre-populated storage or code would be funded here at
-    {!Account.empty}'s storage and code and those silently lost. Code exists on
-    an account as of this chunk, so a genesis seeding a pre-deployed contract
-    meanwhile goes through {!set_account} with {!Account.with_code}, which the
-    external-code readers already read. Nothing in this port passes storage at
-    genesis, so nothing is lost
-    today — but a chain whose genesis pre-populates storage, such as a
-    pre-deployed system contract with a seeded configuration slot, needs this
-    constructor widened to take an {!Account.t} (or the fields of a
-    [GenesisAccount]) rather than a balance before its genesis is representable.
-    Widening it, rather than writing the slots in afterwards with
-    {!set_storage}, is what keeps genesis one total function of the alloc.
+type alloc_error = Storage_without_code of Units.Address.t
+    (** The alloc entry at this address pre-populates storage but installs no
+        code. Refused rather than seeded: an account with storage and neither
+        nonce, balance nor code is the exact class on which this module's
+        pruning rule ({!set_account}'s {!Account.is_absent}) diverges from
+        revm's EIP-161 touch-clearing, and refusing it at the genesis door
+        keeps that divergence unreachable from any loaded alloc - see the
+        comment at [world_state.ml]'s [set_account]. No committed telcoin
+        alloc has such an entry (every storage-carrying account in
+        [chain-configs/testnet/genesis.yaml] and [mainnet/genesis.yaml]
+        carries code), so nothing representable is lost. *)
 
-    This is the one constructor here that has fallen behind {!Account.t}; the
-    account- and slot-level writers, {!set_account} and {!set_storage}, can
-    express everything an account holds. *)
+val error_to_string : alloc_error -> string
+(** Render an {!alloc_error} for diagnostics. *)
+
+val of_genesis_alloc : (Units.Address.t * Genesis_account.t) list -> (t, alloc_error) result
+(** The genesis state as one total function of the alloc: each entry seeds its
+    nonce, balance, code {e and storage} - the port of Rust's genesis [alloc]
+    as [tn-reth/src/lib.rs:1626-1631] builds it for the ConsensusRegistry
+    (balance, runtime code, constructor-derived storage). A repeated address
+    takes its last entry; an entry whose account is {!Account.is_absent}
+    stores nothing. The one refusal is {!alloc_error}: storage on a codeless
+    account. Widening this constructor, rather than writing slots in
+    afterwards with {!set_storage}, is what the old [of_alloc] doc demanded of
+    a genesis that pre-populates storage. *)
 
 val account : t -> Units.Address.t -> Account.t
 (** The account at an address, {!Account.empty} if the state holds no entry for

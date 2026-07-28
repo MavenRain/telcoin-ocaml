@@ -56,6 +56,11 @@ type error =
       (** {!Block_gas.charge_receipt} refused. Unreachable given the check above
           and revm bounding a transaction's gas by its own limit; present so the
           fold is total without an [assert]. *)
+  | Epoch_close of Epoch_close.error
+      (** {!finish}'s closing arm failed: one of the epoch-close registry
+          interactions was rejected, reverted, halted or answered garbage.
+          FATAL for the block, exactly as telcoin's [finish] propagates the
+          same failures as [BlockExecutionError] ([block.rs:822-831]). *)
 
 val error_to_string : error -> string
 (** Render an {!error} as a short human-readable string, for diagnostics and
@@ -188,9 +193,10 @@ type outcome
     {!run_transactions} is its only producer. *)
 
 val world : outcome -> Tn_state.World_state.t
-(** The world after the last transaction committed. This is the world
-    {!Block_header.assemble} roots, which is what makes "this header's state
-    root is the root of the state this block produced" a fact of the type. *)
+(** The world after the last transaction committed. It is what {!finish}
+    starts from; the world the header roots is {!Finished.world}, which on an
+    open boundary is this world unchanged and on a closing one is this world
+    plus the epoch-close writes. *)
 
 val transactions : outcome -> Tx_envelope.t list
 (** The envelopes that executed, in block order. This lives on the OUTCOME and
@@ -269,27 +275,13 @@ val run_transactions :
     {!Epoch_boundary.Open} or {!Epoch_boundary.Closing}.
     [apply_pre_execution_changes] never reads [close_epoch] (it touches only
     [first_batch], [parent_beacon_block_root] and [parent_hash],
-    [block.rs:769-785]) and neither does the transaction loop. What telcoin does
-    with it happens strictly afterwards, in [finish()] ([block.rs:787-835]): the
-    consensus-registry fork, [apply_consensus_block_rewards],
-    [apply_closing_epoch_contract_call], and the
-    [merge_transitions(BundleRetention::Reverts)] that follows them. All four
-    are a later chunk, and none is silently skipped: three of them WRITE STATE,
-    so a closing block's world is incomplete and {!Block_header.assemble}
-    refuses to root it ({!Block_header.Epoch_close_state_deferred}). The refusal
-    is at the assembler and not here because this fold is genuinely correct for
-    a closing block; it is the state root that would be a lie.
-
-    [merge_transitions] has no image at all: it is reth bundle-state
-    bookkeeping and this port has no bundle layer. Worth recording for the later
-    chunk that telcoin calls it ONLY inside the close-epoch branch
-    ([block.rs:833-835]), so on every other block the surrounding driver merges.
-
-    Independent of the boundary, telcoin's [finish] also sets
-    [requests = Requests::default()] and [blob_gas_used = 0]
-    ([block.rs:837-845]). Neither reaches the header, because the assembler
-    discards both and recomputes ([block.rs:945-952]), so neither appears in
-    {!outcome}. *)
+    [block.rs:769-785]) and neither does the transaction loop. What telcoin
+    does with it happens strictly afterwards, in [finish()]
+    ([block.rs:787-835]), whose image here is {!finish}: on a closing
+    boundary the {!outcome} this fold returns is an INTERMEDIATE value whose
+    world has not had the epoch-close writes applied, and
+    {!Block_header.assemble} takes a {!Finished.t}, whose only producer is
+    {!finish}, so that world cannot be rooted without them. *)
 
 val execute :
   Tn_state.World_state.t ->
@@ -299,3 +291,86 @@ val execute :
 (** {!apply_pre_block} then {!run_transactions}. The {!Pre_block.t} is returned
     rather than consumed so a caller, in practice a test, can assert the two
     dispositions without re-running the block. *)
+
+(** The phase token for "the post-transaction epoch work has run": telcoin's
+    [finish()] ([block.rs:787-845]) as a value. {!finish} is its only
+    producer, and {!Block_header.assemble} takes THIS rather than an
+    {!outcome}, so a closing world that has not had the epoch-close writes
+    applied cannot be rooted: the type retires the assembler's old
+    [Epoch_close_state_deferred] refusal by making the refused shape
+    unconstructible. *)
+module Finished : sig
+  type t
+  (** A finished block. Abstract and constructorless, the {!Pre_block.t}
+      idiom: it CARRIES the world the header may root beside the outcome it
+      came from, so the token and the state it certifies cannot be separated
+      or crossed. *)
+
+  val world : t -> Tn_state.World_state.t
+  (** The world {!Block_header.assemble} roots: the outcome's world untouched
+      on an {!Epoch_boundary.Open} boundary, the post-[concludeEpoch] commit
+      on an {!Epoch_boundary.Closing} one. *)
+
+  val outcome : t -> outcome
+  (** The transaction fold's outcome, carried WHOLE and untouched. The epoch
+      calls are INVISIBLE in it: telcoin commits their state and drops their
+      result on the floor ([block.rs:184-187, 221-226]), and receipts are
+      pushed only in [commit_transaction] ([block.rs:896]), so a closing
+      block's {!transactions}, {!receipts}, {!gas_used} and {!logs_bloom} are
+      byte-identical to the same block's with the close arm gone. The
+      header's transactions root, receipts root, bloom and gas read THIS
+      while its state root reads {!world}. *)
+
+  val close_disposition : t -> Epoch_close.disposition option
+  (** [None] on an open boundary, where no call was made; [Some] on a closing
+      one, recording both mandatory calls' calldata and outcomes so a test
+      can assert what ran without re-running it. *)
+end
+
+val finish : outcome -> context:Block_context.t -> (Finished.t, error) result
+(** Telcoin's [finish()] ([block.rs:787-845]).
+
+    {!Epoch_boundary.Open}: an identity re-wrap. No calls, no disposition,
+    and the world comes through untouched ([block.rs:794] is the only gate
+    between the fold and the return at [block.rs:837-845]).
+
+    {!Epoch_boundary.Closing}: the [applyIncentives] reward pairs are derived
+    FROM the boundary's withdrawal records, [(Withdrawal.address,
+    Withdrawal.amount)] in the list's own order, then {!Epoch_close.close}
+    runs with the boundary's randomness ([block.rs:820-831]) and the finished
+    world is its post-[concludeEpoch] commit.
+
+    {2 One step is cut, and one divergence is disclosed}
+
+    CUT, not deferred: the one-time adiri consensus-registry fork swap that
+    telcoin runs FIRST inside the close arm ([block.rs:815-821]). It is
+    [#\[cfg(feature = "adiri")\]]-gated, excluded from every non-adiri build,
+    and its trigger epoch is the placeholder [u32::MAX] that has never fired
+    on any live network ([forks.rs:30, 51-53, 82]); a chain-specific one-shot
+    migration is out of this port's scope.
+
+    DISCLOSED DIVERGENCE, a hardening rather than a transcription: telcoin
+    reads the shared rewards counter TWICE, once in [finish] for the
+    [applyIncentives] calldata ([get_address_counts], [block.rs:820-828]) and
+    once in the assembler for the withdrawal records ([generate_withdrawals],
+    [block.rs:971-974]), and nothing but the [Arc] keeps the two reads
+    coherent. Here the withdrawal records the header commits to are the
+    SINGLE source and the calldata is derived from them. The values are
+    identical on every input Rust produces, because both are images of one
+    [BTreeMap<Address, u32>] ascending iteration, [(address, amount as u64)]
+    and [(address, amount)] respectively ([gas_accumulator.rs:123-157]), so
+    the derivation changes no byte of calldata; and it makes replay coherent
+    without a counter, since a replayed block carries its withdrawals but no
+    counter handle ([config.rs:157-167] rebuilds [close_epoch] from
+    [extra_data] alone).
+
+    {2 Two upstream steps have no image}
+
+    [merge_transitions(BundleRetention::Reverts)] is reth bundle-state
+    bookkeeping and this port has no bundle layer; telcoin calls it ONLY
+    inside the close-epoch branch ([block.rs:833-835]), so on every other
+    block the surrounding driver merges. And telcoin's [finish] sets
+    [requests = Requests::default()] and [blob_gas_used = 0]
+    ([block.rs:837-845]); neither reaches the header, because the assembler
+    discards both and recomputes ([block.rs:945-952]), so neither appears in
+    {!Finished.t}. *)

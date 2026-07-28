@@ -26,22 +26,14 @@ type error =
           Unreachable on any real input, and reachable in principle through
           [block_roots.ml:5-10]'s error-STRING collapse; surfaced so that path
           ends in a visible error rather than in a header that hashes to
-          something no other node computes. *)
-  | Epoch_close_state_deferred
-      (** The context's boundary is {!Epoch_boundary.Closing}, so the world this
-          header would root has not had the epoch-close writes applied.
+          something no other node computes.
 
-          This is the later chunk's work named out loud rather than skipped. The
-          header COMMITMENT for a closing boundary is built and tested in this
-          chunk ({!Epoch_boundary.commitment}); what is missing is only the
-          three state transitions [finish()] performs before the root is taken
-          ([block.rs:793-835]). Lifting the deferral is the deletion of this
-          variant and of the branch that raises it, and nothing else.
-
-          It is an error variant and not a witness type on purpose. A witness,
-          an "open-only context" token, would encode a temporal fact in a
-          permanent shape, and retiring it would mean editing every signature it
-          threads through; retiring a variant edits one match. *)
+          The [Epoch_close_state_deferred] variant that used to sit beside
+          this one is retired, exactly as its own doc pre-announced: the
+          epoch-close state transitions now run in
+          {!Block_execution.finish}, and {!assemble} takes the
+          {!Block_execution.Finished.t} that proves they ran, so the world it
+          refused to root can no longer be offered at all. *)
 
 val error_to_string : error -> string
 (** Render an {!error} as a short human-readable string, for diagnostics and
@@ -77,9 +69,10 @@ type t
 
 val assemble :
   context:Block_context.t ->
-  outcome:Block_execution.outcome ->
+  finished:Block_execution.Finished.t ->
   (t, error) result
-(** Telcoin's [TNBlockAssembler::assemble_block] ([block.rs:940-1008]).
+(** Telcoin's [TNBlockAssembler::assemble_block] ([block.rs:940-1008]), over
+    a FINISHED block.
 
     {2 Where each field comes from}
 
@@ -89,8 +82,9 @@ val assemble :
     {!Env.Block.t}: [beneficiary] ([coinbase]), [mix_hash] ([prevrandao]) and
     [base_fee_per_gas], with [number], [gas_limit] and [timestamp] read off the
     context's already-narrowed integers rather than re-narrowed here. From
-    [outcome]: [gas_used], [transactions_root], [receipts_root], [logs_bloom],
-    and the [state_root].
+    [finished]: [gas_used], [transactions_root], [receipts_root] and
+    [logs_bloom] off {!Block_execution.Finished.outcome}, and the
+    [state_root] over {!Block_execution.Finished.world}.
 
     {2 It takes no [state_root] parameter, and that is a deliberate divergence}
 
@@ -98,12 +92,15 @@ val assemble :
     trie or a state provider ([block.rs:950, 984]), because reth computes it at
     [builder.finish(&state_provider)] ([crates/tn-reth/src/lib.rs:736-745]).
     This port has {!Block_roots.state_root}, a TOTAL function of a
-    {!Tn_state.World_state.t}, and the outcome carries the world. Taking the
-    root as a parameter would be a chance to pass the root of some other world;
-    computing it from {!Block_execution.world} makes "this header's state root
-    is the root of the state this block produced" a fact of the type, and it is
-    what makes {!Epoch_close_state_deferred} necessary rather than optional,
-    since the two obligations are the same obligation.
+    {!Tn_state.World_state.t}, and the finished token carries the world.
+    Taking the root as a parameter would be a chance to pass the root of some
+    other world; computing it from {!Block_execution.Finished.world} makes
+    "this header's state root is the root of the state this block produced,
+    epoch close included" a fact of the type. {!Block_execution.finish} is
+    the only producer of the argument and its Closing arm runs the
+    epoch-close writes, so the unfinished closing world the retired
+    [Epoch_close_state_deferred] variant used to refuse is now unofferable
+    rather than refused.
 
     It takes no transaction list either: {!Block_execution.transactions} is the
     list, so [transactions_root] and [receipts_root] commit the same block.
@@ -146,8 +143,9 @@ val beneficiary : t -> Tn_types.Units.Address.t
 (** The block's fee recipient, the [COINBASE] every frame read. *)
 
 val state_root : t -> Hash32.t
-(** The root of the world this block produced, computed by {!assemble} from
-    {!Block_execution.world} and never supplied by a caller. *)
+(** The root of the world this block produced, epoch close included: computed
+    by {!assemble} from {!Block_execution.Finished.world} and never supplied
+    by a caller. *)
 
 val transactions_root : t -> Hash32.t
 (** The root of the trie over {!Block_execution.transactions}. *)

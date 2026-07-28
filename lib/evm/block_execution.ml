@@ -18,6 +18,7 @@ type error =
       block_available_gas : int;
     }
   | Block_gas_exceeded of { index : int }
+  | Epoch_close of Epoch_close.error
 
 let error_to_string = function
   | Consensus_root_call e ->
@@ -37,6 +38,7 @@ let error_to_string = function
         transaction_gas_limit block_available_gas
   | Block_gas_exceeded { index } ->
       Printf.sprintf "transaction %d passed the block gas limit" index
+  | Epoch_close e -> "epoch close: " ^ Epoch_close.error_to_string e
 
 module Pre_block = struct
   type consensus_root =
@@ -216,3 +218,40 @@ let execute world ~context envelopes =
   let* pre = apply_pre_block world ~context in
   let* outcome = run_transactions pre ~context envelopes in
   Ok (pre, outcome)
+
+module Finished = struct
+  type t = {
+    world : World_state.t;
+    outcome : outcome;
+    close_disposition : Epoch_close.disposition option;
+  }
+
+  (* Not in the .mli: [finish] below is the only producer, so the token stays
+     constructorless from outside, exactly as [Pre_block.make]. *)
+  let make ~world ~outcome ~close_disposition =
+    { world; outcome; close_disposition }
+
+  let world t = t.world
+  let outcome t = t.outcome
+  let close_disposition t = t.close_disposition
+end
+
+(* The applyIncentives pairs, derived FROM the boundary's withdrawal records:
+   same addresses, same amounts, same order. The .mli states why this
+   single-sourcing is a disclosed hardening over Rust's two counter reads and
+   why the values are identical on every input Rust produces. *)
+let reward_pairs withdrawals =
+  List.map (fun w -> (Withdrawal.address w, Withdrawal.amount w)) withdrawals
+
+let finish outcome ~context =
+  match Block_context.boundary context with
+  | Epoch_boundary.Open ->
+      Ok (Finished.make ~world:outcome.world ~outcome ~close_disposition:None)
+  | Epoch_boundary.Closing { randomness; withdrawals } ->
+      Epoch_close.close outcome.world
+        ~block:(Block_context.block context)
+        ~rewards:(reward_pairs withdrawals)
+        ~randomness
+      |> Result.map_error (fun e -> Epoch_close e)
+      |> Result.map (fun (world, disposition) ->
+             Finished.make ~world ~outcome ~close_disposition:(Some disposition))
