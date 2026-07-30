@@ -32,14 +32,15 @@ type error =
           It is an ERROR and not a skip, and that resolves a question the port
           had left open. Telcoin has both behaviours: the block EXECUTOR raises
           [BlockValidationError::InvalidTx] ([block.rs:879-882]) while the block
-          BUILDER logs it and [continue]s
-          ([crates/tn-reth/src/lib.rs:783-800]), so its assembled transaction
-          list can be shorter than the batch it was handed. This module is the
-          executor, so it refuses; a builder that drops invalid transactions
-          belongs above it and would simply hand this function a shorter list.
-          Mixing the two is exactly what makes a transactions root and a
-          receipts root disagree, which is why {!transactions} lives on the
-          outcome. *)
+          BUILDER logs it and [continue]s at the InvalidTx skip arm
+          ([crates/tn-reth/src/lib.rs:855-866]; the undecodable-transaction
+          drop phase just above it is [lib.rs:821-835]), so its assembled
+          transaction list can be shorter than the batch it was handed. This
+          module is the executor, so it refuses; the builder-side drop layer
+          now exists as [Tn_batch.Batch_payload.executable_txs], which hands
+          this function exactly that shorter list. Mixing the two is exactly
+          what makes a transactions root and a receipts root disagree, which
+          is why {!transactions} lives on the outcome. *)
   | Gas_limit_above_available of {
       index : int;
       transaction_gas_limit : int;

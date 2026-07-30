@@ -62,16 +62,20 @@ type t
 (** An unsigned transaction. Abstract: built by {!legacy}/{!eip2930}/{!eip1559}
     and read through {!variant} and the accessors.
 
-    {2 Two fields are wider here than on the wire}
+    {2 Three field families are wider here than on the wire}
 
-    A [chain_id] is a {!word} but alloy's [ChainId] is a [u64], and a
+    A [chain_id] is a {!word} but alloy's [ChainId] is a [u64]; a
     [gas_limit] is a native [int] (as an allowance is everywhere in this port)
-    where the wire holds a [u64]. So the three constructors accept two things no
-    transaction can carry: a chain id at or above [2^64], and a negative gas
-    limit. Neither raises — the first encodes to a scalar wider than eight bytes,
-    which {!Tx_envelope.decode_2718} then refuses as [Scalar_too_wide]; the
-    second encodes as zero, because {!Tn_rlp.Rlp.encode_nat} maps every value at
-    or below zero to [0x80]. Both therefore produce a payload whose own
+    where the wire holds a [u64]; and each fee cap ([gas_price],
+    [max_priority_fee_per_gas], [max_fee_per_gas]) is a full {!word} where
+    the wire holds a [u128], a sixteen-byte scalar. So the constructors
+    accept three things no transaction can carry: a chain id at or above
+    [2^64], a negative gas limit, and a fee cap at or above [2^128]. None of
+    them raises: the first and third encode to scalars wider than their wire
+    widths (eight and sixteen bytes), which {!Tx_envelope.decode_2718} then
+    refuses as [Scalar_too_wide]; the second encodes as zero, because
+    {!Tn_rlp.Rlp.encode_nat} maps every value at or below zero to [0x80].
+    All three therefore produce a payload whose own
     {!Tx_envelope.encode_2718} bytes this port would not decode back.
 
     They are documented rather than made unrepresentable because no payload on

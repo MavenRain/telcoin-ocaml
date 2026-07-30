@@ -98,6 +98,19 @@ module Worker_id = struct
   let compare = Int.compare
 end
 
+module Base_fee = struct
+  type t = int64
+
+  (* MIN_PROTOCOL_BASE_FEE, alloy-eips-1.8.3 src/eip1559/constants.rs:21. *)
+  let min_protocol = 7L
+  let of_int64 bits = bits
+  let to_int64 t = t
+  let of_int n = if n >= 0 then Some (Int64.of_int n) else None
+  let equal = Int64.equal
+  let compare = Int64.unsigned_compare
+  let to_string t = Printf.sprintf "%Lu" t
+end
+
 module Address = struct
   type t = string
 

@@ -468,11 +468,13 @@ root agreement oracle (step 28) now exist, so agreement is real state-root
 equality rather than `World_state` content equality, and signed envelopes and
 sender recovery (step 29) close the "ECDSA deferred" seam, so a transaction can
 now be decoded from the wire and executed under the sender it actually signed
-with. Blocked on networking: the block-execution layer
-that folds each committed sub-DAG's transactions through `Executor.execute` (the
-executor is pure and ready, but the batch payloads it would fold are
-networking-deferred), plus EIP-4844 blob transactions and
-the blob instructions. Also: the consensus-layer crypto spike (execution-layer
+with. The batch chunk partially closed the next seam: the payload layer is
+now pure-pluggable (`Tn_batch.Output` attaches fetched batch bodies to
+committed output, `Block_plan` derives one block spec per batch,
+`Batch_payload` reproduces TN's drop-and-continue decode), so what stays
+blocked on networking is the batch fetch itself plus the engine linking that
+folds those specs through `Executor.execute`, and EIP-4844 blob transactions
+and the blob instructions. Also: the consensus-layer crypto spike (execution-layer
 secp256k1 is now real and oracle-checked, but `tn_crypto` is still a stub and the
 validator BLS keys are not ported); the pending-certificate fetcher (buffer-and-fetch on a missing parent —
 needs the network layer); the Eio shell; codec/crypto byte-compat alignment.

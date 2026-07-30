@@ -1,0 +1,9 @@
+; The batch seam: the port's one network-ingress boundary. This library sits
+; above BOTH tn_evm and tn_execution (which cannot see each other), so the
+; TN-mirror wire decoder, the batch validator and the payload seam can compose
+; the two without touching any existing dune file.
+(library
+ (name tn_batch)
+ (public_name telcoin_ocaml.batch)
+ (libraries tn_std tn_codec tn_crypto tn_types tn_rlp tn_keccak tn_evm
+   tn_consensus tn_execution zarith))

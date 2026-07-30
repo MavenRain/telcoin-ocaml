@@ -99,6 +99,36 @@ module Worker_id : sig
   val compare : t -> t -> int
 end
 
+(** A per-gas base fee in wei (Rust [u64]), carried as raw u64 bits in
+    [int64] with an unsigned interpretation. Every bit pattern is a legal
+    wire value, so the bits constructor is total. *)
+module Base_fee : sig
+  type t
+
+  val min_protocol : t
+  (** 7 wei: [MIN_PROTOCOL_BASE_FEE], alloy-eips-1.8.3
+      src/eip1559/constants.rs:21 (pinned verbatim in the chunk-34 ground
+      truth); the genesis floor and [Batch.default]'s fee. *)
+
+  val of_int64 : int64 -> t
+  (** Wrap raw u64 bits. Total. *)
+
+  val to_int64 : t -> int64
+  (** The raw u64 bits back. *)
+
+  val of_int : int -> t option
+  (** Convenience constructor; [None] for negatives. *)
+
+  val equal : t -> t -> bool
+  (** Equality on the raw bits. *)
+
+  val compare : t -> t -> int
+  (** Unsigned order ([Int64.unsigned_compare]). *)
+
+  val to_string : t -> string
+  (** Unsigned decimal rendering. *)
+end
+
 (** A 20-byte execution-layer account address (fee recipient). *)
 module Address : sig
   type t

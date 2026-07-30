@@ -30,39 +30,55 @@
     (legacy, no type byte, no outer header), and a single type byte [0x01],
     [0x02] or [0x04] followed by an RLP list of eleven, twelve or thirteen
     items. A type-4 envelope is ONE thirteen-item list covering body {e and}
-    signature — never a nested [\[body, sig\]] — and both framing narrowings
-    below apply to it verbatim, or the round-trip theorem would hold for three
-    types and not four. Everything else is an {!error}, and two of those
-    rejections are a {b deliberate narrowing of what alloy accepts}, not a
-    decoder bug:
+    signature (never a nested [\[body, sig\]]) and the framing rules below
+    apply to it verbatim, or the round-trip theorem would hold for three
+    types and not four. Everything else is an {!error}. Two rejections
+    deserve their standing spelled out, and (chunk-34 correction) those
+    standings are OPPOSITE, not the pair of narrowings this comment once
+    claimed:
 
-    - [0xb8 ‖ len ‖ L], where [L] is a well-formed signed typed transaction. The
-      leading byte is above [0x7f], so there is no type byte, and the payload is
-      an RLP {e string} rather than a list. This port answers {!Outer_string};
-      alloy decodes it to the same transaction, with the same hash, as the
-      canonical [0x01 ‖ L].
-    - [0x00 ‖ L], the [0x00]-tagged legacy form. This port answers
-      {!Zero_type_byte}; alloy decodes it to the same transaction as the untagged
-      list, then re-encodes and re-hashes it {e untagged}, so two byte strings
-      share one transaction hash.
+    - [0xb8 ‖ len ‖ L], where [L] is a well-formed signed typed transaction:
+      {b agreement with alloy on TN's path}, not a narrowing. The leading
+      byte is above [0x7f], so there is no type byte, and the payload is an
+      RLP {e string} rather than a list. This port answers {!Outer_string};
+      alloy's [decode_2718_exact] (what TN's [recover_raw_transaction]
+      calls on batch bytes) rejects the same input with [UnexpectedType(0)],
+      empirically pinned against the vendored crates. Only devp2p's
+      [network_decode], which TN never runs on a batch, accepts the wrapped
+      form.
+    - [0x00 ‖ L], the [0x00]-tagged legacy form: a {b real deliberate
+      narrowing}. Alloy on TN's path decodes it to the same transaction as
+      the untagged list, then re-encodes and re-hashes it {e untagged}, so
+      two byte strings share one transaction hash. This port answers
+      {!Zero_type_byte} and keeps its canonical accept set; the batch
+      boundary compensates: [Tn_batch.Tx_shape] accepts the tagged form
+      exactly as alloy does, and [Tn_batch.Batch_payload] strips the tag
+      before re-entering this decoder. {!Unrepresentable_scalar} is the
+      other compensated narrowing (a nonce or gas limit in [2^62, 2^64)
+      decodes in [Tx_shape]; the payload layer then drops, never errs,
+      mirroring TN's own execute-then-skip).
 
-    Both were confirmed against the pinned crates rather than reasoned about.
-    The cause is that alloy's [TransactionEnvelope] derive tries each variant in
-    declaration order over a buffer it never restores between attempts
+    Both standings were re-confirmed against the pinned crates on TN's
+    actual ingress path rather than reasoned about (an earlier revision of
+    this comment claimed alloy accepts the wrapped form there; that was
+    the devp2p path's behavior, not [decode_2718_exact]'s). The
+    tagged-legacy acceptance is a decoder accident of alloy's
+    [TransactionEnvelope] derive, which tries each variant in declaration
+    order over a buffer it never restores between attempts
     ([alloy-tx-macros-1.8.3/src/expand.rs:564-571], each arm reaching
     [alloy-consensus-1.8.3/src/signed.rs:549-551]), while
-    [alloy-rlp-0.3.13/src/header.rs:21-94] advances the cursor {e before} raising
-    [UnexpectedString]. Reproducing it would mean emulating alloy's cursor state
-    across failed parses — carrying a decoder's accidents, not its rules — so
-    this port declines and says so here rather than in a code comment.
+    [alloy-rlp-0.3.13/src/header.rs:21-94] advances the cursor {e before}
+    raising [UnexpectedString]. Reproducing that here would mean emulating
+    alloy's cursor state across failed parses (carrying a decoder's
+    accidents, not its rules), so this module declines and the TN-mirror
+    batch decoder [Tn_batch.Tx_shape] carries it instead.
 
-    The consequence is real and worth naming: a peer could craft a
-    non-canonically framed envelope that reth would accept and this port would
-    refuse, which on a live network is an availability divergence. It is latent
-    today because nothing in the port is wired to a network path — the README
-    defers networking wholesale. The narrowing also buys a theorem the lenient
-    form cannot have, namely that {!encode_2718} recovers its input byte for byte
-    (see {!decode_2718}).
+    The batch boundary is the port's only network ingress, and it accepts
+    the tagged form through [Tn_batch.Tx_shape] exactly as TN does, so the
+    availability divergence an earlier revision flagged as latent is now
+    discharged where TN semantics actually apply. The narrowing also buys a
+    theorem the lenient form cannot have, namely that {!encode_2718}
+    recovers its input byte for byte (see {!decode_2718}).
 
     Framing is not the only place this decoder is narrower than alloy's, and it
     would be dishonest to imply otherwise. On {e canonically framed} input it
@@ -190,8 +206,9 @@ type error =
           by exactly one byte. *)
   | Outer_string
       (** The envelope, after any type byte, is an RLP byte string rather than a
-          list: the [0xb8 ‖ len ‖ list] framing alloy accepts and this port
-          refuses. See the module comment. *)
+          list: the [0xb8 ‖ len ‖ list] framing devp2p's [network_decode]
+          accepts and both this port and alloy's [decode_2718_exact] (TN's
+          batch path) refuse. See the module comment. *)
   | Unexpected_string
       (** A byte string where a list was required {e inside} the envelope: the
           access list or the authorization list, or one of either's items. *)
@@ -264,9 +281,12 @@ val decode_2718 : string -> (t, error) result
     Routing follows [eip2718.rs:84-125]: a leading byte at or below [0x7f] is a
     type flag and is stripped — [0x01], [0x02] and [0x04] have readers, the rest
     are {!Unknown_type_byte} — and anything else, in practice a list header, is
-    the untagged legacy form. The two non-canonical framings alloy additionally
-    accepts are {!Zero_type_byte} and {!Outer_string}; the module comment says
-    why, and both apply to a type-4 envelope exactly as to the other three.
+    the untagged legacy form. Of the two non-canonical framings, alloy on TN's
+    path additionally accepts only the [0x00]-tagged legacy form
+    ({!Zero_type_byte}, the compensated narrowing); the outer-string wrap it
+    rejects exactly as this decoder does, so {!Outer_string} is agreement. The
+    module comment says why, and both arise for a type-4 envelope exactly as
+    for the other three.
 
     Because the accept set is exactly the canonical framings, the round trip
     holds on the nose: [encode_2718 e = b] for every [b] this function decodes to

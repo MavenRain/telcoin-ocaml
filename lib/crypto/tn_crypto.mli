@@ -23,7 +23,8 @@ module Digest : sig
 
   val hash : string -> t
   (** The protocol hash of a byte string (BLAKE3 in the real implementation;
-      the stub substitutes BLAKE2b-256, which shares the 32-byte width). *)
+      the stub substitutes BLAKE2s-256, which shares the 32-byte width; the
+      stub's [.ml] is authoritative and uses [Digestif.BLAKE2S]). *)
 
   val of_bytes : string -> t option
   (** [Some] only for an input of exactly {!length} bytes. *)
