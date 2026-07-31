@@ -63,7 +63,7 @@ tn_std ──► tn_codec ──► tn_crypto (virtual) ──► tn_types ─�
 | `tn_types` | scalars, ids, digests, `Authority`, `Committee` | ✅ done + tested |
 | `tn_vertex` | `Intent`, `Header`, `Vote`, `Certificate` | ✅ done + tested |
 | `tn_consensus` | DAG, Bullshark commit rule, proposer/voter/node machines | ✅ done + tested (parts 1–3) |
-| `tn_execution` | execution seam: the `Noop` engine folds committed sub-DAGs into the consensus chain (later an OCaml EVM) | ✅ done + tested |
+| `tn_execution` | execution seam: the `Noop` engine folds committed sub-DAGs into the consensus chain; `tn_engine` links the executing implementation | ✅ done + tested |
 | `tn_state` | EVM execution-state foundation: `U256`, `Storage`, `Account`, `World_state`, `Address_word`, and the value-transfer state transition | ✅ done + tested |
 | `tn_evm` | the EVM itself: `Alu` (total opcode arithmetic), the interpreter machine — `Opcode`, `Stack`, `Memory`, `Gas`, `Code`, `Interpreter` — and the host seam — `Env`, `Data`, `Access`, `Sstore_state`, `Refund`, `Effects` | ✅ done + tested |
 | `tn_sim` + `bin/tn_sim` | discrete-event simulator + runnable slice | ✅ done + tested |
@@ -81,8 +81,11 @@ dune build      # builds all libraries
 dune test       # runs all test suites
 ```
 
-Current suite: **274 test cases green** (as `dune test` reports) plus 24 BCS
-golden-vector conformance checks (a standalone runner) — 12 foundation cases
+Current suite: **698 test cases green across 45 executables** (as `dune test`
+reports) plus 24 BCS golden-vector conformance checks (a standalone runner).
+The breakdown below enumerates the first 274 of those, through the host-seam
+chunk; the EVM, trie, batch and engine chunks that followed are described in
+their own sections. Those 274 are — 12 foundation cases
 (crypto, scalars, committee threshold table), 9 vertex/certificate cases (the
 full assembly rejection matrix), 36 consensus cases (vote and parent aggregators, the
 DAG equivocation / parent / garbage-collection invariants from the Rust
@@ -132,6 +135,13 @@ an `SSTORE` loop terminates; and 13 qcheck properties including cold and warm
 `SSTORE` pricing against a revm-derived oracle, `store_bytes` and `MCOPY` against
 a flat-buffer `Bytes.blit` oracle, `Data.read` against a naive padded reader, and
 a reverting run changing nothing).
+
+The engine chunk adds three executables of its own, covering the engine's chain,
+world, window, header and close-block cases and the epoch lifecycle. It also
+extends the payload-seam, state and types suites with the builder's three skip
+shapes and the three total constructors the engine needed. 41 numbered cases in
+all, each one paired with a mutation that has been applied, seen to fail on a
+named assertion, and reverted.
 
 The committee threshold tests pin the exact Narwhal table against the Rust node:
 size 4 → quorum 3 / validity 2; 7 → 5 / 3; 10 → 7 / 4.
@@ -471,9 +481,13 @@ now be decoded from the wire and executed under the sender it actually signed
 with. The batch chunk partially closed the next seam: the payload layer is
 now pure-pluggable (`Tn_batch.Output` attaches fetched batch bodies to
 committed output, `Block_plan` derives one block spec per batch,
-`Batch_payload` reproduces TN's drop-and-continue decode), so what stays
-blocked on networking is the batch fetch itself plus the engine linking that
-folds those specs through `Executor.execute`, and EIP-4844 blob transactions
+`Batch_payload` reproduces TN's drop-and-continue decode). The engine chunk
+then closed it: `Tn_engine.Engine` folds a committed output through those specs
+into executed blocks, chains and threads the world across them, rolls the
+`BLOCKHASH` window, builds the epoch-closing block and seals the epoch behind
+it, so what stays blocked on networking is the batch fetch itself, plus the
+driver that forms the consensus chain and attaches payloads to it, and EIP-4844
+blob transactions
 (the blob *instructions* landed in chunk 35, reading a blob environment TN pins
 by construction). Also: the consensus-layer crypto spike (execution-layer
 secp256k1 is now real and oracle-checked, but `tn_crypto` is still a stub and the

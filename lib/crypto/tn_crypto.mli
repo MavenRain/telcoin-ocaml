@@ -15,11 +15,18 @@
 
 module Digest : sig
   type t
-  (** A fixed 32-byte digest. Abstract so that only {!of_bytes} and {!hash} can
-      manufacture one, keeping the width invariant unbreakable. *)
+  (** A fixed 32-byte digest. Abstract so that only {!zero}, {!of_bytes} and
+      {!hash} can manufacture one, keeping the width invariant unbreakable. *)
 
   val length : int
   (** 32. *)
+
+  val zero : t
+  (** The all-zero digest: {!length} NUL bytes, and the only digest named by a
+      constant rather than by hashing something. It is the port of alloy's
+      [B256::ZERO], which Rust writes into every header slot this chain does not
+      use, and no hash of any pre-image may be substituted for it: the empty
+      hash is a different 32 bytes and would change a block hash. *)
 
   val hash : string -> t
   (** The protocol hash of a byte string (BLAKE3 in the real implementation;

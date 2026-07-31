@@ -186,27 +186,80 @@ let step context previous envelope =
 let block_bloom receipts =
   Bloom.of_logs (List.concat_map (fun entry -> Receipt.logs (snd entry)) receipts)
 
+(* The state the fold starts from and the outcome it ends in, factored out
+   because BOTH entry points below are the same fold over the same [step]: the
+   only thing they differ in is what they do with a [Transaction_rejected]. *)
+let initial_state pre ~context =
+  {
+    index = 0;
+    running_world = Pre_block.world pre;
+    meter = Block_gas.start context;
+    receipts_rev = [];
+    transactions_rev = [];
+  }
+
+let outcome_of final =
+  let receipts = List.rev final.receipts_rev in
+  {
+    world = final.running_world;
+    transactions = List.rev final.transactions_rev;
+    receipts;
+    gas_used = Block_gas.used final.meter;
+    logs_bloom = block_bloom receipts;
+  }
+
 let run_transactions pre ~context envelopes =
-  let initial =
-    Ok
-      {
-        index = 0;
-        running_world = Pre_block.world pre;
-        meter = Block_gas.start context;
-        receipts_rev = [];
-        transactions_rev = [];
-      }
-  in
-  List.fold_left (step context) initial envelopes
-  |> Result.map (fun final ->
-         let receipts = List.rev final.receipts_rev in
-         {
-           world = final.running_world;
-           transactions = List.rev final.transactions_rev;
-           receipts;
-           gas_used = Block_gas.used final.meter;
-           logs_bloom = block_bloom receipts;
-         })
+  List.fold_left (step context) (Ok (initial_state pre ~context)) envelopes
+  |> Result.map outcome_of
+
+module Invalid_tx = struct
+  type t = { index : int; error : Executor.error }
+
+  (* Not in the .mli: the skipping fold below is the only producer, so the
+     record stays constructorless from outside, exactly as [Pre_block.make]. *)
+  let make ~index ~error = { index; error }
+  let index t = t.index
+  let error t = t.error
+
+  let to_string t =
+    Printf.sprintf "transaction %d skipped: %s" t.index
+      (Executor.error_to_string t.error)
+end
+
+(* The one place the two stances differ. Every arm is named and there is no
+   wildcard, so an error class added to [error] later cannot fall into the skip
+   class by inheritance: it has to be classified here. Skipping resumes from
+   [state] itself, which is the state BEFORE the refused transaction, because a
+   transaction [Executor.execute] refuses commits no world, no receipt and no
+   gas. The index the record carries is the one [step] was holding, and
+   advancing it past the skip is what keeps every later index an INPUT
+   position. *)
+let skip_or_stop state skipped_rev = function
+  | Transaction_rejected { index; error } ->
+      Ok
+        ( { state with index = index + 1 },
+          Invalid_tx.make ~index ~error :: skipped_rev )
+  | ( Consensus_root_call _ | Blockhashes_call _ | Recovery _
+    | Gas_limit_above_available _ | Block_gas_exceeded _ | Epoch_close _ ) as
+    fatal ->
+      Error fatal
+
+(* [step] unchanged and unwrapped: the skip decision is taken on its result, so
+   the strict path and the builder path execute the same code up to the point
+   where they disagree. *)
+let skipping_step context previous envelope =
+  let* state, skipped_rev = previous in
+  step context (Ok state) envelope
+  |> Result.fold
+       ~ok:(fun advanced -> Ok (advanced, skipped_rev))
+       ~error:(skip_or_stop state skipped_rev)
+
+let run_transactions_skipping_invalid pre ~context envelopes =
+  List.fold_left (skipping_step context)
+    (Ok (initial_state pre ~context, []))
+    envelopes
+  |> Result.map (fun (final, skipped_rev) ->
+         (outcome_of final, List.rev skipped_rev))
 
 let world o = o.world
 let transactions o = o.transactions

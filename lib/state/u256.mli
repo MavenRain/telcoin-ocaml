@@ -37,6 +37,15 @@ val to_int : t -> int option
     a position no gas allowance could pay to reach, which the caller treats as
     the failure it is. *)
 
+val of_u64_bits : int64 -> t
+(** The 64 raw bits of an [int64] read as an unsigned value in [0, 2^64). Total,
+    with no failing case at all: every [int64] names a word, and bit 63 is an
+    ordinary bit worth [2^63], so [of_u64_bits (-1L)] is [2^64 - 1] rather than
+    zero, an error or a negative anything. OCaml has no unsigned 64-bit integer,
+    so a field alloy types as [u64] (a gas limit, a base fee) reaches this port
+    as the [int64] carrying its bits, and widening it through {!of_int} would
+    refuse exactly the half of the range with bit 63 set. *)
+
 val to_be_bytes : t -> string
 (** The 32-byte big-endian encoding — the canonical wire form and the pre-image a
     later digest will hash. *)

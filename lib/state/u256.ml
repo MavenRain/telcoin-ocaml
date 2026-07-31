@@ -273,3 +273,18 @@ let shr value shift =
   Option.fold ~none:zero
     ~some:(fun n -> of_bits (fun i -> i + n <= 255 && nth_bit value (i + n) = 1))
     (shift_bits shift)
+
+(* The raw bits of a 64-bit word read as unsigned: fold the eight byte positions
+   most significant first, shifting the accumulator up one byte and folding in
+   the next. Every step is total ([of_byte] takes its argument modulo 256), so
+   there is no branch on the sign bit to get wrong: bit 63 is an ordinary bit
+   worth [2^63], and [of_u64_bits (-1L)] is [2^64 - 1]. *)
+let of_u64_bits x =
+  let eight = of_byte 8 in
+  List.fold_left
+    (fun acc shift ->
+      logor (shl acc eight)
+        (of_byte
+           (Int64.to_int (Int64.logand (Int64.shift_right_logical x shift) 0xffL))))
+    zero
+    (List.init 8 (fun i -> 8 * (7 - i)))

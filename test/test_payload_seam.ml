@@ -372,6 +372,31 @@ let t37 () =
   Alcotest.(check bool) "committed_at before the boundary does not" false
     (Output.closes_epoch out_32 ~epoch_boundary:(ts 56L))
 
+(* T-41: the plan-side companion the chunk-36 engine leans on. The engine
+   attaches the epoch commitment to the LAST block of a closing output by
+   SPLITTING the spec list at its last element, so it never consults
+   [Spec.closes_epoch] on a leading spec and a planner that flagged one would go
+   unnoticed there. This is the case that notices. It counts the flags rather
+   than reading a position, and identifies the flagged spec by folding to the
+   last element, so neither the count nor the identity comes from an index. *)
+let t41 () =
+  let specs = batch_specs (plan_ok out_32 ~closes_epoch:true) in
+  Alcotest.(check int) "the fixture is a three-batch output" 3
+    (List.length specs);
+  Alcotest.(check int) "exactly ONE spec closes the epoch" 1
+    (List.length (List.filter Plan.Spec.closes_epoch specs));
+  let last = List.fold_left (fun _ spec -> Some spec) None specs in
+  Alcotest.(check bool) "and it is the last one" true
+    (Option.fold ~none:false ~some:Plan.Spec.closes_epoch last);
+  Alcotest.(check (list bool))
+    "so the flags read false, false, true, in that order"
+    [ false; false; true ]
+    (List.map Plan.Spec.closes_epoch specs);
+  Alcotest.(check int) "and a non-closing output flags nothing at all" 0
+    (List.length
+       (List.filter Plan.Spec.closes_epoch
+          (batch_specs (plan_ok out_32 ~closes_epoch:false))))
+
 (* T38: the drop layer. Kept: F1, the 0x00-tagged F1 (stripped to its
    untagged twin), and F4a, in batch order; dropped: undecodable junk
    (TN drops it too), the nonce-2^62 F2 and the well-formed 4844 F6
@@ -402,6 +427,153 @@ let t38 () =
        (Tn_evm.Tx_envelope.hash stripped)
        (Tn_evm.Tx_envelope.hash_of_2718 (hex F.f1_encoded)))
 
+(* ================================================================== *)
+(* Chunk-36 stage 3: the skip class, one layer below the drop layer.   *)
+(* ================================================================== *)
+
+(* T38's [executable_txs] drops what cannot be decoded or recovered, BEFORE
+   the block runs. What survives it can still be refused by the executor, and
+   a batch that duplicates another worker's transaction is normal operation
+   rather than an incident, so the builder's fold skips it and continues:
+   [Tn_evm.Block_execution.run_transactions_skipping_invalid]. These three
+   cases live here, beside the drop layer they complete, rather than in
+   test_block_execution.ml, whose UNTOUCHED green suite is what proves the new
+   fold was added additively and cost [run_transactions] nothing.
+
+   Every fixture is Block_fixtures', qualified rather than opened so this
+   file's own [get]/[hex]/[nth] keep their meaning. *)
+
+module Bf = Block_fixtures
+module Block_execution = Tn_evm.Block_execution
+module Block_roots = Tn_evm.Block_roots
+module Bloom = Tn_evm.Bloom
+module World_state = Tn_state.World_state
+
+(* One legacy transfer per signer index, all at nonce zero, all cheap enough
+   that three of them fit any block limit these cases set. *)
+let transfer ~signer = Bf.legacy_envelope ~signer ~gas_limit:21_000 ()
+
+let pre_of world ~context =
+  Result.fold ~ok:Fun.id
+    ~error:(fun e ->
+      Alcotest.failf "pre-block: %s" (Block_execution.error_to_string e))
+    (Block_execution.apply_pre_block world ~context)
+
+(* Polymorphic in what the fold returns, so the strict path's [outcome] and the
+   builder path's [outcome * Invalid_tx.t list] share one totaliser. *)
+let exec_ok what result =
+  Result.fold ~ok:Fun.id
+    ~error:(fun e ->
+      Alcotest.failf "%s: %s" what (Block_execution.error_to_string e))
+    result
+
+let refused what result =
+  Result.fold
+    ~ok:(fun _ -> Alcotest.fail what)
+    ~error:Block_execution.error_to_string result
+
+(* T-30: a batch of [good; the same transaction again; good2] builds ONE block
+   of two transactions and two receipts, with one Invalid_tx recorded at INPUT
+   position 1. The strict fold on the very same list still refuses at the same
+   index, with the same rendering it refused with before this stage. *)
+let t30 () =
+  let good = transfer ~signer:71 in
+  let good2 = transfer ~signer:72 in
+  let world = Bf.fund World_state.empty [ good; good2 ] in
+  let context = Bf.context () in
+  let pre = pre_of world ~context in
+  let batch = [ good; good; good2 ] in
+  let result =
+    Block_execution.run_transactions_skipping_invalid pre ~context batch
+  in
+  Alcotest.(check bool) "a duplicate does not stop the block" true
+    (Result.is_ok result);
+  let outcome, skipped = exec_ok "the skipping fold" result in
+  Alcotest.(check int) "two transactions reach the block" 2
+    (List.length (Block_execution.transactions outcome));
+  Alcotest.(check int) "and two receipts" 2
+    (List.length (Block_execution.receipts outcome));
+  Alcotest.(check int) "exactly one skip is recorded" 1 (List.length skipped);
+  let record = nth "the skip record" skipped 0 in
+  Alcotest.(check int) "the skip reports its INPUT position" 1
+    (Block_execution.Invalid_tx.index record);
+  Alcotest.(check string) "and says why it was skipped"
+    "transaction 1 skipped: nonce mismatch (expected 1, got 0)"
+    (Block_execution.Invalid_tx.to_string record);
+  Alcotest.(check string) "the strict fold still refuses the same list"
+    "transaction 1 rejected: nonce mismatch (expected 1, got 0)"
+    (refused "the strict fold accepted a duplicate"
+       (Block_execution.run_transactions pre ~context batch))
+
+(* T-31: the skipped transaction is in no root, no bloom and no gas. Both
+   blocks are built here, so neither side is an assumed constant: the block
+   from [good; duplicate; good2] must be byte-identical, in every field the
+   header commits to, to the block from [good; good2] at the same context. *)
+let t31 () =
+  let good = transfer ~signer:73 in
+  let good2 = transfer ~signer:74 in
+  let world = Bf.fund World_state.empty [ good; good2 ] in
+  let context = Bf.context () in
+  let pre = pre_of world ~context in
+  let skipped_block, skips =
+    exec_ok "the skipping fold"
+      (Block_execution.run_transactions_skipping_invalid pre ~context
+         [ good; good; good2 ])
+  in
+  let clean_block =
+    exec_ok "the two-transaction fold"
+      (Block_execution.run_transactions pre ~context [ good; good2 ])
+  in
+  Alcotest.(check int) "the fixture really did skip one" 1 (List.length skips);
+  (* Not vacuous: an empty block agrees with neither. *)
+  let empty_block =
+    exec_ok "the empty fold" (Block_execution.run_transactions pre ~context [])
+  in
+  Alcotest.(check bool) "the roots under test are not the empty ones" false
+    (String.equal
+       (Block_roots.transactions_root_of
+          (Block_execution.transactions clean_block))
+       (Block_roots.transactions_root_of
+          (Block_execution.transactions empty_block)));
+  Alcotest.(check string) "transactions root ignores the skipped envelope"
+    (Block_roots.transactions_root_of
+       (Block_execution.transactions clean_block))
+    (Block_roots.transactions_root_of
+       (Block_execution.transactions skipped_block));
+  Alcotest.(check string) "receipts root ignores it"
+    (Block_roots.receipts_root (Block_execution.receipts clean_block))
+    (Block_roots.receipts_root (Block_execution.receipts skipped_block));
+  Alcotest.(check bool) "the logs bloom ignores it" true
+    (Bloom.equal
+       (Block_execution.logs_bloom clean_block)
+       (Block_execution.logs_bloom skipped_block));
+  Alcotest.(check int) "the skip burns no block gas"
+    (Block_execution.gas_used clean_block)
+    (Block_execution.gas_used skipped_block);
+  Alcotest.(check string) "and commits no state"
+    (Block_roots.state_root (Block_execution.world clean_block))
+    (Block_roots.state_root (Block_execution.world skipped_block))
+
+(* T-32: Gas_limit_above_available is telcoin's own pre-check, not an
+   InvalidTx, so it stays FATAL in the builder fold too. The batch skips one
+   transaction before reaching it, so the index the error reports is also the
+   proof that the counter counts INPUTS: a success counter would say 1. *)
+let t32_fatal () =
+  let good = transfer ~signer:75 in
+  let greedy = Bf.legacy_envelope ~signer:76 ~gas_limit:100_001 () in
+  let world = Bf.fund World_state.empty [ good; greedy ] in
+  let context = Bf.context ~gas_limit:100_000 () in
+  let pre = pre_of world ~context in
+  let result =
+    Block_execution.run_transactions_skipping_invalid pre ~context
+      [ good; good; greedy ]
+  in
+  Alcotest.(check bool) "the gas-limit pre-check is fatal, not a skip" true
+    (Result.is_error result);
+  Alcotest.(check string) "it names the INPUT position and the REMAINDER"
+    "transaction 2 wants 100001 gas but only 79000 remain in the block"
+    (refused "the greedy transaction was skipped" result)
+
 let () =
   Alcotest.run "payload_seam"
     [
@@ -416,7 +588,16 @@ let () =
           Alcotest.test_case "T35 spec fields + mix_hash XOR" `Quick t35;
           Alcotest.test_case "T36 empty-output plan" `Quick t36;
           Alcotest.test_case "T37 close on last spec + >= boundary" `Quick t37;
+          Alcotest.test_case
+            "T-41 the plan flags the LAST spec and no other" `Quick t41;
         ] );
       ( "payload",
         [ Alcotest.test_case "T38 executable_txs drop layer" `Quick t38 ] );
+      ( "skip",
+        [
+          Alcotest.test_case "T30 an InvalidTx is skipped, not fatal" `Quick t30;
+          Alcotest.test_case "T31 a skip enters no root and no gas" `Quick t31;
+          Alcotest.test_case "T32 Gas_limit_above_available stays fatal" `Quick
+            t32_fatal;
+        ] );
     ]

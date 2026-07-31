@@ -60,9 +60,9 @@ let run ?(seed = 42L) ?(horizon = 20_000) n =
 (* The genesis engine has produced nothing and sits at height zero. *)
 let test_genesis_engine () =
   Alcotest.(check bool) "genesis engine has no tip" true
-    (Option.is_none (Noop.tip Noop.genesis));
+    (Option.is_none (Noop.tip (Noop.create ())));
   Alcotest.(check int) "genesis height is zero" 0
-    (Cb.Number.to_int (Noop.height Noop.genesis))
+    (Cb.Number.to_int (Noop.height (Noop.create ())))
 
 (* The first committed sub-DAG produces block number one, linked to the anchor. *)
 let test_first_block () =
@@ -70,7 +70,8 @@ let test_first_block () =
   let self = node0 committee in
   let sd = get (List.nth_opt (Sim.committed sim self) 0) in
   Result.fold
-    ~ok:(fun (engine, block) ->
+    ~ok:(fun (engine, blocks) ->
+      let block = get (List.nth_opt blocks 0) in
       Alcotest.(check int) "first block number is one" 1
         (Cb.Number.to_int (Cb.number block));
       Alcotest.(check bool) "first block links to the genesis anchor" true
@@ -80,7 +81,51 @@ let test_first_block () =
       Alcotest.(check int) "engine height advanced to one" 1
         (Cb.Number.to_int (Noop.height engine)))
     ~error:Tn_execution.Nothing.absurd
-    (Noop.execute Noop.genesis sd)
+    (Noop.execute (Noop.create ()) sd)
+
+(* The seam now hands back a LIST of blocks per commit, because an engine that
+   executes may build none of them or many. Noop is not such an engine: it folds
+   the consensus chain, so it produces exactly one block per committed sub-DAG,
+   its height stays the CONSENSUS chain's number, and the chain the simulator
+   derives from it still has one block per commit. *)
+let test_one_block_per_commit () =
+  let sim, committee = run 4 in
+  let self = node0 committee in
+  let log = Sim.committed sim self in
+  let sd = get (List.nth_opt log 0) in
+  let sd2 = get (List.nth_opt log 1) in
+  let engine1 =
+    Result.fold
+      ~ok:(fun (engine, blocks) ->
+        Alcotest.(check int) "the first commit yields exactly one block" 1
+          (List.length blocks);
+        Alcotest.(check bool) "that one block is the engine's new tip" true
+          (Option.equal Cb.equal (Noop.tip engine) (List.nth_opt blocks 0));
+        (* The height is a [Consensus_block.Number.t], not an execution block
+           number: it is the number of the block just produced. *)
+        Alcotest.(check bool) "height is the produced block's consensus number"
+          true
+          (Option.fold ~none:false
+             ~some:(fun b -> Cb.Number.equal (Noop.height engine) (Cb.number b))
+             (List.nth_opt blocks 0));
+        engine)
+      ~error:Tn_execution.Nothing.absurd
+      (Noop.execute (Noop.create ()) sd)
+  in
+  (* A second commit is one more block, not a re-issue of the chain so far. *)
+  Result.fold
+    ~ok:(fun (_engine, blocks) ->
+      Alcotest.(check int) "the second commit yields exactly one block" 1
+        (List.length blocks))
+    ~error:Tn_execution.Nothing.absurd
+    (Noop.execute engine1 sd2);
+  (* And the derived chain, folded over the whole committed log, is still one
+     block per commit rather than a flattening that loses or duplicates any. *)
+  Alcotest.(check bool) "the derived chain is non-empty" true
+    (Sim.executed sim self <> []);
+  Alcotest.(check int) "the derived chain has one block per commit"
+    (Sim.commit_count sim self)
+    (List.length (Sim.executed sim self))
 
 (* The derived chain is contiguous, one block per commit, each linking to its
    predecessor from the genesis anchor. *)
@@ -189,6 +234,8 @@ let () =
           Alcotest.test_case "genesis engine is empty" `Quick test_genesis_engine;
           Alcotest.test_case "first block is number one off the anchor" `Quick
             test_first_block;
+          Alcotest.test_case "one commit yields exactly one block" `Quick
+            test_one_block_per_commit;
           Alcotest.test_case "chain links block to block" `Quick test_chain_links;
           Alcotest.test_case "digest is deterministic and sensitive" `Quick
             test_digest_deterministic;

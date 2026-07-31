@@ -2,6 +2,7 @@ module type S = sig
   type t
 
   val domain : string
+  val zero : t
   val of_digest : Tn_crypto.Digest.t -> t
   val to_digest : t -> Tn_crypto.Digest.t
   val to_hex : t -> string
@@ -18,6 +19,10 @@ end) : S = struct
   type t = Tn_crypto.Digest.t
 
   let domain = D.domain
+
+  (* Written once here, so no domain can drift to a different constant: the
+     absent-value slot is the same 32 NUL bytes whatever the type says. *)
+  let zero = Tn_crypto.Digest.zero
   let of_digest d = d
   let to_digest t = t
   let to_hex = Tn_crypto.Digest.to_hex

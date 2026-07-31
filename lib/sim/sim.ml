@@ -250,7 +250,9 @@ let commit_count t authority = List.length (committed t authority)
 
 (* Fold the Noop execution engine over an authority's committed output to form
    its consensus chain. The engine cannot fail ([error] is uninhabited), so
-   [Nothing.absurd] discharges the impossible error branch of each step. This is
+   [Nothing.absurd] discharges the impossible error branch of each step. Each
+   step returns the blocks it produced in chain order, so they are reversed onto
+   the accumulator and the whole accumulator is reversed once at the end. This is
    a pure function of the committed prefix, computed on demand here rather than
    run in the event loop, so the honest run stays byte-for-byte deterministic. *)
 let executed t authority =
@@ -258,10 +260,10 @@ let executed t authority =
     List.fold_left
       (fun (engine, blocks) sd ->
         Result.fold
-          ~ok:(fun (engine, block) -> (engine, block :: blocks))
+          ~ok:(fun (engine, produced) -> (engine, List.rev_append produced blocks))
           ~error:Tn_execution.Nothing.absurd
           (Tn_execution.Engine.Noop.execute engine sd))
-      (Tn_execution.Engine.Noop.genesis, [])
+      (Tn_execution.Engine.Noop.create (), [])
       (committed t authority)
   in
   List.rev blocks

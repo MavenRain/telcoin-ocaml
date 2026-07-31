@@ -1,0 +1,11 @@
+; The execution engine: the library that folds one committed consensus output
+; into the execution blocks it produces. It sits above tn_batch (which already
+; sits above both tn_evm and tn_execution), and nothing but the test suite sits
+; above it. Every library any module here names is listed explicitly, as every
+; other library in this repo does: the implicit transitive closure is never
+; relied on.
+(library
+ (name tn_engine)
+ (public_name telcoin_ocaml.engine)
+ (libraries tn_std tn_types tn_crypto tn_keccak tn_hash32 tn_state tn_evm
+   tn_consensus tn_execution tn_batch zarith))

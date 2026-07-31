@@ -51,6 +51,34 @@ let test_u256_of_int () =
   Alcotest.(check bool) "of_int rejects negatives" true
     (Option.is_none (U256.of_int (-1)))
 
+(* [of_u64_bits] reads all 64 bits as magnitude and never as a sign. The
+   sentinel is [-1L], whose word is [2^64 - 1]: every route through a native
+   [int] (63 bits, and whose negatives [of_int] refuses outright) answers
+   something else, so this row is the one that tells a bit reader from an
+   integer converter. [Int64.min_int] states the same point from the other side,
+   as a single set bit at position 63. *)
+let test_u256_of_u64_bits () =
+  let low_64 digits = String.make (64 - String.length digits) '0' ^ digits in
+  Alcotest.(check string) "-1L is 2^64-1, not zero and not negative"
+    (low_64 (String.make 16 'f'))
+    (U256.to_hex (U256.of_u64_bits (-1L)));
+  Alcotest.(check string) "min_int is 2^63, a single set bit at 63"
+    (low_64 ("8" ^ String.make 15 '0'))
+    (U256.to_hex (U256.of_u64_bits Int64.min_int));
+  Alcotest.(check string) "0L is zero" zeros (U256.to_hex (U256.of_u64_bits 0L));
+  Alcotest.(check string) "a mainnet gas limit is itself"
+    (U256.to_hex (u 30_000_000))
+    (U256.to_hex (U256.of_u64_bits 30_000_000L));
+  (* A gas limit wider than 32 bits narrows back to the same number, which is the
+     round trip a header's [gas_limit] field makes. *)
+  Alcotest.(check bool) "a gas limit above 2^32 round-trips verbatim" true
+    (Option.equal Int.equal
+       (U256.to_int (U256.of_u64_bits 40_000_000_000L))
+       (Some 40_000_000_000));
+  Alcotest.(check string) "the bits land big-endian in the low eight bytes"
+    (low_64 "0123456789abcdef")
+    (U256.to_hex (U256.of_u64_bits 0x0123456789abcdefL))
+
 (* The byte and hex codecs round-trip and reject malformed input. *)
 let test_u256_codec () =
   let sample = hex "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff" in
@@ -444,6 +472,8 @@ let () =
           Alcotest.test_case "constants render to their byte layout" `Quick
             test_u256_constants;
           Alcotest.test_case "of_int places bytes big-endian" `Quick test_u256_of_int;
+          Alcotest.test_case "of_u64_bits is unsigned and total" `Quick
+            test_u256_of_u64_bits;
           Alcotest.test_case "byte and hex codecs round-trip" `Quick test_u256_codec;
           Alcotest.test_case "addition wraps and checks" `Quick test_u256_add;
           Alcotest.test_case "subtraction wraps and checks" `Quick test_u256_sub;

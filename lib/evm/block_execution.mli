@@ -40,7 +40,12 @@ type error =
           now exists as [Tn_batch.Batch_payload.executable_txs], which hands
           this function exactly that shorter list. Mixing the two is exactly
           what makes a transactions root and a receipts root disagree, which
-          is why {!transactions} lives on the outcome. *)
+          is why {!transactions} lives on the outcome.
+
+          Each stance now has a fold of its own, and the pair is why this
+          constructor did not have to become two: {!run_transactions} returns
+          this error and stops, {!run_transactions_skipping_invalid} turns the
+          very same value into an {!Invalid_tx.t} and continues. *)
   | Gas_limit_above_available of {
       index : int;
       transaction_gas_limit : int;
@@ -308,6 +313,74 @@ val run_transactions :
     world has not had the epoch-close writes applied, and
     {!Block_header.assemble} takes a {!Finished.t}, whose only producer is
     {!finish}, so that world cannot be rooted without them. *)
+
+(** One transaction the builder's fold declined to run, as a value rather than
+    as a log line. Telcoin's builder matches [BlockValidationError::InvalidTx],
+    logs it and [continue]s ([crates/tn-reth/src/lib.rs:855-866]); a caller
+    that only received a shorter list could not say which transaction went
+    missing, and a cross-worker duplicate is normal operation rather than an
+    incident, so the record is kept. *)
+module Invalid_tx : sig
+  type t
+  (** A skipped transaction. Abstract and constructorless, the {!Pre_block.t}
+      idiom: {!run_transactions_skipping_invalid} is its only producer, so a
+      record of a skip cannot exist where no fold skipped anything. *)
+
+  val index : t -> int
+  (** Its position in the list HANDED IN, not in the block that came out. The
+      fold counts inputs rather than commits, so a second skip reports 1
+      whatever ran between the two, and the number stays a handle on the
+      envelope the caller submitted. An index into the resulting block would
+      name a different transaction, or none. *)
+
+  val error : t -> Executor.error
+  (** Why {!Executor.execute} refused it, carried whole. Every constructor of
+      {!Executor.error} is one of revm's [InvalidTransaction] cases, which is
+      what makes the whole {!Transaction_rejected} class the skip class and
+      leaves nothing here to re-classify. *)
+
+  val to_string : t -> string
+  (** Render a skip as a short human-readable string, for diagnostics and test
+      failure messages, in {!error_to_string}'s register. *)
+end
+
+val run_transactions_skipping_invalid :
+  Pre_block.t ->
+  context:Block_context.t ->
+  Tx_envelope.t list ->
+  (outcome * Invalid_tx.t list, error) result
+(** {!run_transactions} with telcoin's BUILDER stance in place of its EXECUTOR
+    one, over the same fold and the same step.
+
+    A transaction {!Executor.execute} refuses is recorded as an {!Invalid_tx.t}
+    and skipped, and the fold continues from the running world, meter and
+    receipts it had BEFORE that transaction, which is exact rather than
+    approximate: a rejected transaction commits no world, no receipt and no
+    gas, so there is nothing to roll back. The other six arms of {!error} stay
+    fatal and are matched by name, {!Gas_limit_above_available} included: it is
+    telcoin's own pre-check ([block.rs:827-843]) rather than an
+    [InvalidTransaction], and a block that quietly dropped the transaction it
+    fired on would disagree with the same block built by a node that did not.
+    {!Recovery} stays fatal too, because the builder's drop of an undecodable
+    transaction happens strictly earlier, in
+    [Tn_batch.Batch_payload.executable_txs], and a signature that reached this
+    fold has already been recovered once.
+
+    Both entry points exist because the two stances are both telcoin's and
+    neither subsumes the other: replaying a block that was already built must
+    refuse a transaction the block committed to, and building one from a batch
+    a proposer chose must not halt the node over a duplicate.
+
+    {b Divergence, stated once here:} a skipped transaction is EXCLUDED from
+    {!transactions}, so it enters neither the block's transactions root nor its
+    receipts root. Telcoin's builder pushes into the body through reth's
+    [BlockBuilder::execute_transaction], and whether reth pushes before or only
+    after a successful execution is not readable from this tree: reth is not
+    vendored here, only the alloy and revm crates it builds on. If it pushes
+    first, every block that skips a cross-worker duplicate commits a different
+    transactions root, and therefore a different block hash, from the one
+    telcoin commits. Settling it needs a differential run against a Rust node
+    over a corpus that contains such a duplicate. *)
 
 val execute :
   Tn_state.World_state.t ->

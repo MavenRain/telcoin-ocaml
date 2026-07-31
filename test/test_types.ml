@@ -55,6 +55,30 @@ let test_digest_determinism () =
   Alcotest.(check bool) "distinct inputs differ" false
     (Tn_crypto.Digest.equal a (Tn_crypto.Digest.hash "y"))
 
+(* [Digest.zero] is a constant, not the hash of anything. An epoch-closing block
+   has no batch behind it and writes this into the header's ommers slot, so the
+   bytes are consensus-visible: the empty hash would be a different block hash.
+   The negative row is the one that matters, since [hash ""] is also a perfectly
+   well-formed 32 bytes and passes every width check. *)
+let test_digest_zero () =
+  let nuls = String.make Tn_crypto.Digest.length '\000' in
+  Alcotest.(check string) "zero is thirty-two NUL bytes" nuls
+    (Tn_crypto.Digest.to_bytes Tn_crypto.Digest.zero);
+  Alcotest.(check string) "and renders as sixty-four hex zeros" (String.make 64 '0')
+    (Tn_crypto.Digest.to_hex Tn_crypto.Digest.zero);
+  Alcotest.(check bool) "zero is NOT the hash of the empty string" false
+    (Tn_crypto.Digest.equal Tn_crypto.Digest.zero (Tn_crypto.Digest.hash ""));
+  (* Each domain newtype wraps the same constant: the tag separates pre-images,
+     and an absent value has no pre-image to separate. *)
+  Alcotest.(check string) "Batch_digest.zero carries the same bytes" nuls
+    (Tn_crypto.Digest.to_bytes (Digests.Batch_digest.to_digest Digests.Batch_digest.zero));
+  Alcotest.(check bool) "Batch_digest.zero is of_digest of it" true
+    (Digests.Batch_digest.equal Digests.Batch_digest.zero
+       (Digests.Batch_digest.of_digest Tn_crypto.Digest.zero));
+  Alcotest.(check string) "Output_digest.zero agrees, domain tag and all"
+    (Digests.Batch_digest.to_hex Digests.Batch_digest.zero)
+    (Digests.Output_digest.to_hex Digests.Output_digest.zero)
+
 (* ---- scalars ---- *)
 
 let test_round () =
@@ -126,6 +150,8 @@ let () =
           Alcotest.test_case "sign/verify" `Quick test_sign_verify;
           Alcotest.test_case "aggregate" `Quick test_aggregate;
           Alcotest.test_case "digest determinism" `Quick test_digest_determinism;
+          Alcotest.test_case "the zero digest is thirty-two NUL bytes" `Quick
+            test_digest_zero;
         ] );
       ( "scalars",
         [

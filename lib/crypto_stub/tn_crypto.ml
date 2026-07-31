@@ -15,6 +15,10 @@ module Digest = struct
   type t = string (* exactly H.digest_size = 32 bytes, by construction *)
 
   let length = H.digest_size
+
+  (* B256::ZERO, built from the width and never from a pre-image: the hash of
+     the empty string is a different 32 bytes and is not a substitute for it. *)
+  let zero = String.make length '\000'
   let hash s = H.to_raw_string (H.digest_string s)
   let of_bytes s = if String.length s = length then Some s else None
   let to_bytes t = t

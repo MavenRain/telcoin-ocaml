@@ -13,6 +13,15 @@ module type S = sig
   val domain : string
   (** The domain-separation tag hashed ahead of this digest's pre-image. *)
 
+  val zero : t
+  (** The all-zero digest of this domain, wrapping {!Tn_crypto.Digest.zero}. The
+      domain tag is deliberately absent from it: this is not the digest of an
+      empty thing, it is the absent-value constant Rust writes as [B256::ZERO],
+      so every domain's [zero] carries the same 32 NUL bytes and only the type
+      tells them apart. It exists because a header slot this chain leaves unused
+      (the ommers hash of an epoch-closing block, which has no batch behind it)
+      must hold that exact constant, and no pre-image hashes to it. *)
+
   val of_digest : Tn_crypto.Digest.t -> t
   val to_digest : t -> Tn_crypto.Digest.t
   val to_hex : t -> string
