@@ -30,9 +30,13 @@ let world o = o.world
 let world_keeping_all_but_system o = o.world_keeping_all_but_system
 
 (* Telcoin's two [core::mem::swap]s ([evm/mod.rs:194-212]) expressed as a
-   rebuild, because [Env.Block] has no updater. The other six fields are carried
-   through by their own accessors, so a field added to [Env.Block] is a compile
-   error here rather than a silently dropped one. *)
+   rebuild, because [Env.Block] has no updater. The other eight fields are
+   carried through by their own accessors, so a field added to [Env.Block] is a
+   compile error here rather than a silently dropped one. TN's swaps touch only
+   [block.gas_limit], [block.basefee] and [cfg.disable_nonce_check]
+   ([evm/mod.rs:198-203]); the blob env is not among them, so [blob_gasprice]
+   rides through untouched and a frame inside a system call reads the same
+   value as the enclosing block. *)
 let system_block block =
   Env.Block.make
     ~coinbase:(Env.Block.coinbase block)
@@ -42,6 +46,7 @@ let system_block block =
     ~gas_limit:gas_limit_word ~basefee:U256.zero
     ~basefee_address:(Env.Block.basefee_address block)
     ~chain_id:(Env.Block.chain_id block)
+    ~blob_gasprice:(Env.Block.blob_gasprice block)
     ~hashes:(Env.Block.hashes block)
 
 (* The [retain]: the post-call world is the PRE-call world with exactly the

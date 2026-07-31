@@ -189,13 +189,18 @@ val run :
     {2 The block environment is rebuilt, not assumed harmless}
 
     [block] is rebuilt through {!Env.Block.make} with [gas_limit] set to
-    {!gas_limit} and [basefee] set to zero, carrying the other six fields
+    {!gas_limit} and [basefee] set to zero, carrying the other eight fields
     through unchanged; this reproduces telcoin's [core::mem::swap] pair
     ([evm/mod.rs:194-212]). Both replacements are readable INSIDE the frame,
     [GASLIMIT] returns 30M and [BASEFEE] returns 0, so this is a semantic step
     and not a validation trick, even though neither pinned bytecode contains
-    either opcode today. The third swap, [cfg.disable_nonce_check], is
+    either opcode today. The blob env is deliberately NOT among the swaps
+    ([evm/mod.rs:198-203]), so [BLOBBASEFEE] is readable inside a system frame
+    and reads the carried {!Env.Block.blob_gasprice}, the same consensus
+    constant the enclosing block was built with
+    ({!Env.Block.consensus_blob_gasprice}). The third swap,
+    [cfg.disable_nonce_check], is
     reproduced by the live-nonce choice above: an equality that always holds is
     a disabled check. {!Env.Block} has no [with_] updater, so a rebuild is the
-    only expression of this, and it is total because all eight accessors exist
-    ([env.mli:53-78]). *)
+    only expression of this, and it is total because all ten accessors exist
+    ([env.mli:84-141]). *)

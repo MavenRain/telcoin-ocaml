@@ -24,6 +24,14 @@ let jumpdest = 1
    coincidence would quietly become a claim if [low] were reused for it. *)
 let selfbalance = 5
 
+(* The blob readers, priced on their own for the same reason as {!selfbalance}:
+   revm's table writes both entries as literals 3 and 2
+   ([instructions.rs:193-194]), not as the [VERYLOW] and [BASE] names the values
+   coincide with ([cfg/gas.rs:9,12]), and a coincidence must not quietly become
+   a claim. *)
+let blobhash = 3
+let blobbasefee = 2
+
 (* Berlin's warm access price, and the static cost of [SLOAD] and [BALANCE] from
    Berlin on ([revm-context-interface] [cfg/gas.rs:100], overriding the table at
    [revm-interpreter] [instructions.rs:118-119]). *)
@@ -99,6 +107,8 @@ let static_cost = function
   | Opcode.Timestamp | Opcode.Number | Opcode.Prevrandao | Opcode.Gaslimit
   | Opcode.Chainid | Opcode.Basefee | Opcode.Returndatasize ->
       base
+  | Opcode.Blobhash -> blobhash
+  | Opcode.Blobbasefee -> blobbasefee
   | Opcode.Selfbalance -> selfbalance
   (* Berlin overrides, not tier members: EIP-2929 moved most of what [BALANCE]
      and [SLOAD] used to cost into the cold surcharge, leaving the warm 100 here

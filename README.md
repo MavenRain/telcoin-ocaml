@@ -474,7 +474,8 @@ committed output, `Block_plan` derives one block spec per batch,
 `Batch_payload` reproduces TN's drop-and-continue decode), so what stays
 blocked on networking is the batch fetch itself plus the engine linking that
 folds those specs through `Executor.execute`, and EIP-4844 blob transactions
-and the blob instructions. Also: the consensus-layer crypto spike (execution-layer
+(the blob *instructions* landed in chunk 35, reading a blob environment TN pins
+by construction). Also: the consensus-layer crypto spike (execution-layer
 secp256k1 is now real and oracle-checked, but `tn_crypto` is still a stub and the
 validator BLS keys are not ported); the pending-certificate fetcher (buffer-and-fetch on a missing parent —
 needs the network layer); the Eio shell; codec/crypto byte-compat alignment.

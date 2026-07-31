@@ -50,7 +50,7 @@ let block_of ~coinbase ~basefee =
   Env.Block.make ~coinbase ~timestamp:(u 1_600_000_000) ~number:(u 1000)
     ~prevrandao:U256.zero ~gas_limit:(u 30_000_000) ~basefee:(u basefee)
     ~basefee_address:Tn_evm.System_contracts.governance_safe_address ~chain_id:(u 1)
-    ~hashes:Block_hashes.empty
+    ~blob_gasprice:Env.Block.consensus_blob_gasprice ~hashes:Block_hashes.empty
 
 let sender = address_of "a1"
 let target = address_of "b2"

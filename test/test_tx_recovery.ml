@@ -260,7 +260,9 @@ let test_end_to_end () =
             ~number:(Tx_vectors.w_of_int 1000) ~prevrandao:U256.zero
             ~gas_limit:(Tx_vectors.w_of_int 30_000_000)
             ~basefee:(Tx_vectors.w_of_int 1_000_000_000) ~basefee_address:Tn_evm.System_contracts.governance_safe_address
-            ~chain_id:(Tx_vectors.w_of_int 1) ~hashes:Block_hashes.empty
+            ~chain_id:(Tx_vectors.w_of_int 1)
+            ~blob_gasprice:Env.Block.consensus_blob_gasprice
+            ~hashes:Block_hashes.empty
         in
         Result.fold ~error:Executor.error_to_string
           ~ok:(fun (receipt, world') ->

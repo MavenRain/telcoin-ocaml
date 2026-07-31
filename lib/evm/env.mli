@@ -77,6 +77,7 @@ module Block : sig
     basefee:word ->
     basefee_address:Units.Address.t ->
     chain_id:word ->
+    blob_gasprice:word ->
     hashes:Block_hashes.t ->
     t
 
@@ -106,6 +107,36 @@ module Block : sig
   val chain_id : t -> word
   (** [CHAINID]. Held here rather than in a configuration record of its own —
       see this module's header. *)
+
+  val blob_gasprice : t -> word
+  (** [BLOBBASEFEE] ([0x4a]): the blob base fee of this block. Named for revm's
+      accessor chain [Host::blob_gasprice -> block().blob_gasprice()], which the
+      interpreter's one-line projection collapses, exactly as [BASEFEE] and
+      [CHAINID] already do. It is a required field with no default so that every
+      construction site binds it consciously; the value a consensus-faithful
+      caller binds is {!consensus_blob_gasprice}. *)
+
+  val consensus_blob_gasprice : word
+  (** [2^128 - 1], the value TN consensus execution runs under, and the port's
+      single two-surface divergence, documented here once.
+
+      TN's one production execution path binds the blob env at construction:
+      engine [execute_payload -> build_block_from_batch_payload ->
+      builder_for_next_block -> next_evm_env] hard-codes
+      [BlobExcessGasAndPrice { excess_blob_gas: 0, blob_gasprice: u128::MAX }]
+      ([config.rs:139-142], via [lib.rs:801-802]), so [BLOBBASEFEE] pushes
+      [u128::MAX] during all consensus execution, leader and follower alike.
+
+      TN's read-only surface, [evm_env(header)] (RPC and system reads, never
+      consensus), instead derives the price from the header's hard-coded
+      [excess_blob_gas = 0]: [calc_blob_fee(0) = fake_exponential(1, 0,
+      5_007_716) = 1] wei. That surface has no image in this port and no
+      [fake_exponential] is ported; the 1-wei value lives only in this
+      paragraph. Consensus state is only ever produced under [u128::MAX].
+
+      System calls observe this same value: [transact_system_call] swaps only
+      [gas_limit], [basefee] and [disable_nonce_check] ([evm/mod.rs:198-203]),
+      so the blob env rides through {!System_call}'s rebuild untouched. *)
 
   val hashes : t -> Block_hashes.t
   (** What [BLOCKHASH] can see: the hashes of this block's recent ancestors.

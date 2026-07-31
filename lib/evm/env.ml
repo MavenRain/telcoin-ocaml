@@ -13,11 +13,12 @@ module Block = struct
     basefee : word;
     basefee_address : Units.Address.t;
     chain_id : word;
+    blob_gasprice : word;
     hashes : Block_hashes.t;
   }
 
   let make ~coinbase ~timestamp ~number ~prevrandao ~gas_limit ~basefee
-      ~basefee_address ~chain_id ~hashes =
+      ~basefee_address ~chain_id ~blob_gasprice ~hashes =
     {
       coinbase;
       timestamp;
@@ -27,6 +28,7 @@ module Block = struct
       basefee;
       basefee_address;
       chain_id;
+      blob_gasprice;
       hashes;
     }
 
@@ -38,7 +40,14 @@ module Block = struct
   let basefee t = t.basefee
   let basefee_address t = t.basefee_address
   let chain_id t = t.chain_id
+  let blob_gasprice t = t.blob_gasprice
   let hashes t = t.hashes
+
+  (* TN's one production path hard-codes [BlobExcessGasAndPrice
+     { excess_blob_gas: 0, blob_gasprice: u128::MAX }] ([config.rs:139-142]).
+     [2^128 - 1] exceeds the native [int], so the value cannot go through
+     [U256.of_int]; [U256.sub] is wrapping and exact here since [2^128 >= 1]. *)
+  let consensus_blob_gasprice = U256.sub (U256.two_pow 128) U256.one
 
   let equal a b =
     Units.Address.equal a.coinbase b.coinbase
@@ -49,6 +58,7 @@ module Block = struct
     && U256.equal a.basefee b.basefee
     && Units.Address.equal a.basefee_address b.basefee_address
     && U256.equal a.chain_id b.chain_id
+    && U256.equal a.blob_gasprice b.blob_gasprice
     && Block_hashes.equal a.hashes b.hashes
 end
 

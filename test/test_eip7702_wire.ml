@@ -824,7 +824,8 @@ let test_set_code_create_is_unobservable () =
       ~timestamp:(w 1_600_000_000) ~number:(w 1000) ~prevrandao:U256.zero
       ~gas_limit:(w 30_000_000) ~basefee:U256.zero
       ~basefee_address:Tn_evm.System_contracts.governance_safe_address
-      ~chain_id:chain_one ~hashes:Block_hashes.empty
+      ~chain_id:chain_one ~blob_gasprice:Env.Block.consensus_blob_gasprice
+      ~hashes:Block_hashes.empty
   in
   let run tx =
     Result.fold

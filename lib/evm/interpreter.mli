@@ -164,9 +164,9 @@ type error =
           to be an offset at all. *)
   | Invalid_opcode of int
       (** The byte at the program counter names no instruction this interpreter
-          runs: an unassigned byte, the designated invalid instruction [0xfe], or
-          one of the opcodes deferred to a later chunk. revm separates the first
-          two ([OpcodeNotFound] and [InvalidFEOpcode]); both are exceptional
+          runs: an unassigned byte ([0xef] included, on purpose) or the
+          designated invalid instruction [0xfe]. revm separates the two
+          ([OpcodeNotFound] and [InvalidFEOpcode]); both are exceptional
           halts, and so is this. *)
   | Offset_too_large
       (** A memory offset or length this machine will not reach: one too large to

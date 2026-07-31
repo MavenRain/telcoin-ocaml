@@ -77,7 +77,8 @@ let base_env =
          ~prevrandao:
            (hex "4b7e19a2c05d38f61ea4907c2d5b8e3f016ca94d7b2e58301fc6a9d4e07b3521")
          ~gas_limit:(u 25_000_000) ~basefee:(u 3_500_000_000) ~basefee_address:Tn_evm.System_contracts.governance_safe_address
-         ~chain_id:(u 4_321) ~hashes:Tn_evm.Block_hashes.empty)
+         ~chain_id:(u 4_321) ~blob_gasprice:Env.Block.consensus_blob_gasprice
+         ~hashes:Tn_evm.Block_hashes.empty)
     ~tx:
       (Env.Tx.make ~origin:(address_of 0x01) ~gas_price:(u 9_000_000_000)
          ~access_list:[])
@@ -319,6 +320,8 @@ let test_gas_static_cost () =
   Alcotest.(check int) "push0 is base" 2 (Gas.static_cost Opcode.Push0);
   Alcotest.(check int) "push1 is verylow" 3 (Gas.static_cost (Opcode.Push (width_of 1)));
   Alcotest.(check int) "dup16 is verylow" 3 (Gas.static_cost (Opcode.Dup (depth_of 16)));
+  Alcotest.(check int) "blobhash is 3" 3 (Gas.static_cost Opcode.Blobhash);
+  Alcotest.(check int) "blobbasefee is 2" 2 (Gas.static_cost Opcode.Blobbasefee);
   Alcotest.(check int) "stop is free" 0 (Gas.static_cost Opcode.Stop)
 
 (* ---------- code analysis ---------- *)
@@ -335,7 +338,14 @@ let test_code_jumpdests () =
      analysis simply ends. *)
   let truncated = Code.of_string (op (Opcode.Push (width_of 32)) ^ String.make 3 '\x5b') in
   Alcotest.(check (list int)) "push data past the end is still push data" []
-    (Code.jumpdests truncated)
+    (Code.jumpdests truncated);
+  (* An immediate-free opcode must not stride: a destination directly after a
+     blob reader is genuine, so the analysis may not step over it. *)
+  let after_blobhash =
+    Code.of_string (String.concat "" [ op Opcode.Blobhash; op Opcode.Jumpdest ])
+  in
+  Alcotest.(check (list int)) "a destination right after blobhash is found" [ 1 ]
+    (Code.jumpdests after_blobhash)
 
 let test_code_bytes () =
   let code = Code.of_string (push1 0x2a) in
@@ -759,23 +769,119 @@ let test_program_invalid_opcode () =
   check_outcome "the designated invalid instruction halts"
     (Interpreter.Failed (Interpreter.Invalid_opcode 0xfe))
     (run (asm [ op Opcode.Invalid ]) 1_000);
-  (* An opcode deferred to a later chunk is refused rather than silently doing
-     something else. Several have now graduated, and each stood exactly here
-     before it did: 0x54 (SLOAD) with the host seam, 0x20 (KECCAK256) with the
+  (* An opcode deferred to a later chunk was refused rather than silently doing
+     something else, and every one of them stood exactly here before graduating:
+     0x54 (SLOAD) with the host seam, 0x20 (KECCAK256) with the
      hash, 0x3b, 0x3c and 0x3f (the external-code readers) once code landed on an
      account, 0x3d/0x3e (the return-data readers) and 0xf1/0xf2/0xf4/0xfa (the
-     message calls) once there was a second frame, and — as of this chunk —
-     0x40 (BLOCKHASH), 0xf0/0xf5 (the creations) and 0xff (SELFDESTRUCT).
+     message calls) once there was a second frame, then
+     0x40 (BLOCKHASH), 0xf0/0xf5 (the creations) and 0xff (SELFDESTRUCT), and
+     finally 0x49 (BLOBHASH) and 0x4a (BLOBBASEFEE), which
+     test_program_blob_opcodes below now pins as successful instructions. The
+     deferral list is empty: every byte that still decodes to [None] is one the
+     real Prague machine leaves unassigned too, 0xef on purpose. *)
+  check_outcome "0xef stays an unassigned byte"
+    (Interpreter.Failed (Interpreter.Invalid_opcode 0xef))
+    (run (Code.of_string (byte 0xef)) 1_000)
 
-     What is still deferred needs state this port has not built: 0x49 is
-     BLOBHASH and 0x4a is BLOBBASEFEE, and both want the EIP-4844 blob fields
-     that no transaction here carries. *)
-  check_outcome "a deferred blob-hash instruction halts"
-    (Interpreter.Failed (Interpreter.Invalid_opcode 0x49))
+(* The blob readers, landed with chunk 35 after standing in the deferred list
+   above. BLOBHASH is a successful 3-gas instruction that pops its index and
+   pushes zero whatever the index holds: revm's [None] comes from the
+   transaction-type gate ([context.rs:485-493]), and the port's transaction sum
+   has no 4844 arm, so the gate holds statically. BLOBBASEFEE is a 2-gas
+   projection of the block environment, whose fixture value here is the
+   consensus constant; the expected word below is transcribed independently of
+   the lib's [sub]/[two_pow] expression, so a wrong constant fails against a
+   correct push and a wrong push against a correct constant. *)
+let test_program_blob_opcodes () =
+  (* The independent transcription of u128::MAX. A typo in the 64 digits
+     collapses to zero and fails loudly against the pushed word. *)
+  let blobbasefee_word =
+    Option.value ~default:U256.zero
+      (U256.of_hex "00000000000000000000000000000000ffffffffffffffffffffffffffffffff")
+  in
+  (* A successful op, not a halt: PUSH1 3 + BLOBHASH 3 + the epilogue's 15. *)
+  check_outcome "blobhash pushes zero for a small index"
+    (Interpreter.Returned
+       { effects = base_effects; output = word_output U256.zero;
+         gas_left = gas_of (1_000 - (3 + 3 + 15)) })
+    (run (asm ([ push1 0x07; op Opcode.Blobhash ] @ return_top)) 1_000);
+  (* Net stack delta zero: at a full stack the pop makes room for the push. *)
+  let full_then_blobhash =
+    asm (List.init Stack.limit (fun _ -> push1 0x00) @ [ op Opcode.Blobhash ])
+  in
+  check_outcome "blobhash succeeds at a full stack"
+    (Interpreter.Stopped
+       { effects = base_effects; gas_left = gas_of (10_000 - ((3 * Stack.limit) + 3)) })
+    (run full_then_blobhash 10_000);
+  check_outcome "blobhash on an empty stack underflows"
+    (Interpreter.Failed Interpreter.Stack_underflow)
     (run (Code.of_string (byte 0x49)) 1_000);
-  check_outcome "a deferred blob-base-fee instruction halts"
-    (Interpreter.Failed (Interpreter.Invalid_opcode 0x4a))
-    (run (Code.of_string (byte 0x4a)) 1_000)
+  (* The index is popped and ignored, never converted: every saturation region
+     of revm's [as_usize_saturated] (the native int boundary at 2^62, the u64
+     boundary at 2^63, the full width at 2^128 and 2^256 - 1) pushes the same
+     zero at the same price. *)
+  List.iter
+    (fun w ->
+      check_outcome "blobhash ignores the index"
+        (Interpreter.Returned
+           { effects = base_effects; output = word_output U256.zero;
+             gas_left = gas_of (1_000 - (3 + 3 + 15)) })
+        (run (asm ([ push32 w; op Opcode.Blobhash ] @ return_top)) 1_000))
+    [ U256.zero; U256.one; u 5; u max_int; U256.two_pow 62; U256.two_pow 63;
+      U256.two_pow 128; U256.max_value ];
+  (* BLOBBASEFEE 2 + the epilogue's 15. *)
+  check_outcome "blobbasefee pushes the fixture's consensus value"
+    (Interpreter.Returned
+       { effects = base_effects; output = word_output blobbasefee_word;
+         gas_left = gas_of (1_000 - (2 + 15)) })
+    (run (asm ([ op Opcode.Blobbasefee ] @ return_top)) 1_000);
+  (* Read, not answered: every block in the tree is built from the consensus
+     constant, so the row above cannot tell the projection apart from
+     [fun _env -> Env.Block.consensus_blob_gasprice], which would leave the new
+     field with no reader at all. Bind a word no production block carries and
+     watch the push follow it. *)
+  let sentinel = u 0x4a_4a_4a in
+  let block = Env.block base_env in
+  let sentinel_env =
+    Env.make
+      ~block:
+        (Env.Block.make ~coinbase:(Env.Block.coinbase block)
+           ~timestamp:(Env.Block.timestamp block) ~number:(Env.Block.number block)
+           ~prevrandao:(Env.Block.prevrandao block) ~gas_limit:(Env.Block.gas_limit block)
+           ~basefee:(Env.Block.basefee block) ~basefee_address:(Env.Block.basefee_address block)
+           ~chain_id:(Env.Block.chain_id block) ~blob_gasprice:sentinel
+           ~hashes:(Env.Block.hashes block))
+      ~tx:(Env.tx base_env) ~call:(Env.call base_env)
+  in
+  check_outcome "blobbasefee follows the block's own word"
+    (Interpreter.Returned
+       { effects = base_effects; output = word_output sentinel;
+         gas_left = gas_of (1_000 - (2 + 15)) })
+    (Interpreter.run ~env:sentinel_env ~code:(asm ([ op Opcode.Blobbasefee ] @ return_top))
+       ~gas:(gas_of 1_000) ~effects:base_effects);
+  (* stack_io (0, 1), unlike blobhash's (1, 1): at a full stack it overflows. *)
+  let full_then_blobbasefee =
+    asm (List.init Stack.limit (fun _ -> push1 0x00) @ [ op Opcode.Blobbasefee ])
+  in
+  check_outcome "blobbasefee at a full stack overflows"
+    (Interpreter.Failed Interpreter.Stack_overflow)
+    (run full_then_blobbasefee 10_000);
+  (* Charge before body, pinned in both directions on the same one-byte
+     programs: at gas 2 the charge of 3 fails before the empty stack is looked
+     at, and at gas 3 the charge succeeds and then the body underflows. *)
+  check_outcome "blobhash at gas 2 is out of gas, not underflow"
+    (Interpreter.Failed Interpreter.Out_of_gas)
+    (run (Code.of_string (byte 0x49)) 2);
+  check_outcome "blobhash at gas 3 underflows, not out of gas"
+    (Interpreter.Failed Interpreter.Stack_underflow)
+    (run (Code.of_string (byte 0x49)) 3);
+  check_outcome "blobbasefee at gas 1 is out of gas"
+    (Interpreter.Failed Interpreter.Out_of_gas)
+    (run (Code.of_string (byte 0x4a)) 1);
+  check_outcome "blobbasefee at gas 2 stops with nothing left"
+    (Interpreter.Stopped { effects = base_effects; gas_left = gas_of 0 })
+    (run (Code.of_string (byte 0x4a)) 2)
 
 (* ---------- randomised properties ---------- *)
 
@@ -814,6 +920,13 @@ let test_opcode_roundtrip () =
     (List.init 256 (fun i -> i));
   Alcotest.(check (option int)) "a byte outside the range decodes to nothing" None
     (Option.map Opcode.to_byte (Opcode.decode 256));
+  (* The blob readers' bytes and names, pinned explicitly on top of the
+     roundtrip property. *)
+  Alcotest.(check int) "blobhash is 0x49" 0x49 (Opcode.to_byte Opcode.Blobhash);
+  Alcotest.(check int) "blobbasefee is 0x4a" 0x4a (Opcode.to_byte Opcode.Blobbasefee);
+  Alcotest.(check string) "0x49 prints BLOBHASH" "BLOBHASH" (Opcode.to_string Opcode.Blobhash);
+  Alcotest.(check string) "0x4a prints BLOBBASEFEE" "BLOBBASEFEE"
+    (Opcode.to_string Opcode.Blobbasefee);
   (* The families are contiguous and complete. *)
   Alcotest.(check int) "push1 is 0x60" 0x60 (Opcode.to_byte (Opcode.Push (width_of 1)));
   Alcotest.(check int) "push32 is 0x7f" 0x7f (Opcode.to_byte (Opcode.Push (width_of 32)));
@@ -886,7 +999,10 @@ let test_immediate_widths () =
         (Opcode.immediate_bytes opcode))
     (List.init 32 (fun i -> i + 1));
   Alcotest.(check int) "push0 carries none" 0 (Opcode.immediate_bytes Opcode.Push0);
-  Alcotest.(check int) "add carries none" 0 (Opcode.immediate_bytes Opcode.Add)
+  Alcotest.(check int) "add carries none" 0 (Opcode.immediate_bytes Opcode.Add);
+  Alcotest.(check int) "blobhash carries none" 0 (Opcode.immediate_bytes Opcode.Blobhash);
+  Alcotest.(check int) "blobbasefee carries none" 0
+    (Opcode.immediate_bytes Opcode.Blobbasefee)
 
 (* Run a two-operand opcode through the machine and compare with the ALU it
    dispatches to. The first word pushed sits deeper, so the opcode's first
@@ -1120,7 +1236,8 @@ let () =
           Alcotest.test_case "exponentiation is priced by exponent" `Quick test_program_exp_cost;
           Alcotest.test_case "running out of gas" `Quick test_program_out_of_gas;
           Alcotest.test_case "stack underflow and overflow" `Quick test_program_stack_errors;
-          Alcotest.test_case "invalid and deferred opcodes" `Quick test_program_invalid_opcode;
+          Alcotest.test_case "invalid opcodes" `Quick test_program_invalid_opcode;
+          Alcotest.test_case "the blob readers" `Quick test_program_blob_opcodes;
         ] );
       ( "encoding",
         [

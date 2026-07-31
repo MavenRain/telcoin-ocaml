@@ -1,30 +1,29 @@
 (** The instruction set the interpreter executes, and the decoding of a code byte
     into it.
 
-    This is the single-frame subset of the EVM: arithmetic, comparison, bitwise
-    and shift operations (dispatched to {!Alu}), stack manipulation, memory, gas
-    and control flow, the instructions that read the block and transaction
-    context, read the calling frame's calldata and its own code, and read and
-    write account storage, and — since the hash landed — [KECCAK256], the logs
-    and EIP-1153 transient storage.
+    The set began as the single-frame subset of the EVM: arithmetic, comparison,
+    bitwise and shift operations (dispatched to {!Alu}), stack manipulation,
+    memory, gas and control flow, the instructions that read the block and
+    transaction context, read the calling frame's calldata and its own code, and
+    read and write account storage, and — since the hash landed — [KECCAK256],
+    the logs and EIP-1153 transient storage. It has since outgrown that
+    description in three steps.
 
     The external-code readers — [EXTCODESIZE], [EXTCODECOPY] and [EXTCODEHASH] —
-    are in as of this chunk: code now lives on an account, which is all they
-    needed, and none of them opens a second frame. The sub-frame message-call
-    family — [CALL], [CALLCODE], [DELEGATECALL], [STATICCALL] — and the
-    return-data readers [RETURNDATASIZE] and [RETURNDATACOPY] join them as of this
-    chunk: a frame can now open a {e second} frame. The account creations
-    [CREATE] and [CREATE2], account destruction [SELFDESTRUCT] and [BLOCKHASH]
-    join the set as of this chunk too. What remains absent are the blob
-    instructions alone: since chunk 33 the calls resolve an EIP-7702
+    came in with the account-code chunk: code now lives on an account, which is
+    all they needed, and none of them opens a second frame. The sub-frame
+    message-call family — [CALL], [CALLCODE], [DELEGATECALL], [STATICCALL] — the
+    return-data readers [RETURNDATASIZE] and [RETURNDATACOPY], the account
+    creations [CREATE] and [CREATE2], account destruction [SELFDESTRUCT] and
+    [BLOCKHASH] came in with the call chunk, where a frame first opened a {e
+    second} frame. The blob readers [BLOBHASH] and [BLOBBASEFEE] land with chunk
+    35, so nothing remains deferred. Since
+    chunk 33 the calls resolve an EIP-7702
     delegation designator one hop (see {!Interpreter} and {!Call_target}), so
     their faithfulness no longer carries a non-delegated qualifier, and [0xEF]
     REMAINS an undefined byte on purpose, which is exactly what halts the
     second hop of a delegation chain ([opcode.rs:637-638]). The fork level
-    this table models is stated once, in [env.mli:26-53]. A code byte naming
-    one of the absent instructions decodes to [None]
-    exactly as an unassigned byte does, and the interpreter halts on it. That is a
-    {e temporary} divergence from a full node, and the only one: within this
+    this table models is stated once, in [env.mli:26-53]. Within this
     subset the byte values, immediate sizes and semantics are those of the real
     machine (revm's [revm-bytecode] opcode table).
 
@@ -138,6 +137,22 @@ type t =
   | Chainid
   | Selfbalance
   | Basefee
+  | Blobhash
+      (** [0x49]. EIP-4844: the versioned hash of the transaction's blob at the
+          popped index, and zero where there is none. On this chain it always
+          pushes zero, and that is proved rather than configured: revm's [None]
+          comes from the transaction-type gate ([context.rs:485-493]), which
+          answers for every non-4844 transaction whatever the index, and the
+          port's transaction sum has no 4844 arm at all ([transaction.mli:14-16]),
+          so the gate is decided statically. The index is still popped and an
+          empty stack still underflows; it is a successful 3-gas instruction,
+          never a halt. *)
+  | Blobbasefee
+      (** [0x4a]. EIP-7516: the blob base fee of the current block, read from
+          {!Env.Block.blob_gasprice} exactly as [BASEFEE] reads
+          {!Env.Block.basefee}. On this chain the consensus build path binds it
+          to {!Env.Block.consensus_blob_gasprice}; see that value's doc for the
+          read-only surface it deliberately diverges from. *)
   | Sload
   | Sstore
   | Mcopy
@@ -196,10 +211,13 @@ val decode : int -> t option
     outside this subset. The argument is a byte value; anything outside
     [\[0, 255\]] is [None].
 
-    The subset grew; the mechanism did not. Every still-deferred instruction has
-    no arm here, so its byte decodes to [None] and halts the machine rather than
-    silently doing the wrong thing. Being absent from a total decoder {e is} the
-    mechanism — it needs no allow-list, no feature flag and no code.
+    The subset grew until nothing remained deferred; the mechanism never
+    changed. While an instruction was still deferred it had no arm here, so its
+    byte decoded to [None] and halted the machine rather than silently doing
+    the wrong thing. Being absent from a total decoder {e was} the whole
+    mechanism: it needed no allow-list, no feature flag and no code. What
+    decodes to [None] now is exactly what a Prague machine leaves unassigned,
+    [0xEF] included.
 
     The asymmetry is deliberate. Adding a constructor to {!t} breaks compilation
     in {!to_byte}, in {!Gas.static_cost} and in the interpreter's dispatch, all

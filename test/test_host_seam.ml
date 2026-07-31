@@ -24,7 +24,7 @@
    deleted. {!measure_sstore} returns the measurement so it does not have to.
 
    A second hazard, distinct from the missing charge and just as quiet: a field
-   read from the wrong place. The fourteen flat context instructions are one line
+   read from the wrong place. The fifteen flat context instructions are one line
    each, and while every field of the fixture was [U256.zero] — as it was — the
    TIMESTAMP and NUMBER arms could be exchanged, or GASPRICE with CALLVALUE, or
    CALLER with ORIGIN, without a single case in the tree noticing. Every field
@@ -45,7 +45,7 @@
 
    Second, whole programs with their gas computed by hand, returning their result
    through memory, in the idiom [test_interpreter.ml] already uses — beginning
-   with the fourteen context instructions, which push a field and stop.
+   with the fifteen context instructions, which push a field and stop.
 
    Third, the [SSTORE] matrix: the four-way EIP-2200 classification crossed with
    cold and warm, each cell asserted with its total cost {e and} its refund. Two
@@ -146,7 +146,7 @@ let other = address_of 0xab
 
    The fixture used to set timestamp, number, prevrandao, gas_limit, basefee,
    chain_id, gas_price and the call value all to [U256.zero], and [caller] to
-   [origin]. Under that fixture the fourteen flat context instructions push
+   [origin]. Under that fixture the fifteen flat context instructions push
    indistinguishable words: swapping the TIMESTAMP and NUMBER arms of
    {!Interpreter.execute}, or BASEFEE with GASLIMIT, or CHAINID with PREVRANDAO,
    or GASPRICE with CALLVALUE, or CALLER with ORIGIN, passes the entire suite.
@@ -165,9 +165,19 @@ let chain_id = u 2_017
 let gas_price = u 12_000_000_000
 let call_value = u 1_000_000_000_000_000_000
 
+(* The blob base fee the fixture binds is the consensus constant, but the word
+   the BLOBBASEFEE row expects is transcribed HERE, independently of the lib's
+   [sub]/[two_pow] expression, so the row can catch a wrong lib constant rather
+   than compare it with itself. [Option.value ~default:U256.zero] keeps a typo
+   loud: a mangled digit collapses to zero and fails against the pushed word. *)
+let blobbasefee_word =
+  Option.value ~default:U256.zero
+    (U256.of_hex "00000000000000000000000000000000ffffffffffffffffffffffffffffffff")
+
 let base_block =
   Env.Block.make ~coinbase ~timestamp ~number:block_number ~prevrandao ~gas_limit
-    ~basefee ~basefee_address:Tn_evm.System_contracts.governance_safe_address ~chain_id ~hashes:Tn_evm.Block_hashes.empty
+    ~basefee ~basefee_address:Tn_evm.System_contracts.governance_safe_address ~chain_id
+    ~blob_gasprice:Env.Block.consensus_blob_gasprice ~hashes:Tn_evm.Block_hashes.empty
 
 let base_tx = Env.Tx.make ~origin ~gas_price ~access_list:[]
 
@@ -491,14 +501,14 @@ let world_with_slot value = World_state.set_storage World_state.empty self (u 0)
 
 let warm_slot_access = Access.of_transaction ~addresses:[] ~slots:[ (self, U256.zero) ]
 
-(* The fourteen instructions that push one field of the environment and stop.
+(* The fifteen instructions that push one field of the environment and stop.
    They are the cheapest thing in the seam to get wrong and were, until this
    case, named by no test at all: every one of them is a single line of the
    dispatch table reading a single accessor, and nothing downstream would notice
    two of those lines exchanged.
 
    Each row asserts the word AND the absolute total. The total is the same 17 for
-   all fourteen — [base] 2 for the instruction, then the epilogue's 15 — so it is
+   all fifteen — [base] 2 for the instruction, then the epilogue's 15 — so it is
    not what separates them; the word is. The fixture above gives every field a
    different value precisely so that it can.
 
@@ -539,20 +549,55 @@ let test_flat_context_opcodes () =
       ("GASLIMIT", Opcode.Gaslimit, fun _ -> gas_limit);
       ("CHAINID", Opcode.Chainid, fun _ -> chain_id);
       ("BASEFEE", Opcode.Basefee, fun _ -> basefee);
+      ("BLOBBASEFEE", Opcode.Blobbasefee, fun _ -> blobbasefee_word);
     ];
-  (* And the fourteen expected words really are fourteen different words, so the
+  (* And the fifteen expected words really are fifteen different words, so the
      rows above cannot be satisfied by an implementation that pushed one constant
      for all of them. The two sizes are included: 5 and 9 are distinct from each
-     other and from every field. *)
+     other and from every field. The fixture has no [2^128 - 1] sentinel apart
+     from the blob base fee itself. *)
   let expected_words =
     [
       address_word self; address_word caller; call_value; u 5; u 9;
       address_word origin; gas_price; address_word coinbase; timestamp;
-      block_number; prevrandao; gas_limit; chain_id; basefee;
+      block_number; prevrandao; gas_limit; chain_id; basefee; blobbasefee_word;
     ]
   in
-  Alcotest.(check int) "the fourteen expected words are pairwise distinct" 14
+  Alcotest.(check int) "the fifteen expected words are pairwise distinct" 15
     (List.length (List.sort_uniq U256.compare expected_words))
+
+(* BLOBHASH under this fixture, where every field is distinct and nonzero: an
+   arm that secretly read any of them would move the output, so the zero really
+   is the statically decided transaction-type gate and not a fixture accident.
+   3 for the PUSH1, 3 for BLOBHASH, then the epilogue's 15. *)
+let test_blobhash_pushes_zero () =
+  let code = asm ([ push1 0x05; op Opcode.Blobhash ] @ return_top) in
+  let outcome = run code allowance in
+  Alcotest.(check string) "BLOBHASH pushes zero"
+    (U256.to_be_bytes U256.zero) (output_of outcome);
+  check_total "and costs 21 in all" 21 outcome
+
+(* The constant itself: (i) against an independent byte construction, sixteen
+   zero bytes then sixteen 0xff bytes; (ii) too large for the native int, so no
+   [of_int] route could have produced it; (iii) {!Env.Block.equal} really reads
+   the new field. *)
+let test_consensus_blob_gasprice () =
+  Alcotest.(check u256) "sixteen 0x00 bytes then sixteen 0xff bytes"
+    (Option.value ~default:U256.zero
+       (U256.of_be_bytes (String.make 16 '\x00' ^ String.make 16 '\xff')))
+    Env.Block.consensus_blob_gasprice;
+  Alcotest.(check bool) "it exceeds the native int" true
+    (Option.is_none (U256.to_int Env.Block.consensus_blob_gasprice));
+  let block_with gasprice =
+    Env.Block.make ~coinbase ~timestamp ~number:block_number ~prevrandao
+      ~gas_limit ~basefee
+      ~basefee_address:Tn_evm.System_contracts.governance_safe_address ~chain_id
+      ~blob_gasprice:gasprice ~hashes:Tn_evm.Block_hashes.empty
+  in
+  Alcotest.(check bool) "blocks sharing the constant are equal" true
+    (Env.Block.equal base_block (block_with Env.Block.consensus_blob_gasprice));
+  Alcotest.(check bool) "blocks differing only in blob_gasprice are not" false
+    (Env.Block.equal base_block (block_with U256.zero))
 
 let test_sload_cold_and_warm () =
   (* PUSH1 3, SLOAD (100 static + 2000 cold surcharge), POP 2, STOP 0. The 2000
@@ -2087,8 +2132,11 @@ let () =
         ] );
       ( "programs",
         [
-          Alcotest.test_case "the fourteen flat context opcodes" `Quick
+          Alcotest.test_case "the fifteen flat context opcodes" `Quick
             test_flat_context_opcodes;
+          Alcotest.test_case "BLOBHASH pushes zero" `Quick test_blobhash_pushes_zero;
+          Alcotest.test_case "the consensus blob gasprice constant" `Quick
+            test_consensus_blob_gasprice;
           Alcotest.test_case "SLOAD cold and warm" `Quick test_sload_cold_and_warm;
           Alcotest.test_case "SLOAD reads the world" `Quick test_sload_reads_the_world;
           Alcotest.test_case "BALANCE cold and warm" `Quick test_balance_cold_and_warm;

@@ -284,11 +284,23 @@ let halt_with_output build m =
 
 (* ---------- the context instructions ---------- *)
 
-(* The fourteen 2-gas context opcodes differ only in which field of the
+(* The fifteen 2-gas context opcodes differ only in which field of the
    environment they name, so each is one projection. Nothing here can fail: the
    value is already a word or becomes one totally, and the only error a push can
    raise is the overflow [push_value] already reports. *)
 let env_word project env m = push_value (project env) m
+
+(* [BLOBHASH]: pop the index, push zero. The pop-then-push pair is revm's
+   in-place [popn_top] overwrite of the top slot ([tx_info.rs:30-37]): the same
+   underflow on an empty stack, the same net depth of zero, success at a full
+   stack. The zero is proved, not stubbed: revm's [None] comes from the
+   transaction-type gate ([context.rs:485-493]), which answers for every
+   non-4844 transaction whatever the index, and the port's transaction sum has
+   no 4844 arm ([transaction.mli:14-16]), so the gate holds statically.
+   [as_usize_saturated] therefore has no image here: the index feeds a lookup
+   that is constantly [None] on this chain, so it is popped and ignored, never
+   converted. *)
+let blob_hash m = unary (fun _index -> W.zero) m
 
 (* ---------- the copy family ---------- *)
 
@@ -1092,6 +1104,7 @@ let rec execute env code depth m = function
         (fun env -> Address_word.to_word (Env.Tx.origin (Env.tx env)))
         env m
   | Opcode.Gasprice -> env_word (fun env -> Env.Tx.gas_price (Env.tx env)) env m
+  | Opcode.Blobhash -> blob_hash m
   (* The block. *)
   | Opcode.Coinbase ->
       env_word
@@ -1107,6 +1120,8 @@ let rec execute env code depth m = function
   | Opcode.Chainid ->
       env_word (fun env -> Env.Block.chain_id (Env.block env)) env m
   | Opcode.Basefee -> env_word (fun env -> Env.Block.basefee (Env.block env)) env m
+  | Opcode.Blobbasefee ->
+      env_word (fun env -> Env.Block.blob_gasprice (Env.block env)) env m
   (* The world. *)
   | Opcode.Balance -> balance m
   | Opcode.Sload -> sload env m

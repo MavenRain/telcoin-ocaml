@@ -78,6 +78,8 @@ type t =
   | Chainid
   | Selfbalance
   | Basefee
+  | Blobhash
+  | Blobbasefee
   | Sload
   | Sstore
   | Mcopy
@@ -151,6 +153,8 @@ let to_byte = function
   | Chainid -> 0x46
   | Selfbalance -> 0x47
   | Basefee -> 0x48
+  | Blobhash -> 0x49
+  | Blobbasefee -> 0x4a
   | Pop -> 0x50
   | Mload -> 0x51
   | Mstore -> 0x52
@@ -245,6 +249,8 @@ let decode byte =
   | 0x46 -> Some Chainid
   | 0x47 -> Some Selfbalance
   | 0x48 -> Some Basefee
+  | 0x49 -> Some Blobhash
+  | 0x4a -> Some Blobbasefee
   | 0x50 -> Some Pop
   | 0x51 -> Some Mload
   | 0x52 -> Some Mstore
@@ -296,7 +302,8 @@ let immediate_bytes = function
   | Balance | Origin | Caller | Callvalue | Calldataload | Calldatasize
   | Calldatacopy | Codesize | Codecopy | Extcodesize | Extcodecopy | Extcodehash
   | Gasprice | Coinbase | Timestamp | Number
-  | Prevrandao | Gaslimit | Chainid | Selfbalance | Basefee | Sload | Sstore
+  | Prevrandao | Gaslimit | Chainid | Selfbalance | Basefee | Blobhash
+  | Blobbasefee | Sload | Sstore
   | Mcopy | Keccak256 | Tload | Tstore | Log _ | Returndatasize | Returndatacopy
   | Call | Callcode | Delegatecall | Staticcall | Create | Create2 | Selfdestruct
   | Blockhash ->
@@ -372,6 +379,8 @@ let to_string = function
   | Chainid -> "CHAINID"
   | Selfbalance -> "SELFBALANCE"
   | Basefee -> "BASEFEE"
+  | Blobhash -> "BLOBHASH"
+  | Blobbasefee -> "BLOBBASEFEE"
   | Sload -> "SLOAD"
   | Sstore -> "SSTORE"
   | Mcopy -> "MCOPY"

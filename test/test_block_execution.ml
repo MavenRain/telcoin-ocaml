@@ -816,6 +816,52 @@ let test_both_calls_see_nonce_zero () =
     "the system address is absent throughout" false
     (present (System_call.world second) System_contracts.system_address)
 
+(* Telcoin's transact_system_call swaps only gas_limit, basefee and
+   disable_nonce_check (evm/mod.rs:198-203), so the blob env rides through
+   {!System_call}'s field-total block rebuild untouched. The contract halts on
+   INVALID unless BLOBBASEFEE pushes exactly the word it was compiled against,
+   so the call's success IS the propagation: a rebuild that reset or defaulted
+   the field would hand the frame a different word and fail here.
+
+   The block's word is a parameter rather than the constant, because a rebuild
+   that substituted [consensus_blob_gasprice] for the block's own field reads
+   identically to one that carries it as long as every block in the suite is
+   built from that constant. The sentinel row is the one that separates them. *)
+let system_call_reads_blob_gasprice ~bound ~expected =
+  let target = address_of 0xd4 in
+  let checker =
+    bytes_of
+      [
+        op Opcode.Blobbasefee;
+        push_bytes (U256.to_be_bytes expected);
+        op Opcode.Eq;
+        push1 39 (* the JUMPDEST below: 1 + 33 + 1 + 2 + 1 + 1 bytes in *);
+        op Opcode.Jumpi;
+        op Opcode.Invalid;
+        op Opcode.Jumpdest;
+        op Opcode.Stop;
+      ]
+  in
+  let world = with_code World_state.empty target checker in
+  let outcome =
+    call_ok
+      (System_call.run world ~block:(block_env ~blob_gasprice:bound ()) ~contract:target ~data:"")
+  in
+  System_call.succeeded outcome
+
+let test_system_call_sees_the_consensus_blob_gasprice () =
+  let sentinel = u 0x4a_4a_4a in
+  Alcotest.(check bool) "the frame observes the unchanged consensus value" true
+    (system_call_reads_blob_gasprice ~bound:Env.Block.consensus_blob_gasprice
+       ~expected:Env.Block.consensus_blob_gasprice);
+  (* Carried, not substituted: the frame reads the block's own word. *)
+  Alcotest.(check bool) "a non-consensus block word reaches the frame too" true
+    (system_call_reads_blob_gasprice ~bound:sentinel ~expected:sentinel);
+  (* And the checker can fail, so the two rows above are not vacuous. *)
+  Alcotest.(check bool) "the checker rejects the wrong word" false
+    (system_call_reads_blob_gasprice ~bound:sentinel
+       ~expected:Env.Block.consensus_blob_gasprice)
+
 (* ================================================================== *)
 (* 6. finish: the epoch-close arm of the spine.                        *)
 (* ================================================================== *)
@@ -1129,6 +1175,8 @@ let () =
           Alcotest.test_case "an undeployed target is a silent no-op" `Quick
             test_an_undeployed_target_is_a_silent_no_op;
           Alcotest.test_case "both calls see nonce zero" `Quick test_both_calls_see_nonce_zero;
+          Alcotest.test_case "the frame reads the consensus blob gasprice" `Quick
+            test_system_call_sees_the_consensus_blob_gasprice;
           Alcotest.test_case "2935 gas is revm's frame plus intrinsic" `Quick
             test_eip2935_gas_matches_revms_fixture_plus_intrinsic;
         ] );

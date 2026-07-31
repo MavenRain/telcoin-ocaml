@@ -161,11 +161,16 @@ let parent_hash = Tn_keccak.digest "chunk-30 parent block"
 
 let coinbase = address_of 0xc3
 
+(* [blob_gasprice] is optional and defaults to the consensus constant, but it is
+   settable so a test can bind a word no production block would carry: that is
+   the only way to tell a reader of the field from a function that answers the
+   constant, since every other fixture in the tree binds the constant itself. *)
 let block_env ?(number = 1000) ?(timestamp = 1_700_000_000) ?(gas_limit = 30_000_000)
     ?(basefee = 0) ?(prevrandao = 0)
-    ?(basefee_address = System_contracts.governance_safe_address) () =
+    ?(basefee_address = System_contracts.governance_safe_address)
+    ?(blob_gasprice = Env.Block.consensus_blob_gasprice) () =
   Env.Block.make ~coinbase ~timestamp:(u timestamp) ~number:(u number) ~prevrandao:(u prevrandao)
-    ~gas_limit:(u gas_limit) ~basefee:(u basefee) ~basefee_address ~chain_id:(u 1)
+    ~gas_limit:(u gas_limit) ~basefee:(u basefee) ~basefee_address ~chain_id:(u 1) ~blob_gasprice
     ~hashes:Block_hashes.empty
 
 let position_of ~batch_index ~worker_id =
