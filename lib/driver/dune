@@ -1,0 +1,12 @@
+; The execution driver: the library that owns the consensus-chain accumulator
+; and the engine, feeding committed outputs through the batch-body seam. It
+; sits above tn_engine, and nothing but the test suite sits above it. It must
+; NEVER list tn_sim: the sim is a consensus shell below the batch seam, and
+; the test suite is the wiring layer where the two meet. Every library any
+; module here names is listed explicitly, as every other library in this repo
+; does: the implicit transitive closure is never relied on.
+(library
+ (name tn_driver)
+ (public_name telcoin_ocaml.driver)
+ (libraries tn_types tn_state tn_evm tn_keccak tn_consensus tn_execution
+   tn_batch tn_engine zarith))

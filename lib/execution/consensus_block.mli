@@ -8,9 +8,11 @@
 
     Rust assembles this stream in the executor's subscriber, folding each
     committed sub-DAG into the next header with [number = previous + 1] and
-    [parent_hash = previous.digest()]. The port keeps that fold in {!Engine} and
-    this module is the block it produces. Only {!create} builds a block, so its
-    cached digest is always consistent with its fields. *)
+    [parent_hash = previous.digest()]. The port keeps that fold in
+    {!Consensus_chain}, which {!Engine.Noop} and the execution driver share
+    (the driver lives ABOVE this library, in [Tn_driver] — bracketed prose on
+    purpose), and this module is the block it produces. Only {!create} builds a
+    block, so its cached digest is always consistent with its fields. *)
 
 open Tn_types
 open Tn_consensus

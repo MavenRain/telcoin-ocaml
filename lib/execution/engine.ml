@@ -22,28 +22,20 @@ module Noop = struct
   type height = Consensus_block.Number.t
   type error = Nothing.t
 
-  (* The chain is fully determined by its tip: [None] is the genesis anchor,
-     [Some b] is the last block produced. *)
-  type t = Consensus_block.t option
+  (* The engine is the consensus-chain accumulator itself: Noop does nothing
+     but fold that chain, and the fold lives in ONE place, [Consensus_chain],
+     which the execution driver above this library shares. *)
+  type t = Consensus_chain.t
 
-  let create () = None
-  let tip t = t
-
-  let height =
-    Option.fold ~none:Consensus_block.Number.genesis
-      ~some:Consensus_block.number
-
+  let create () = Consensus_chain.genesis
+  let tip = Consensus_chain.tip
+  let height = Consensus_chain.number
   let error_to_string = Nothing.absurd
 
   let execute t sub_dag =
-    let parent_hash =
-      Option.fold ~none:Consensus_block.genesis_parent
-        ~some:Consensus_block.digest t
-    in
-    let number = Consensus_block.Number.succ (height t) in
-    let block = Consensus_block.create ~parent_hash ~sub_dag ~number in
     (* Exactly one block per commit: this engine is the port of the subscriber's
        output-to-header fold, which forms one consensus-chain header per
        committed sub-DAG. *)
-    Ok (Some block, [ block ])
+    let chain, block = Consensus_chain.append t sub_dag in
+    Ok (chain, [ block ])
 end

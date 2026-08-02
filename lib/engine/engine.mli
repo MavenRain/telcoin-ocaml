@@ -14,7 +14,9 @@
     each output against. What it does not own is the consensus chain: telcoin
     threads the consensus parent and number in its subscriber
     ([executor/src/subscriber.rs:347-371]) before an output is ever built, and
-    the port puts that fold strictly upstream, in {!Tn_batch.Output.attach}.
+    the port puts that fold strictly upstream, in
+    {!Tn_execution.Consensus_chain}, driven by the [Tn_driver] subscriber
+    (named in brackets on purpose: it sits ABOVE this library).
 
     The epoch is a PHASE inside this engine and not a member of the shared seam:
     an execution seam whose other implementation is a consensus-chain fold has

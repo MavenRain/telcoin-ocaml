@@ -52,6 +52,34 @@ type config
 (** Static run parameters: the network latency band, the stop horizon and step
     fuse, and the {!Tn_std.Prng} seed. *)
 
+type batch_plan
+(** A pure description of batch traffic to inject: how many bodies each live
+    authority's worker seals, how often, and what they carry. A plan describes
+    {e local} worker announcements — each synthesised {!Tn_types.Batch} is
+    revealed to its own authority's node as a
+    {!Tn_consensus.Node.event.Our_digest}, never sent across the network — so
+    injection perturbs no message latency and draws nothing from the
+    {!Tn_std.Prng} streams. *)
+
+val batch_plan :
+  per_authority:int ->
+  period:Units.Duration.t ->
+  worker_id:Units.Worker_id.t ->
+  epoch:Units.Epoch.t ->
+  base_fee_per_gas:Units.Base_fee.t ->
+  transactions:(Authority_id.t -> int -> string list) ->
+  unit ->
+  batch_plan
+(** Each live authority seals [per_authority] bodies (negative values clamp to
+    none), body [k] (zero-based) announced at time [(k + 1) * period]. Every
+    body carries [epoch], [base_fee_per_gas] and [worker_id], is beneficiaried
+    to its authority's execution address, and holds
+    [transactions authority_id k] — vary that answer per authority and index
+    for pairwise-distinct bodies; a constant answer makes an authority's bodies
+    (and, under equal execution addresses, all bodies) collide into one digest.
+    The announced digest and worker id are read off the synthesised body
+    itself, so an announcement can never disagree with its body. *)
+
 val config :
   min_latency:Units.Duration.t ->
   max_latency:Units.Duration.t ->
@@ -60,6 +88,7 @@ val config :
   seed:int64 ->
   ?crashed:Authority_id.t list ->
   ?drop_permille:int ->
+  ?batches:batch_plan ->
   unit ->
   config
 (** Every message crossing the network is delayed by a uniform draw in
@@ -75,7 +104,14 @@ val config :
     the defaults the run is the reliable honest slice. When some authorities are
     [crashed], {!agreement} — which ranges over the whole committee — collapses to
     [Agree 0] because a silent node commits nothing; test the survivors' agreement
-    with {!For_testing.agree_of_logs} over their logs alone. *)
+    with {!For_testing.agree_of_logs} over their logs alone.
+
+    [batches] (default absent) injects the plan's synthesised batch bodies as
+    worker announcements, scheduled at {!create} after the startup commands.
+    Absent means {e zero} extra scheduled events and {e zero} PRNG draws — the
+    run takes literally the no-injection code path, so it replays byte-for-byte
+    against a pre-injection run at the same seed and config. A [crashed]
+    authority's plan entries are dropped exactly as its startup commands are. *)
 
 val create :
   committee:Committee.t ->
@@ -118,6 +154,13 @@ val executed : t -> Authority_id.t -> Consensus_block.t list
 val execution_tip : t -> Authority_id.t -> Consensus_block.t option
 (** The head of [authority]'s consensus chain — the last block of {!executed} —
     or [None] if it has committed nothing. *)
+
+val batch_bodies : t -> Tn_types.Batch.t list
+(** The batch bodies the run's {!batch_plan} synthesised, in build order
+    (committee order, then plan index) — empty when [batches] was absent. Every
+    injected announcement's digest is [Tn_types.Batch.digest] of exactly one of
+    these bodies, so a payload entry a committed sub-DAG carries is answerable
+    from this list; a store built over it is the run's body tier. *)
 
 val error : t -> (Authority_id.t * Node.error) option
 (** The node and invariant-break error that halted the run, or [None] for a clean

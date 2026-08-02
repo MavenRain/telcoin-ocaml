@@ -19,6 +19,29 @@ module Timed = Map.Make (struct
     if c = 0 then Int.compare seq1 seq2 else c
 end)
 
+(* A pure description of the batch traffic to inject (chunk 37, D2). Nothing
+   here is stateful — the bodies it describes are synthesised at {!create} — so
+   a plan can be shared between runs and replays identically. *)
+type batch_plan = {
+  per_authority : int;
+  period_ms : int;
+  plan_worker : Units.Worker_id.t;
+  plan_epoch : Units.Epoch.t;
+  plan_base_fee : Units.Base_fee.t;
+  plan_transactions : Authority_id.t -> int -> string list;
+}
+
+let batch_plan ~per_authority ~period ~worker_id ~epoch ~base_fee_per_gas
+    ~transactions () =
+  {
+    per_authority = Int.max 0 per_authority;
+    period_ms = Units.Duration.to_ms period;
+    plan_worker = worker_id;
+    plan_epoch = epoch;
+    plan_base_fee = base_fee_per_gas;
+    plan_transactions = transactions;
+  }
+
 type config = {
   lo : int;
   hi : int;
@@ -27,10 +50,11 @@ type config = {
   seed : int64;
   crashed : Authority_id.Set.t;
   drop_permille : int;
+  batches : batch_plan option;
 }
 
 let config ~min_latency ~max_latency ~horizon ~max_steps ~seed ?(crashed = [])
-    ?(drop_permille = 0) () =
+    ?(drop_permille = 0) ?batches () =
   {
     lo = Units.Duration.to_ms min_latency;
     hi = Units.Duration.to_ms max_latency;
@@ -39,6 +63,7 @@ let config ~min_latency ~max_latency ~horizon ~max_steps ~seed ?(crashed = [])
     seed;
     crashed = Authority_id.Set.of_list crashed;
     drop_permille = Int.max 0 (Int.min 1000 drop_permille);
+    batches;
   }
 
 type scheduled = { target : Authority_id.t; event : Node.event }
@@ -59,6 +84,7 @@ type t = {
   crashed : Authority_id.Set.t;
   drop_permille : int;
   output : Sub_dag.t list Authority_id.Map.t;
+  bodies : Batch.t list;
   steps : int;
   err : (Authority_id.t * Node.error) option;
 }
@@ -181,6 +207,50 @@ let rec run t =
           run (deliver t ~target:sch.target ~event:sch.event))
       (Timed.min_binding_opt t.queue)
 
+(* ---- batch injection (chunk 37, D2) ---- *)
+
+(* Synthesise and schedule one live authority's planned batches. Body [k] is
+   built from the plan's pure description with the authority's own execution
+   address as beneficiary, recorded for {!batch_bodies}, and announced to the
+   authority's own node as [Node.Our_digest] at [(k + 1) * period]. The event
+   routes through {!schedule} — the local, undroppable, PRNG-free path timers
+   take (the [Arm_timer] precedent in {!interpret}) — never {!unicast}: a
+   worker's sealed batch does not cross the network, so it must not draw a
+   latency (which would shift every later message delay) nor a drop coin. The
+   event's worker id is read off the body itself, so the announcement and the
+   body cannot disagree. *)
+let inject_for t plan authority =
+  let id = Authority.id authority in
+  List.fold_left
+    (fun t k ->
+      let body =
+        Batch.make
+          ~transactions:(plan.plan_transactions id k)
+          ~epoch:plan.plan_epoch
+          ~beneficiary:(Authority.execution_address authority)
+          ~base_fee_per_gas:plan.plan_base_fee ~worker_id:plan.plan_worker
+      in
+      let t = { t with bodies = body :: t.bodies } in
+      schedule t
+        ~delay:(plan.period_ms * (k + 1))
+        ~target:id
+        ~event:
+          (Node.Our_digest
+             { batch = Batch.digest body; worker_id = Batch.worker_id body }))
+    t
+    (List.init plan.per_authority Fun.id)
+
+(* A crash-stopped authority's plan entries are dropped exactly as its startup
+   commands are: no event is scheduled to it and no body is synthesised for
+   it, so {!batch_bodies} carries nothing beneficiaried to a crashed node. *)
+let inject t plan =
+  List.fold_left
+    (fun t authority ->
+      if Authority_id.Set.mem (Authority.id authority) t.crashed then t
+      else inject_for t plan authority)
+    t
+    (Committee.authorities t.committee)
+
 (* ---- construction ---- *)
 
 let create ~committee ~secret_key ~proposer_config ~sub_dags_per_schedule ~gc_depth
@@ -229,17 +299,25 @@ let create ~committee ~secret_key ~proposer_config ~sub_dags_per_schedule ~gc_de
       crashed = config.crashed;
       drop_permille = config.drop_permille;
       output = Authority_id.Map.empty;
+      bodies = [];
       steps = 0;
       err = None;
     }
   in
   (* A crash-stopped authority never runs: its startup proposal and timers are
      dropped here, and {!deliver} makes it silent to every later event. *)
-  List.fold_left
-    (fun t (id, cmds) ->
-      if Authority_id.Set.mem id t.crashed then t
-      else List.fold_left (fun t cmd -> interpret t ~src:id cmd) t cmds)
-    t0 startups
+  let started =
+    List.fold_left
+      (fun t (id, cmds) ->
+        if Authority_id.Set.mem id t.crashed then t
+        else List.fold_left (fun t cmd -> interpret t ~src:id cmd) t cmds)
+      t0 startups
+  in
+  (* Batch injection comes AFTER the startup commands, so every startup event's
+     scheduling counter is unchanged by the plan. With no plan this is the
+     identity on [started] — zero extra schedule calls and zero PRNG draws —
+     so a default-absent run takes literally today's code path. *)
+  Option.fold ~none:started ~some:(inject started) config.batches
 
 (* ---- observability ---- *)
 
@@ -271,6 +349,10 @@ let executed t authority =
 (* The head of the chain is, by construction, the last block of {!executed} —
    derived from it rather than re-folded, so the two cannot drift apart. *)
 let execution_tip t authority = List.nth_opt (List.rev (executed t authority)) 0
+
+(* Stored most-recent-first as they are synthesised, reversed here so the
+   answer is in build order: committee order, then plan index. *)
+let batch_bodies t = List.rev t.bodies
 
 let error t = t.err
 let elapsed t = Option.value ~default:Units.Duration.zero (Units.Duration.of_ms t.clock)

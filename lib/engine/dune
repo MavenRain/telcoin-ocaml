@@ -1,7 +1,8 @@
 ; The execution engine: the library that folds one committed consensus output
 ; into the execution blocks it produces. It sits above tn_batch (which already
-; sits above both tn_evm and tn_execution), and nothing but the test suite sits
-; above it. Every library any module here names is listed explicitly, as every
+; sits above both tn_evm and tn_execution), and nothing but tn_driver (the
+; execution driver, chunk 37) and the test suite sits above it. Every library
+; any module here names is listed explicitly, as every
 ; other library in this repo does: the implicit transitive closure is never
 ; relied on.
 (library
