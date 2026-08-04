@@ -41,7 +41,23 @@ val resume :
     node derives from its durable store, upstream's
     [state-sync/src/lib.rs:142-151]. The resumed accumulator's {!tip} is [None]:
     the block behind [parent] was minted in a previous life and is not
-    reconstructed here. *)
+    reconstructed here.
+
+    {b Divergence, stated once here.} The upstream citation above is
+    [last_consensus_parent], which picks the DURABLE-store tip whenever its
+    number strictly exceeds the executed tip's, ties going to the executed
+    value ([state-sync/src/lib.rs:135-151]). A chunk-38 caller must NOT seed
+    this accumulator that way. Upstream's max anchors the LIVE subscriber
+    AFTER [replay_missed_consensus] has already drained the gap
+    ([node.rs:831-840] primes the watermark before the engine exists, and
+    replay runs before the subscriber does, [start_epoch.rs:75-114]), and its
+    replay re-forwards each stored output VERBATIM without re-minting it
+    ([start_epoch.rs:93-100]). This port re-mints the gap through this very
+    accumulator, so seeding at the store tip would mint the first replayed
+    sub-DAG at [tip + 1] and fork the chain with no error anywhere.
+    [Tn_driver.Driver.resume] therefore seeds strictly at the EXECUTED tip, and
+    the max rule survives as a derived post-condition: after a clean replay the
+    driver's watermark equals the store's tip, which is the max. *)
 
 val append : t -> Sub_dag.t -> t * Consensus_block.t
 (** Fold ONE committed sub-DAG into the chain: mint the block at

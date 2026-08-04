@@ -9,8 +9,9 @@
    test_committee_shuffle test_epoch_close test_eip7702_wire test_eip7702_state
    test_eip7702_gas test_eip7702_calls test_batch test_tx_shape
    test_batch_validator test_payload_seam test_engine test_engine_epoch
-   test_engine_txskip test_consensus_chain test_driver_spec
-   test_driver_subscriber test_driver test_driver_epoch test_driver_sim)
+   test_engine_txskip test_consensus_chain test_consensus_store test_driver_spec
+   test_driver_subscriber test_driver test_driver_epoch test_driver_sim
+   test_driver_resume)
  (libraries tn_std tn_codec tn_types tn_crypto tn_vertex tn_consensus tn_sim
    tn_execution tn_state tn_evm tn_keccak tn_rlp tn_trie tn_rand tn_batch
    tn_engine tn_driver zarith alcotest qcheck))

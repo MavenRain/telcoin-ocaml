@@ -43,12 +43,13 @@ let setup n =
 
 let ids committee = List.map Authority.id (Committee.authorities committee)
 
-let a_header committee ~author ~round ?(created_at = 0) ~parents () =
+let a_header committee ~author ~round ?(created_at = 0) ?(payload = []) ~parents ()
+    =
   Header.make ~author
     ~round:(get (Round.of_int round))
     ~epoch:(Committee.epoch committee)
     ~created_at:(get (Units.Timestamp.of_sec (Int64.of_int created_at)))
-    ~payload:[] ~parents
+    ~payload ~parents
 
 (* A certificate on a header, signed by every authority (always past quorum). *)
 let certify committee sk_of header =
@@ -551,6 +552,120 @@ let test_sub_dag_timestamp_and_digest () =
   let cur_noprev = Sub_dag.create ~sequence:(mk 5) ~scores:fresh ~previous:None in
   Alcotest.(check bool) "changing only the previous (stored ts) changes the digest" false
     (Sub_dag.equal cur cur_noprev)
+
+(* ---- chunk-38 stage 1: Sub_dag.payload_digests ---- *)
+
+let dur ms = get (Units.Duration.of_ms ms)
+let hexes ds = List.map Digests.Batch_digest.to_hex ds
+
+(* A distinct body per label, so each contributes a distinct payload entry. *)
+let a_body label =
+  Batch.make ~transactions:[ label ] ~epoch:Units.Epoch.zero
+    ~beneficiary:Units.Address.zero
+    ~base_fee_per_gas:Units.Base_fee.min_protocol
+    ~worker_id:Units.Worker_id.zero
+
+(* S1.1: a digest carried by TWO certificates is one body resolved twice, so the
+   flattened list keeps it twice. A store that filed one body where attachment
+   resolves two would leave the second block's payload unresolvable at replay. *)
+let test_payload_digests_keep_duplicates () =
+  let committee, sk_of = setup 4 in
+  let d_a = Batch.digest (a_body "s1.1/a") in
+  let d_b = Batch.digest (a_body "s1.1/b") in
+  let w = Units.Worker_id.zero in
+  let earlier =
+    certify committee sk_of
+      (a_header committee ~author:(id_at committee 1) ~round:1
+         ~payload:[ (d_a, w); (d_b, w) ]
+         ~parents:(genesis_digests committee) ())
+  in
+  let leader =
+    certify committee sk_of
+      (a_header committee ~author:(id_at committee 0) ~round:2
+         ~payload:[ (d_b, w) ]
+         ~parents:[ Certificate.digest earlier ] ())
+  in
+  let sd =
+    Sub_dag.create
+      ~sequence:(get_ne [ earlier; leader ])
+      ~scores:(Reputation_scores.fresh committee) ~previous:None
+  in
+  Alcotest.(check int) "two distinct digests, three entries" 3
+    (List.length (Sub_dag.payload_digests sd));
+  Alcotest.(check (list string))
+    "flat commit order with the duplicate kept"
+    (hexes [ d_a; d_b; d_b ])
+    (hexes (Sub_dag.payload_digests sd))
+
+(* The seed-42 golden run with injection ON: eight bodies per authority, one
+   every 2 s, so committed sub-DAGs really carry payload and S1.2 is not
+   vacuously comparing two empty lists. *)
+let golden_plan =
+  Tn_sim.Sim.batch_plan ~per_authority:8 ~period:(dur 2_000)
+    ~worker_id:Units.Worker_id.zero ~epoch:Units.Epoch.zero
+    ~base_fee_per_gas:Units.Base_fee.min_protocol
+    ~transactions:(fun id k -> [ Authority_id.to_hex id ^ "/" ^ string_of_int k ])
+    ()
+
+let golden =
+  lazy
+    (let committee, sk_of = setup 4 in
+     let cfg =
+       Tn_sim.Sim.config ~min_latency:(dur 5) ~max_latency:(dur 50)
+         ~horizon:(dur 20_000) ~max_steps:1_000_000 ~seed:42L
+         ~batches:golden_plan ()
+     in
+     let sim =
+       Tn_sim.Sim.run
+         (Tn_sim.Sim.create ~committee ~secret_key:sk_of
+            ~proposer_config:Proposer.default_config ~sub_dags_per_schedule:100
+            ~gc_depth:50 ~config:cfg)
+     in
+     (sim, committee))
+
+(* S1.2: the two enumerations cannot share an implementation - attachment groups
+   per certificate to build beneficiary entries, this one does not - so their
+   agreement is pinned rather than structural. *)
+let test_payload_digests_agree_with_attach () =
+  let sim, committee = Lazy.force golden in
+  let bodies = Tn_sim.Sim.batch_bodies sim in
+  let lookup d =
+    List.find_opt (fun b -> Digests.Batch_digest.equal (Batch.digest b) d) bodies
+  in
+  let address_of id =
+    List.find_opt
+      (fun a -> Authority_id.equal (Authority.id a) id)
+      (Committee.authorities committee)
+    |> Option.map Authority.execution_address
+  in
+  let attached sd =
+    let consensus =
+      Tn_execution.Consensus_block.create
+        ~parent_hash:Tn_execution.Consensus_block.genesis_parent ~sub_dag:sd
+        ~number:Tn_execution.Consensus_block.Number.genesis
+    in
+    Result.fold ~ok:Fun.id
+      ~error:(fun e ->
+        Alcotest.failf "attach: %s" (Tn_batch.Output.error_to_string e))
+      (Tn_batch.Output.attach ~consensus ~lookup ~address_of)
+  in
+  let committed = Tn_sim.Sim.committed sim (first (ids committee)) in
+  let carried =
+    List.fold_left
+      (fun acc sd -> acc + List.length (Sub_dag.payload_digests sd))
+      0 committed
+  in
+  Alcotest.(check bool) "the golden run committed sub-DAGs" true
+    (List.length committed > 0);
+  Alcotest.(check bool) "and they carry payload, so the pin is not vacuous" true
+    (carried > 0);
+  List.iteri
+    (fun i sd ->
+      Alcotest.(check (list string))
+        (Printf.sprintf "sub-DAG %d: derivation equals attachment" i)
+        (hexes (Tn_batch.Output.batch_digests (attached sd)))
+        (hexes (Sub_dag.payload_digests sd)))
+    committed
 
 (* ---- bullshark commit rule ---- *)
 
@@ -1104,6 +1219,10 @@ let () =
         [
           Alcotest.test_case "shape" `Quick test_sub_dag_shape;
           Alcotest.test_case "timestamp and digest" `Quick test_sub_dag_timestamp_and_digest;
+          Alcotest.test_case "S1.1 payload digests keep duplicates" `Quick
+            test_payload_digests_keep_duplicates;
+          Alcotest.test_case "S1.2 payload digests agree with attachment" `Quick
+            test_payload_digests_agree_with_attach;
         ] );
       ( "bullshark",
         [

@@ -25,6 +25,18 @@ val epoch : t -> Units.Epoch.t
 val size : t -> int
 val total_stake : t -> Units.Stake.t
 
+val equal : t -> t -> bool
+(** Whole-value equality: the same epoch and, seat for seat in the canonical
+    id-sorted order, the same protocol key and the same execution address —
+    exactly the two facts upstream's derived [PartialEq] over an authority
+    compares ([crates/types/src/committee.rs:128-142]). Stake is
+    {!Units.Stake.one} per seat and the thresholds are derived at {!create},
+    so nothing else can differ once the seats agree. Deliberately finer than
+    {!Authority.equal}, which identifies a seat by its id alone: two
+    committees may share every protocol key yet route a leader's withdrawal
+    to different execution addresses, and that difference is the one
+    [Tn_driver.Driver.resume]'s whole-value witness exists to catch. *)
+
 val quorum_threshold : t -> Units.Stake.t
 (** [2f+1]: the stake a certificate or parent set must reach. *)
 

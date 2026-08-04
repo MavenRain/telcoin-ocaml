@@ -64,6 +64,22 @@ let create ~epoch authorities =
 
 let epoch t = t.epoch
 let size t = List.length t.sorted
+
+(* Seat for seat over the canonical id-sorted roster: protocol key AND
+   execution address, upstream AuthorityInner's derived PartialEq
+   ([committee.rs:128-142]). [Authority.equal] (id-only) would call two
+   rosters equal that pay different addresses, which is exactly the
+   mismatch the resume witness must catch. *)
+let equal a b =
+  Units.Epoch.equal a.epoch b.epoch
+  && List.equal
+       (fun x y ->
+         Tn_crypto.Public_key.equal (Authority.protocol_key x)
+           (Authority.protocol_key y)
+         && Units.Address.equal
+              (Authority.execution_address x)
+              (Authority.execution_address y))
+       a.sorted b.sorted
 let total_stake t = t.total
 let quorum_threshold t = t.quorum
 let validity_threshold t = t.validity

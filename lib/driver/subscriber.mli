@@ -62,6 +62,22 @@ val receive :
     holds either the state before the output or the state after it, never a
     half-received one. *)
 
+val mint : t -> Tn_consensus.Sub_dag.t -> Tn_execution.Consensus_block.t
+(** The block {!receive} WOULD mint for this sub-DAG, without advancing
+    anything. Total, because minting is total: it is
+    [Tn_execution.Consensus_chain.append]'s block, discarding the advanced
+    accumulator.
+
+    It exists so a shell can make a consensus block durable BEFORE the output
+    it describes is executed, which is the ordering that creates the recovery
+    gap ([subscriber.rs:154, 182]). Agreement between the block a shell files
+    and the block the driver later executes is definitional rather than
+    asserted: both come from [Consensus_chain.append] applied to the SAME
+    accumulator, and [append] is a total pure function of its two arguments
+    ([lib/execution/consensus_chain.ml:19-22]). Nothing here can advance the
+    chain - this returns a block and no subscriber - so the only way to move
+    the accumulator remains {!receive}. *)
+
 val number : t -> Tn_execution.Consensus_block.Number.t
 (** The number of the last block minted (or the accumulator's seed):
     {!Tn_execution.Consensus_chain.number} of the wrapped accumulator. *)

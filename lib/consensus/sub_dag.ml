@@ -12,6 +12,13 @@ type t = {
 }
 
 let headers t = t.sequence
+
+(* Commit order, duplicates kept: the same flatten [Tn_batch.Output.attach]
+   performs, minus the per-certificate grouping it needs and this does not. *)
+let payload_digests t =
+  Nonempty.to_list t.sequence
+  |> List.concat_map (fun header -> List.map fst (Header.payload header))
+
 let leader t = Nonempty.last t.sequence
 let leader_round t = Header.round (leader t)
 let leader_author t = Header.author (leader t)

@@ -904,6 +904,46 @@ let t15 () =
       word_hex (Bf.slot world triple_reader 3);
     ]
 
+(* ---- chunk-38 stage 1: the window's two total projections ---- *)
+
+(* S1.3: [newest] is the anchor's own hash and [ancestors] is everything strictly
+   below it, so [newest :: ancestors] rebuilds the window exactly. An [ancestors]
+   that handed back the whole list would give a resumed [Config.create] a window
+   one entry too long, shifting every BLOCKHASH answer by one. *)
+let s13 () =
+  let w =
+    Recent_hashes.of_genesis genesis_hash
+      ~ancestors:[ anc_one; anc_two; anc_three ]
+  in
+  Alcotest.(check keccak) "newest is the anchor's own hash" genesis_hash
+    (Recent_hashes.newest w);
+  Alcotest.(check (list keccak))
+    "ancestors are exactly the three, newest first"
+    [ anc_one; anc_two; anc_three ]
+    (Recent_hashes.ancestors w);
+  Alcotest.(check (list keccak))
+    "newest :: ancestors is the window"
+    (Recent_hashes.to_list w)
+    (Recent_hashes.newest w :: Recent_hashes.ancestors w);
+  Alcotest.(check int) "and nothing was invented or dropped" 4
+    (Recent_hashes.depth w)
+
+(* S1.4: past the depth limit the split still accounts for every held hash - the
+   anti-vacuity guard on S1.3, which an unbounded window would also satisfy. *)
+let s14 () =
+  let deep =
+    List.fold_left Recent_hashes.push
+      (Recent_hashes.of_genesis genesis_hash ~ancestors:[])
+      (List.init
+         (Tn_evm.Block_hashes.depth_limit + 10)
+         (fun i -> Tn_keccak.digest ("chunk 38 s1.4/" ^ string_of_int i)))
+  in
+  Alcotest.(check int) "the window is capped at the depth limit"
+    Tn_evm.Block_hashes.depth_limit (Recent_hashes.depth deep);
+  Alcotest.(check int) "and newest plus ancestors accounts for every entry"
+    (Recent_hashes.depth deep)
+    (1 + List.length (Recent_hashes.ancestors deep))
+
 (* T-03: the leader count advances once per OUTPUT, not once per block. The
    three-block output is led by ONE authority, so an engine that counted blocks
    would owe that leader three for it; a second output from the same leader
@@ -1363,6 +1403,295 @@ let t25 () =
     (Bf.to_hex Tn_trie.Trie.empty_root)
     (Bf.to_hex (Hash32.to_bytes (Block_header.transactions_root header)))
 
+(* ================================================================== *)
+(* Chunk-38 stage 4: the engine's persistence seam.                    *)
+(* ================================================================== *)
+
+(* [chain_id] and [basefee_address] are the only two facts [resume] is told
+   again, because they are configuration and not state; the suite hands back
+   the very ones every engine here was created with. *)
+let round_trip e = Engine.resume ~chain_id ~basefee_address (Engine.snapshot e)
+
+(* A committee as two comparable projections: which epoch it is for and who is
+   in it. Hex rather than an opaque testable, so a failure names WHICH member
+   moved instead of only that one did. *)
+let committee_shape c =
+  ( Units.Epoch.to_int (Committee.epoch c),
+    List.map
+      (fun a -> Authority_id.to_hex (Authority.id a))
+      (Committee.authorities c) )
+
+(* The leader counts as rows a failure can be read off. *)
+let counts e =
+  List.map
+    (fun (a, n) -> (addr_hex a, n))
+    (Rewards_counter.address_counts (Engine.rewards e))
+
+(* The phase as (which arm, the timestamp that arm carries). A tag rather than
+   a bare timestamp: "sealed at t" and "running to t" are different engines,
+   and only the tag tells them apart. *)
+let phase_shape e =
+  match Engine.phase e with
+  | Engine.Running { boundary; committee = _ } ->
+      ("running", Units.Timestamp.to_sec boundary)
+  | Engine.Sealed { closed_at; committee = _ } ->
+      ("sealed", Units.Timestamp.to_sec closed_at)
+
+(* Every answer BLOCKHASH can get out of this engine's window, from one request
+   past the far edge up to the block being built. Read through
+   [Block_hashes.lookup] - the function the interpreter's host seam calls - so
+   this is what the OPCODE would see and not merely what the list holds. *)
+let window_answers e =
+  let w = Recent_hashes.window (Engine.recent_hashes e) in
+  let current = 1 + Block_number.to_int (Anchor.number (Engine.anchor e)) in
+  let floor = current - Tn_evm.Block_hashes.depth_limit - 1 in
+  List.map
+    (fun requested ->
+      word_hex
+        (Tn_evm.Block_hashes.lookup w ~current:(word current)
+           ~requested:(word requested)))
+    (List.init (current - floor + 1) (fun i -> floor + i))
+
+(* S4.1: the round trip moves nothing. Every field a resumed engine is supposed
+   to carry is read off both sides and compared, on a freshly CREATED engine, so
+   the assertion is about the seam and not about a fold. *)
+let s41 () =
+  let original = engine0 in
+  let resumed = round_trip original in
+  Alcotest.(check keccak)
+    "the anchor hash survives"
+    (Anchor.hash (Engine.anchor original))
+    (Anchor.hash (Engine.anchor resumed));
+  Alcotest.(check int) "and so does its number"
+    (Block_number.to_int (Anchor.number (Engine.anchor original)))
+    (Block_number.to_int (Anchor.number (Engine.anchor resumed)));
+  Alcotest.(check bool) "the world is the same state" true
+    (World.equal (Engine.world original) (Engine.world resumed));
+  Alcotest.(check (list keccak))
+    "the window is carried whole, in order"
+    (Recent_hashes.to_list (Engine.recent_hashes original))
+    (Recent_hashes.to_list (Engine.recent_hashes resumed));
+  Alcotest.(check (list (pair string int)))
+    "the leader counts are carried" (counts original) (counts resumed);
+  Alcotest.(check (pair int (list string)))
+    "the committee is the same epoch and the same membership"
+    (committee_shape (Engine.committee original))
+    (committee_shape (Engine.committee resumed));
+  Alcotest.(check bool) "and a running engine resumes running"
+    (Engine.is_sealed original) (Engine.is_sealed resumed)
+
+(* T-14's 260-block run, folded for its WINDOW rather than for its blocks: past
+   the depth limit the window is full, so a seam that truncated it would move
+   answers a short fixture never asks for. *)
+let deep_engine = fst (executed (engine_on world0) out_deep)
+
+(* S4.2: the window crosses the seam at full depth. *)
+let s42 () =
+  let resumed = round_trip deep_engine in
+  Alcotest.(check int) "the original window is full"
+    Tn_evm.Block_hashes.depth_limit
+    (Recent_hashes.depth (Engine.recent_hashes deep_engine));
+  Alcotest.(check int) "and the resumed one holds exactly as many"
+    (Recent_hashes.depth (Engine.recent_hashes deep_engine))
+    (Recent_hashes.depth (Engine.recent_hashes resumed));
+  Alcotest.(check (list keccak))
+    "hash for hash, in order"
+    (Recent_hashes.to_list (Engine.recent_hashes deep_engine))
+    (Recent_hashes.to_list (Engine.recent_hashes resumed))
+
+(* S4.3: SEMANTIC window agreement, the assertion that makes the window
+   non-decorative. The second row is the anti-vacuity guard: a fixture too
+   short for the window to be load-bearing fails here rather than banking a
+   pass on a window of zeroes.
+
+   Declared vacuity verdict: no transaction in this suite reaches a BLOCKHASH
+   through a real close-epoch resume, so this proves agreement at the host-seam
+   function the interpreter calls, not end to end through the opcode. *)
+let s43 () =
+  let original = deep_engine in
+  let resumed = round_trip original in
+  let answers = window_answers original in
+  Alcotest.(check int) "the sweep covers the whole window and one past it"
+    (Tn_evm.Block_hashes.depth_limit + 2)
+    (List.length answers);
+  Alcotest.(check bool)
+    "and at least a full window of those answers is a real hash" true
+    (List.length (List.filter (fun a -> a <> word_hex U256.zero) answers)
+    >= Tn_evm.Block_hashes.depth_limit);
+  Alcotest.(check (list string))
+    "every BLOCKHASH the window can be asked agrees across the seam" answers
+    (window_answers resumed)
+
+(* The sealed engine of the close section, folded through the same fixture
+   T-20..T-25 use. A function rather than a value: [close_block_of] asserts as
+   it goes, and an assertion at module initialisation would take the whole
+   executable down instead of one case. *)
+let sealed_engine () = fst (close_block_of (closing_engine ()))
+
+(* One more empty output, after the one that closed the epoch. *)
+let out_after_close =
+  output_on close_chain ~at:1_700_000_600L ~r:10 [ (close_leader, []) ]
+
+(* S4.4: the phase round trip. The three [begin_epoch] probes straddle
+   [closed_at], and the fold probe is what makes the mutation bite
+   SEMANTICALLY: a resumed engine seated Running would carry the same frontier
+   and answer all three probes alike, and only folding an output the original
+   refuses tells the two arms apart. *)
+let s44 () =
+  let original = sealed_engine () in
+  let resumed = round_trip original in
+  Alcotest.(check (pair string int64))
+    "the fixture engine really is sealed, at the closing output's commit time"
+    ("sealed", 1_700_000_500L) (phase_shape original);
+  Alcotest.(check (pair string int64))
+    "and the seam carries the arm and its timestamp" (phase_shape original)
+    (phase_shape resumed);
+  let probe e at =
+    Result.is_ok
+      (Engine.begin_epoch e ~boundary:(ts at) ~committee:close_chain.cmt)
+  in
+  let probes = [ 1_700_000_499L; 1_700_000_500L; 1_700_000_501L ] in
+  Alcotest.(check (list bool))
+    "the original refuses a boundary below and at closed_at, accepts above"
+    [ false; false; true ]
+    (List.map (probe original) probes);
+  Alcotest.(check (list bool))
+    "and the resumed engine answers the same three"
+    (List.map (probe original) probes)
+    (List.map (probe resumed) probes);
+  let folds e =
+    Result.fold ~ok:(fun _ -> "folded") ~error:Engine.error_to_string
+      (Engine.execute e out_after_close)
+  in
+  Alcotest.(check bool) "the original refuses the next output as Epoch_sealed"
+    true
+    (mentions "epoch sealed" (folds original));
+  Alcotest.(check string) "and the resumed engine refuses it identically"
+    (folds original) (folds resumed)
+
+(* S4.5: the reconstructed config. The fixture is SEALED and was created with
+   [boundary_past], so a config reporting the phase's frontier and one
+   reporting the boundary the engine was created with are far apart. *)
+let s45 () =
+  let original = sealed_engine () in
+  let resumed = round_trip original in
+  let cfg = Engine.config resumed in
+  Alcotest.(check int64)
+    "the boundary reported is the phase's frontier, not the created one"
+    1_700_000_500L
+    (Units.Timestamp.to_sec (Config.epoch_boundary cfg));
+  Alcotest.(check int64) "which the created engine's config does not report"
+    1L
+    (Units.Timestamp.to_sec (Config.epoch_boundary (Engine.config original)));
+  Alcotest.(check keccak) "the anchor is the persisted one"
+    (Anchor.hash (Engine.anchor original))
+    (Anchor.hash (Config.anchor cfg));
+  Alcotest.(check (list keccak))
+    "and the ancestors are everything strictly BELOW the window's newest"
+    (Recent_hashes.ancestors (Engine.recent_hashes original))
+    (Config.ancestors cfg)
+
+(* ---- S4.6: continuation equality ---- *)
+
+(* The boundary sits BETWEEN the head outputs and the tail's last one, so the
+   tail closes the epoch and its closing block's withdrawals_root commits the
+   counts the HEAD accumulated. That is what makes losing the counts across the
+   seam a visible block hash rather than an invisible field. *)
+let resume_boundary = ts 1_700_000_450L
+
+(* Empty batches, so a block is produced without funding anything; distinct
+   base fees, so no two batches share a digest. *)
+let head_outputs =
+  [
+    output_on close_chain ~at:1_700_000_100L ~r:1
+      [ (close_leader, [ (raw_batch ~base_fee:(fee 1) [], w0) ]) ];
+    output_on close_chain ~at:1_700_000_200L ~r:2 [ (close_leader, []) ];
+    output_on close_chain ~at:1_700_000_300L ~r:3
+      [ (close_leader, [ (raw_batch ~base_fee:(fee 2) [], w0) ]) ];
+  ]
+
+let tail_outputs =
+  [
+    output_on close_chain ~at:1_700_000_400L ~r:4
+      [ (close_leader, [ (raw_batch ~base_fee:(fee 3) [], w0) ]) ];
+    output_on close_chain ~at:1_700_000_500L ~r:5 [ (close_leader, []) ];
+  ]
+
+(* Fold outputs, keeping the engine and the block hashes in production order.
+   The hashes are gathered newest-last by reversing once at the end rather than
+   appending inside the fold. *)
+let fold_outputs engine outputs =
+  let final, produced_rev =
+    List.fold_left
+      (fun (e, acc) output ->
+        let next, blocks = executed e output in
+        ( next,
+          List.fold_left
+            (fun acc b -> keccak_hex (Executed_block.hash b) :: acc)
+            acc blocks ))
+      (engine, []) outputs
+  in
+  (final, List.rev produced_rev)
+
+let s46 () =
+  let after_head, head_blocks =
+    fold_outputs
+      (closing_engine ~boundary:resume_boundary ())
+      head_outputs
+  in
+  let resumed = round_trip after_head in
+  let original_end, original_hashes = fold_outputs after_head tail_outputs in
+  let resumed_end, resumed_hashes = fold_outputs resumed tail_outputs in
+  Alcotest.(check bool) "the head really accumulated leader credit" true
+    (List.exists (fun (_, n) -> n > 0) (counts after_head));
+  Alcotest.(check bool) "and it really produced blocks" true
+    (List.length head_blocks > 0);
+  Alcotest.(check bool) "the tail really closes the epoch" true
+    (Engine.is_sealed original_end);
+  Alcotest.(check bool) "and it really produced blocks to compare" true
+    (List.length original_hashes > 0);
+  Alcotest.(check (list string))
+    "the same tail folded through the seam produces the same blocks"
+    original_hashes resumed_hashes;
+  Alcotest.(check bool) "and leaves the same world" true
+    (World.equal (Engine.world original_end) (Engine.world resumed_end))
+
+(* ---- S4.7: the resume-side normalization guard ---- *)
+
+(* [Engine.persisted] is a transparent record, so [snapshot] is only its
+   INTENDED producer: nothing stops a hand-built value whose window's newest
+   entry disagrees with the anchor's own hash, and [build_block] reads
+   BLOCKHASH out of one field and [parent_hash] out of the other in the same
+   block. [resume] therefore re-seats the window from the anchor instead of
+   trusting it, and this pins that post-fact on a deliberately skewed pair.
+   The fixture is [deep_engine], so the ancestors sit at the depth cap and a
+   re-seat that truncated or reordered them would also show here. *)
+let s47 () =
+  let p = Engine.snapshot deep_engine in
+  let anchor_hash = Anchor.hash p.Engine.anchor in
+  let bogus = Tn_keccak.digest "chunk 38 skewed-newest sentinel" in
+  Alcotest.(check bool)
+    "the sentinel really disagrees with the anchor's hash" false
+    (Tn_keccak.equal bogus anchor_hash);
+  let kept_ancestors = Recent_hashes.ancestors p.Engine.hashes in
+  let skewed =
+    {
+      p with
+      Engine.hashes = Recent_hashes.of_genesis bogus ~ancestors:kept_ancestors;
+    }
+  in
+  let resumed = Engine.resume ~chain_id ~basefee_address skewed in
+  Alcotest.(check keccak)
+    "resume re-seats the window's newest entry from the anchor" anchor_hash
+    (Recent_hashes.newest (Engine.recent_hashes resumed));
+  Alcotest.(check (list keccak))
+    "and keeps the persisted ancestors below it, in order" kept_ancestors
+    (Recent_hashes.ancestors (Engine.recent_hashes resumed));
+  Alcotest.(check (list keccak))
+    "so the skew is gone: the window is the honest engine's, hash for hash"
+    (Recent_hashes.to_list (Engine.recent_hashes deep_engine))
+    (Recent_hashes.to_list (Engine.recent_hashes resumed))
+
 let () =
   Alcotest.run "engine"
     [
@@ -1418,6 +1747,10 @@ let () =
             t14;
           Alcotest.test_case "T-15 the window prepends, never appends" `Quick
             t15;
+          Alcotest.test_case "S1.3 newest and ancestors split the window" `Quick
+            s13;
+          Alcotest.test_case "S1.4 the split holds at the depth limit" `Quick
+            s14;
         ] );
       ( "builder",
         [
@@ -1437,5 +1770,22 @@ let () =
             "T-24 the close block is a first batch and writes the root" `Quick
             t24;
           Alcotest.test_case "T-25 the close block executes nothing" `Quick t25;
+        ] );
+      ( "resume",
+        [
+          Alcotest.test_case "S4.1 the round trip carries every moving field"
+            `Quick s41;
+          Alcotest.test_case "S4.2 a full window crosses the seam whole" `Quick
+            s42;
+          Alcotest.test_case "S4.3 the window agrees at the BLOCKHASH seam"
+            `Quick s43;
+          Alcotest.test_case "S4.4 a sealed engine resumes sealed" `Quick s44;
+          Alcotest.test_case "S4.5 the resumed config reports the frontier"
+            `Quick s45;
+          Alcotest.test_case "S4.6 the same tail continues identically" `Quick
+            s46;
+          Alcotest.test_case
+            "S4.7 a skewed persisted resumes agreeing with its anchor" `Quick
+            s47;
         ] );
     ]

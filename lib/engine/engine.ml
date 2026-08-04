@@ -123,10 +123,16 @@ let world t = t.world
 let recent_hashes t = t.hashes
 let rewards t = t.rewards
 
-let committee t =
-  match t.phase with
+let phase t = t.phase
+
+(* Whose leader counts the phase is accruing, or whose it just finished. A
+   projection of the PHASE rather than of the engine, so a resumed engine reads
+   it out of the same one place. *)
+let phase_committee = function
   | Running { committee; boundary = _ } -> committee
   | Sealed { committee; closed_at = _ } -> committee
+
+let committee t = phase_committee t.phase
 
 let is_sealed t =
   match t.phase with Running _ -> false | Sealed _ -> true
@@ -135,10 +141,11 @@ let is_sealed t =
    engine it is the commit timestamp that closed the epoch, so the next epoch's
    first output cannot re-close it; on a running one it is the boundary already
    installed, so a caller cannot walk the frontier backwards mid-epoch. *)
-let frontier t =
-  match t.phase with
+let phase_frontier = function
   | Running { boundary; committee = _ } -> boundary
   | Sealed { closed_at; committee = _ } -> closed_at
+
+let frontier t = phase_frontier t.phase
 
 let begin_epoch t ~boundary ~committee =
   let closed_at = frontier t in
@@ -468,3 +475,72 @@ let execute state output =
       | Block_plan.Skip -> Ok (rewarded, [])
       | Block_plan.Close_block spec -> close_block rewarded output spec
       | Block_plan.Batch_blocks specs -> build_blocks rewarded output specs)
+
+(* Everything the engine carries that MOVES: [t] minus [config], which never
+   changes and is rebuilt by [resume] from the two facts that genuinely are
+   configuration, and minus [tip], which a resumed engine legitimately lacks
+   because the block behind [anchor] was produced in a previous life.
+
+   Declared HERE, below every function that builds a [t], and not beside [t]:
+   the two records share five field names, and a shared name in scope would
+   make the record expressions above resolve against the later type instead. *)
+type persisted = {
+  anchor : Anchor.t;
+  world : Tn_state.World_state.t;
+  hashes : Recent_hashes.t;
+  rewards : Rewards_counter.t;
+  phase : phase;
+}
+
+(* The only producer of a [persisted], which is what keeps the window full and
+   the counts earned by the engine that accumulated them. *)
+let snapshot (t : t) : persisted =
+  {
+    anchor = t.anchor;
+    world = t.world;
+    hashes = t.hashes;
+    rewards = t.rewards;
+    phase = t.phase;
+  }
+
+(* Rebuild an engine from persistence. Total, mirroring [create]: each field's
+   own producers discharge every INTRA-field obligation, and the one genuinely
+   cross-field obligation - the window's newest entry must be the anchor's own
+   hash, because [build_block] reads BLOCKHASH out of one and [parent_hash]
+   out of the other in the same block - is not trusted but re-established: the
+   window is re-seated as [Recent_hashes.of_genesis (Anchor.hash p.anchor)]
+   over the persisted ancestors, so the invariant is a post-fact of resume.
+   [persisted] is a transparent record ([snapshot] is its intended producer,
+   not its only possible one), and a hand-built value that skews the pair
+   would otherwise execute with a BLOCKHASH answer disagreeing with its own
+   parent hash, silently and rootward. On a [snapshot]-produced value the
+   re-seat is the identity - [of_genesis (newest t) ~ancestors:(ancestors t)]
+   rebuilds the very same window - and on a skewed one it NORMALIZES rather
+   than refuses, because refusing would make [resume] fallible for an arm no
+   snapshot can reach, rippling through [Checkpoint] and [Driver.resume].
+
+   The reconstructed [Config.t] is the other value minted, and its epoch-shaped
+   field is read out of the PHASE - the installed boundary while Running, the
+   closing commit time while Sealed - through the same [phase_frontier] that
+   [begin_epoch] compares against, so the config describes the engine rather
+   than misreporting it. The ancestors are [Recent_hashes.ancestors] and never
+   [to_list]: the window's newest entry IS the anchor's own hash (by the
+   re-seat above, not by trust), and [Config.create] wants everything strictly
+   below it, so the whole window would be one entry too long and shift every
+   BLOCKHASH answer by one. *)
+let resume ~chain_id ~basefee_address (p : persisted) : t =
+  let ancestors = Recent_hashes.ancestors p.hashes in
+  let hashes = Recent_hashes.of_genesis (Anchor.hash p.anchor) ~ancestors in
+  {
+    config =
+      Config.create ~anchor:p.anchor ~ancestors ~world:p.world ~chain_id
+        ~basefee_address
+        ~epoch_boundary:(phase_frontier p.phase)
+        ~committee:(phase_committee p.phase);
+    anchor = p.anchor;
+    tip = None;
+    world = p.world;
+    hashes;
+    rewards = p.rewards;
+    phase = p.phase;
+  }

@@ -259,6 +259,35 @@ let test_mixed_list_numbers () =
   Alcotest.(check (list string)) "re-folding the same list is byte-identical"
     (hexes blocks) (hexes blocks2)
 
+let drop k l = List.filteri (fun i _ -> i >= k) l
+
+(* T1.6 (chunk-38 stage 7 backfill, S7.6): THE ACCUMULATOR LEMMA. For a
+   sub-DAG list split at any j, [resume] seeded from the genesis fold's j-th
+   block and folded over the tail produces block-for-block the same blocks as
+   the genesis fold of the whole list restricted to the tail. This is the
+   algebraic fact [Driver.resume]'s re-mint rests on, pinned here at the
+   accumulator itself so a mis-seeded resume (M47's genesis-parent seed) is
+   caught one layer below the driver, where it cannot be confused with a
+   wrong engine anchor. *)
+let test_tail_lemma () =
+  let sim = run () in
+  let n = 6 in
+  let sds = committed_prefix sim n in
+  let _, blocks = fold_chain Chain.genesis sds in
+  List.iter
+    (fun j ->
+      let bj = nth "the split block" blocks (j - 1) in
+      let resumed = Chain.resume ~parent:(Cb.digest bj) ~number:(Cb.number bj) in
+      let _, tail = fold_chain resumed (drop j sds) in
+      Alcotest.(check (list string))
+        (Printf.sprintf "split at %d: the resumed tail IS the whole fold's tail" j)
+        (hexes (drop j blocks)) (hexes tail);
+      Alcotest.(check (list int))
+        (Printf.sprintf "split at %d: with the same numbers" j)
+        (List.map (fun b -> Cb.Number.to_int (Cb.number b)) (drop j blocks))
+        (List.map (fun b -> Cb.Number.to_int (Cb.number b)) tail))
+    (List.init (n - 1) (fun i -> i + 1))
+
 let () =
   Alcotest.run "consensus_chain"
     [
@@ -274,5 +303,7 @@ let () =
             test_noop_differential;
           Alcotest.test_case "an empty output still consumes a number" `Quick
             test_mixed_list_numbers;
+          Alcotest.test_case "a resumed tail is the whole fold's tail" `Quick
+            test_tail_lemma;
         ] );
     ]

@@ -57,6 +57,22 @@ val sequence_number : t -> Units.Sequence_number.t
 val headers : t -> Header.t Nonempty.t
 (** Ascending round, traversal-discovery order within a round, leader last. *)
 
+val payload_digests : t -> Digests.Batch_digest.t list
+(** Every batch digest this sub-DAG's certificates carry, flattened in commit
+    order (headers ascending by round, leader last) and preserving duplicates:
+    a digest under two certificates appears twice, because it is one body
+    resolved twice and executed as two blocks whose transactions
+    self-invalidate ([subscriber.rs:480-509]).
+
+    Chunk 38 needs this so the durable store can derive a record's bodies from
+    the block alone, without a store-local re-implementation of the flatten
+    that could drift from the one attachment performs. It cannot literally
+    share [Tn_batch.Output.attach]'s walk, which groups per header to build the
+    per-certificate beneficiary entries ([lib/batch/output.mli:26-30]); the
+    agreement between this list and [Tn_batch.Output.batch_digests] is pinned
+    by a test instead, and stated here so a reader knows it is pinned rather
+    than structural. *)
+
 val scores : t -> Reputation_scores.t
 
 val stored_timestamp : t -> Units.Timestamp.t

@@ -40,6 +40,19 @@ val depth : t -> int
 (** How many hashes are held. Truncation is invisible through {!window}, which
     re-truncates anyway, so this is the only place the cap can be observed. *)
 
+val newest : t -> Tn_keccak.t
+(** The most recent hash: the anchor's own. Total, because the type's contract
+    already guarantees the window is never empty — which is why this is a
+    projection rather than an option, and why nothing above needs
+    [List.hd] on {!to_list}. *)
+
+val ancestors : t -> Tn_keccak.t list
+(** Everything below {!newest}, newest first: the list [Config.create]'s
+    [~ancestors] wants, [[]] at a true genesis. Exists so a resumed engine can
+    reassemble the config it reports without taking a list apart — the one
+    place an off-by-one would silently produce a window describing a chain that
+    does not exist ([recent_hashes.mli:18-25]). *)
+
 val to_list : t -> Tn_keccak.t list
 (** The hashes, newest first: the projection an equality assertion can compare
     across two engine states. *)
