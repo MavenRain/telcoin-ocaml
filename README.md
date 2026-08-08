@@ -489,9 +489,15 @@ it, so what stays blocked on networking is the batch fetch itself, plus the
 driver that forms the consensus chain and attaches payloads to it, and EIP-4844
 blob transactions
 (the blob *instructions* landed in chunk 35, reading a blob environment TN pins
-by construction). Also: the consensus-layer crypto spike (execution-layer
-secp256k1 is now real and oracle-checked, but `tn_crypto` is still a stub and the
-validator BLS keys are not ported); the pending-certificate fetcher (buffer-and-fetch on a missing parent —
+by construction). Also: flipping the node binaries onto the real consensus
+crypto (the crypto spike itself is closed: execution-layer secp256k1 is real
+and oracle-checked, and `tn_crypto` is no longer stub-only, since
+`tn_crypto_blst` implements the seam with a pure-OCaml BLAKE3 digest and
+BLS12-381 min-sig signatures byte-checked against golden vectors minted from
+the Rust node's own call paths (validator key derivation is an OCaml-side
+convention, pinned by self-hosted regression vectors only); the
+implementation is selected per executable at link time, and the simulator
+binaries still link the forgeable stub); the pending-certificate fetcher (buffer-and-fetch on a missing parent —
 needs the network layer); the Eio shell; codec/crypto byte-compat alignment.
 
 ## OCaml ecosystem for the full-node goal

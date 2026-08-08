@@ -1,0 +1,11 @@
+; Isolated conformance executable for the DEFAULT implementation of the
+; virtual tn_crypto library. This stanza deliberately names NO concrete
+; implementation: with only tn_crypto in scope, dune falls back to
+; default_implementation (telcoin_ocaml.crypto_stub, lib/crypto/dune), so
+; this executable proves both that the fallback still engages while the
+; real implementation coexists in the repo and that the stub satisfies
+; the same shared conformance functor. The pre-existing test/dune and
+; bin/dune stanzas are untouched.
+(test
+ (name test_crypto_stub_conformance)
+ (libraries tn_crypto crypto_conformance alcotest))

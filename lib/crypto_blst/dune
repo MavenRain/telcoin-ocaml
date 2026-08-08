@@ -1,0 +1,11 @@
+; The real implementation of the virtual tn_crypto library: pure-OCaml
+; BLAKE3 (the private Blake3 module — no opam blake3 dependency exists for
+; this toolchain) plus BLS12-381 min-sig aggregation via bls12-381 and
+; bls12-381-signature. Selected per executable by naming
+; telcoin_ocaml.crypto_blst in that executable's (libraries ...); every
+; existing executable keeps resolving to the stub default.
+(library
+ (name tn_crypto_blst)
+ (public_name telcoin_ocaml.crypto_blst)
+ (implements telcoin_ocaml.crypto)
+ (libraries bls12-381 bls12-381-signature hex))

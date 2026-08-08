@@ -1,0 +1,9 @@
+; Shared, implementation-agnostic conformance suite for the virtual
+; tn_crypto seam. A plain library (not a test) holding one functor over
+; the seam's observable contract; it depends only on alcotest so it can
+; be linked beside EITHER implementation. Instantiated twice:
+; test/crypto_blst (real BLS12-381/BLAKE3) and
+; test/crypto_stub_conformance (stub via default_implementation).
+(library
+ (name crypto_conformance)
+ (libraries alcotest))

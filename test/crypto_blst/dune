@@ -1,0 +1,16 @@
+; Isolated test executable for the real tn_crypto_blst implementation.
+; Naming telcoin_ocaml.crypto_blst here (and nowhere else) makes dune link
+; THIS executable against the real implementation of the virtual tn_crypto
+; library; the pre-existing test/dune and bin/dune stanzas are untouched and
+; keep resolving to the stub via default_implementation.
+(rule
+ (copy ../fixtures/blake3_official_vectors.txt blake3_official_vectors.txt))
+
+(rule
+ (copy ../fixtures/tn_crypto_blst_vectors.txt tn_crypto_blst_vectors.txt))
+
+(test
+ (name test_crypto_blst)
+ (deps blake3_official_vectors.txt tn_crypto_blst_vectors.txt)
+ (libraries tn_crypto telcoin_ocaml.crypto_blst crypto_conformance bls12-381
+   bls12-381-signature alcotest))
