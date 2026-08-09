@@ -45,7 +45,7 @@ let ids committee = List.map Authority.id (Committee.authorities committee)
 
 let a_header committee ~author ~round ?(created_at = 0) ?(payload = []) ~parents ()
     =
-  Header.make ~author
+  Header.make ~latest_execution_block:Tn_types.Block_num_hash.zero ~author
     ~round:(get (Round.of_int round))
     ~epoch:(Committee.epoch committee)
     ~created_at:(get (Units.Timestamp.of_sec (Int64.of_int created_at)))
@@ -454,6 +454,46 @@ let test_schedule_swap_table_4nodes () =
         (Authority_id.equal swapped (id 2) || Authority_id.equal swapped (id 3));
       Alcotest.(check bool) "swap is deterministic across queries" true
         (Authority_id.equal swapped (Authority.id (Leader_schedule.leader sched' (lr_of 2))));
+      (* WHICH good node, not merely one of them. Rust makes exactly one
+         [choose] draw over the good list from [StdRng::from_seed(24 zero bytes
+         ++ LE round)] (leader_schedule.rs:209-218), so the index is pinned
+         here rather than left to "some good node": a schedule wired to a
+         different generator lands elsewhere and this row is how that shows.
+
+         MANY rounds, not one. Over a two-element good list any two generators
+         agree half the time, so a single round is a coin flip and a pin on it
+         is vacuous half the time; the sweep below fails on the first round
+         where the generators part company. Only the rounds whose round-robin
+         leader is actually bad are asserted, because the others never reach
+         the draw at all. *)
+      let good = List.map Authority.id (Leader_schedule.good_nodes sched') in
+      let predicted r =
+        Tn_rand.Std_rng.random_range_inclusive
+          (Tn_rand.Std_rng.of_leader_round (Int64.of_int r))
+          ~bound:(List.length good - 1)
+        |> Result.to_option |> Option.map fst
+      in
+      let elects_a_bad_node r =
+        Authority_id.equal
+          (Authority.id (Leader_schedule.leader sched (lr_of r)))
+          (id 0)
+      in
+      let swapped_rounds =
+        List.filter elects_a_bad_node (List.init 32 (fun i -> 2 * (i + 1)))
+      in
+      Alcotest.(check bool) "the base schedule does elect the bad node" true
+        (List.length swapped_rounds > 1);
+      List.iter
+        (fun r ->
+          Alcotest.(check bool)
+            (Printf.sprintf "round %d: the swap IS the ChaCha12 draw" r)
+            true
+            (Option.fold ~none:false
+               ~some:
+                 (Authority_id.equal
+                    (Authority.id (Leader_schedule.leader sched' (lr_of r))))
+               (Option.bind (predicted r) (List.nth_opt good))))
+        swapped_rounds;
       Alcotest.(check bool) "non-final scores install nothing" true
         (Option.is_none
            (Leader_schedule.note_final_scores sched ~activation:(lr_of 2)

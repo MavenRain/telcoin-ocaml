@@ -1,4 +1,11 @@
+; tn_keccak and tn_hash32 are DIRECT dependencies because the sub-DAG
+; randomness is keccak256, a fixed protocol fact rather than a link-time seam
+; choice, and it is carried as the 32-byte gate. tn_rand is direct because the
+; leader swap draws from rand 0.9.2's ChaCha12 StdRng. All three are acyclic:
+; tn_rand -> tn_hash32 -> tn_keccak -> digestif is a leaf chain and none of
+; them names tn_consensus.
 (library
  (name tn_consensus)
  (public_name telcoin_ocaml.consensus)
- (libraries tn_std tn_codec tn_crypto tn_types tn_vertex))
+ (libraries tn_std tn_codec tn_crypto tn_types tn_vertex tn_keccak tn_hash32
+   tn_rand))

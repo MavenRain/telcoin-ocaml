@@ -53,10 +53,6 @@ type error =
           closed, which would close the next epoch on its first output. *)
   | Plan of Tn_batch.Block_plan.error
       (** The output could not be turned into a block plan. *)
-  | Randomness_width of int
-      (** The sub-DAG's randomness was not 32 bytes, so the closing block's
-          [Epoch_boundary] commitment cannot be formed. Carries the width
-          seen. *)
   | Withdrawals of Tn_evm.Rewards_counter.error
       (** The leader counts could not be turned into withdrawal records. *)
   | Context of { number : int; error : Tn_evm.Block_context.error }

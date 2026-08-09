@@ -107,7 +107,7 @@ let certify header =
    Skip for as long as the output does not close the epoch. *)
 let empty_output ~author ~r ~at =
   let header =
-    Header.make ~author ~round:(round r) ~epoch:Units.Epoch.zero
+    Header.make ~latest_execution_block:Tn_types.Block_num_hash.zero ~author ~round:(round r) ~epoch:Units.Epoch.zero
       ~created_at:(ts at) ~payload:[] ~parents:genesis_parents
   in
   let sub_dag =
@@ -401,7 +401,7 @@ let output_on ch ~at ~r entries =
           if i = n - 1 then ts at else ts (Int64.of_int (10 + i))
         in
         let header =
-          Header.make ~author ~round:(round (r + i)) ~epoch:Units.Epoch.zero
+          Header.make ~latest_execution_block:Tn_types.Block_num_hash.zero ~author ~round:(round (r + i)) ~epoch:Units.Epoch.zero
             ~created_at
             ~payload:(List.map (fun (b, w) -> (Batch.digest b, w)) bs)
             ~parents

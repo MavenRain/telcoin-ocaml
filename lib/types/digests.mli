@@ -1,24 +1,21 @@
-(** Domain-separated digest newtypes.
+(** Distinct digest newtypes.
 
     Rust generates these with a [digest_newtype!] macro so that a header digest
     can never be passed where a batch digest is expected. Each module below is
-    a distinct abstract type wrapping a {!Tn_crypto.Digest.t}, and each carries
-    a distinct {!domain} tag that the producing module folds into the hash
-    pre-image, so two structurally identical byte strings in different domains
-    still hash apart. *)
+    a distinct abstract type wrapping a {!Tn_crypto.Digest.t}. The separation is
+    in the type only. Rust hashes every protocol pre-image bare, so no kind
+    folds a tag into its pre-image, and two kinds that wrap the same bytes are
+    the same 32 bytes once unwrapped. *)
 
 module type S = sig
   type t
 
-  val domain : string
-  (** The domain-separation tag hashed ahead of this digest's pre-image. *)
-
   val zero : t
-  (** The all-zero digest of this domain, wrapping {!Tn_crypto.Digest.zero}. The
-      domain tag is deliberately absent from it: this is not the digest of an
-      empty thing, it is the absent-value constant Rust writes as [B256::ZERO],
-      so every domain's [zero] carries the same 32 NUL bytes and only the type
-      tells them apart. It exists because a header slot this chain leaves unused
+  (** The all-zero digest, wrapping {!Tn_crypto.Digest.zero}. This is not the
+      digest of an empty thing, it is the absent-value constant Rust writes as
+      [B256::ZERO], so every kind's [zero] carries the same 32 NUL bytes and
+      only the type tells them apart. It exists because a header slot this chain
+      leaves unused
       (the ommers hash of an epoch-closing block, which has no batch behind it)
       must hold that exact constant, and no pre-image hashes to it. *)
 

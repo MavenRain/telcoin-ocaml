@@ -64,21 +64,36 @@ type t
 
 val genesis_parent : Digests.Output_digest.t
 (** The parent digest the {e first} committed block links to — the anchor of the
-    chain. Rust uses the digest of the default [ConsensusHeader] (number zero,
-    wrapping a default sub-DAG built from a default certificate); reproducing
-    that byte-for-byte would need a [Certificate::default] escape hatch this
-    port's types deliberately forbid — a certificate exists only as proof of a
-    verified quorum — so the anchor is a distinct documented constant.
-    Aligning it with Rust's exact bytes is deferred to the codec/crypto chunk,
-    alongside the concrete-hash swap the whole port defers. *)
+    chain. Rust has no hardcoded constant for it either: it digests
+    [ConsensusHeader::default()] (block.rs:58-75), which is number zero, a zero
+    parent, a zero [extra], and a sub-DAG holding one default [Header], empty
+    non-final scores, a stored timestamp of zero and the
+    {!Tn_consensus.Sub_dag.default_randomness}. This value is COMPUTED from
+    exactly those parts rather than pinned, so it tracks the {!Tn_crypto} seam
+    and cannot drift from the pre-image {!digest} hashes. On a fresh chain
+    Rust's [last_consensus_parent] resolves to the same header
+    (crates/state-sync/src/lib.rs:138-151). *)
 
 val create :
   parent_hash:Digests.Output_digest.t ->
   sub_dag:Sub_dag.t ->
   number:Number.t ->
   t
-(** A block at height [number] extending [parent_hash] with [sub_dag]. The digest
-    is computed once from the frozen pre-image and cached. *)
+(** A block at height [number] extending [parent_hash] with [sub_dag], with the
+    zero {!extra} every producer writes. The digest is computed once from the
+    frozen pre-image and cached. *)
+
+val of_persisted :
+  parent_hash:Digests.Output_digest.t ->
+  sub_dag:Sub_dag.t ->
+  number:Number.t ->
+  extra:Tn_hash32.Hash32.t ->
+  t
+(** {!create} with an explicit {!extra}. RESERVED for the wire decoder, the
+    precedent {!Tn_consensus.Sub_dag.of_persisted} sets: [extra] round-trips,
+    so a reader must be able to rebuild the value it was handed, while no
+    producer in this port ever chooses a non-zero one. The digest is
+    recomputed, never taken from the wire, and does not depend on [extra]. *)
 
 val parent_hash : t -> Digests.Output_digest.t
 (** The digest of the block this one extends (the chain anchor for the first). *)
@@ -89,31 +104,38 @@ val sub_dag : t -> Sub_dag.t
 val number : t -> Number.t
 (** This block's height in the chain. *)
 
+val extra : t -> Tn_hash32.Hash32.t
+(** Rust's currently-unused [extra: B256] (block.rs:29-31). It is on the wire
+    and it round-trips, but it is NOT in the digest: {!preimage} folds in
+    [B256::default()] whatever this holds, so two blocks differing only here
+    share a digest and differ in their encoding. *)
+
 val preimage : t -> string
-(** The digest pre-image, {e without} the domain tag: the 32-byte [parent_hash],
+(** The digest pre-image: the 32-byte [parent_hash],
     then the 32-byte {!Tn_consensus.Sub_dag.digest}, then the 8-byte
-    little-endian {!Number}, then 32 zero bytes — Rust's currently-unused [extra]
-    ([B256::default()]) field, folded in exactly as Rust folds it. This byte
-    layout is the frozen wire-compatibility contract: the exact field order of
-    Rust's [ConsensusHeader::digest_from_parts]. A later codec/crypto chunk may
-    change only the hash function, never this layout. *)
+    little-endian {!Number}, then 32 zero bytes — [B256::default()], NOT
+    {!extra}, because Rust's last update reads the default regardless
+    (block.rs:51-53). 104 bytes in all. This byte layout is the frozen
+    wire-compatibility contract: the exact field order of Rust's
+    [ConsensusHeader::digest_from_parts]. The crypto seam may change only the
+    hash function, never this layout. *)
 
 val digest : t -> Digests.Output_digest.t
-(** Domain-tagged protocol hash of {!preimage}. Rust's [ConsensusHeader] hashes
-    the pre-image with no domain tag; the tag is prepended here for the same
-    port-wide digest domain separation every other {!Tn_types.Digests} kind
-    uses, and that tag (like the concrete hash) is byte-compatibility-deferred. *)
+(** Protocol hash of the BARE {!preimage}, with no tag and no prefix, exactly as
+    Rust's [ConsensusHeader::digest_from_parts] hashes it (primary/block.rs:
+    42-55). *)
 
 val codec : t Tn_codec.Bcs.t
-(** The persisted wire codec. RESERVED for the storage chunk. The three fields
-    {!create} takes — the 32-byte {!parent_hash}, the {!sub_dag}, the
-    {!Number} — rebuilt through {!create}.
+(** The persisted wire codec. RESERVED for the storage chunk. FOUR fields, in
+    Rust's declaration order (block.rs:17-32): the LENGTH-PREFIXED
+    {!parent_hash} ([0x20] then 32 bytes), the {!sub_dag}, the 8-byte
+    {!Number}, and the LENGTH-PREFIXED {!extra} — rebuilt through
+    {!of_persisted}. The pre-image writes its 32-byte fields bare; only the
+    wire prefixes them.
 
-    The cached {!digest} is {e not} on the wire; {!create} recomputes it, so a
-    decoded block's digest is always the hash of the bytes beside it and a
-    reader cannot be handed a block that claims a digest it does not have. The
-    zero-filled [extra] field of {!preimage} is likewise not stored: it is a
-    constant of the pre-image, not data. *)
+    The cached {!digest} is {e not} on the wire; {!of_persisted} recomputes it,
+    so a decoded block's digest is always the hash of the bytes beside it and a
+    reader cannot be handed a block that claims a digest it does not have. *)
 
 val equal : t -> t -> bool
 (** By digest. *)

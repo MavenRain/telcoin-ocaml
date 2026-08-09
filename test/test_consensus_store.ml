@@ -85,7 +85,7 @@ let synthetic_sub_dag ?(epoch = Units.Epoch.zero) ?(payload = []) ~author ~r () 
       (Certificate.assemble committee header votes)
   in
   let header =
-    Header.make ~author
+    Header.make ~latest_execution_block:Tn_types.Block_num_hash.zero ~author
       ~round:(get "round" (Round.of_int r))
       ~epoch
       ~created_at:(get "timestamp" (Units.Timestamp.of_sec 55L))

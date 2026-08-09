@@ -51,7 +51,7 @@ let ids committee = List.map Authority.id (Committee.authorities committee)
 let id_at committee i = List.nth (ids committee) i
 
 let a_header committee ~author ~round ?(created_at = 0) ~parents () =
-  Header.make ~author
+  Header.make ~latest_execution_block:Tn_types.Block_num_hash.zero ~author
     ~round:(r round)
     ~epoch:(Committee.epoch committee)
     ~created_at:(ts created_at)

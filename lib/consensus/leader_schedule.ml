@@ -1,6 +1,7 @@
 open Tn_std
 open Tn_types
 open Tn_vertex
+module Std_rng = Tn_rand.Std_rng
 
 module Threshold = struct
   type t = int
@@ -94,16 +95,25 @@ let build_table committee threshold scores =
 
 (* Draw a replacement from the good nodes, seeded by the queried round (Rust
    seeds from the round being elected, not the table's activation round).
-   DOCUMENTED DIVERGENCE: Rust seeds ChaCha12 (rand 0.9 StdRng) with 24 zero
-   bytes ++ LE round and draws via Lemire rejection; this port seeds the house
-   SplitMix64 {!Prng} with the round. Determinism is identical (same round +
-   same table => same swap); the concrete choice differs only when the good list
-   has more than one element — cross-implementation agreement is deferred behind
-   the {!Tn_std.Prng} seam. *)
+
+   This is [good_nodes.choose(&mut rng)] over [StdRng::from_seed(seed_bytes)]
+   (leader_schedule.rs:209-218): exactly ONE draw, and [choose] is
+   [self[rng.random_range(..len)]], an EXCLUSIVE range that
+   [UniformInt::sample_single] turns into the inclusive bound [len - 1]
+   (rand-0.9.2/src/seq/slice.rs:52-61, distr/uniform_int.rs:153-167). The
+   bound is [length - 1 >= 0] on a {!Nonempty}, so the negative-bound refusal
+   is unreachable and folds to the head, as does the out-of-range index. *)
 let pick good lr =
-  let g = Prng.of_seed (Int64.of_int (Round.to_int (Leader_round.to_round lr))) in
-  let i, _ = Prng.int_in g ~lo:0 ~hi:(Nonempty.length good - 1) in
-  List.nth_opt (Nonempty.to_list good) i |> Option.value ~default:(Nonempty.head good)
+  let rng =
+    Std_rng.of_leader_round
+      (Int64.of_int (Round.to_int (Leader_round.to_round lr)))
+  in
+  let drawn =
+    Std_rng.random_range_inclusive rng ~bound:(Nonempty.length good - 1)
+    |> Result.to_option |> Option.map fst
+  in
+  Option.bind drawn (List.nth_opt (Nonempty.to_list good))
+  |> Option.value ~default:(Nonempty.head good)
 
 let leader t lr =
   let base = Committee.nth_mod t.committee (Leader_round.schedule_index lr) in

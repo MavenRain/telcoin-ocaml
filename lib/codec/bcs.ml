@@ -152,6 +152,13 @@ let decode c s =
   let total = String.length s in
   if consumed = total then ok v else Error (Trailing_bytes { consumed; total })
 
+(* Run a codec against a writer or reader that a caller already holds. A
+   hand-rolled struct codec needs this to embed a field's codec instead of
+   restating that field's layout, which is how the layout stays owned by one
+   module. *)
+let write c w v = c.write w v
+let read c r = c.read r
+
 let unit = make ~write:(fun _ () -> ()) ~read:(fun _ -> ok ())
 
 let bool =
@@ -184,6 +191,22 @@ let fixed_bytes n =
   make
     ~write:(fun w s -> Writer.raw w s)
     ~read:(fun r -> Reader.raw r n)
+
+(* A fixed-width byte string that serde nevertheless reaches through
+   [serialize_bytes], so bcs length-prefixes it (bcs-0.1.6/src/ser.rs:273-278).
+   The write is exactly [bytes]; only the read pins the width, so a prefix of
+   any other length is REFUSED at that offset rather than re-framed as a
+   shorter field followed by a shifted remainder. *)
+let sized_bytes n =
+  make
+    ~write:(fun w s ->
+      Writer.uleb128 w (String.length s);
+      Writer.raw w s)
+    ~read:(fun r ->
+      let off = Reader.offset r in
+      let* len = Reader.uleb128 r in
+      if len = n then Reader.raw r n
+      else Error (Length_out_of_range { offset = off; length = len }))
 
 let option c =
   make

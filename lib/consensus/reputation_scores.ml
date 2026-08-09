@@ -50,24 +50,26 @@ let by_score_desc t =
 let total_authorities t = Authority_id.Map.cardinal t.scores
 let all_zero t = Authority_id.Map.for_all (fun _ s -> s = 0) t.scores
 
-(* The wire shape. The map section is exactly the one [Sub_dag]'s frozen
-   pre-image already fixes (32-byte keys ascending bytewise, u64 little-endian
-   values), so the persisted bytes and the hashed bytes agree section for
-   section rather than by coincidence. [sorted_map] re-checks ascending order on
-   decode, which also rules out a repeated key. *)
+(* Rust's [ReputationScores] (primary/reputation.rs:8-18) is two fields: a
+   [BTreeMap<AuthorityIdentifier, u64>] and [final_of_schedule: bool]. So the
+   wire is a ULEB128-counted map of BARE 32-byte keys ([AuthorityIdentifier]
+   serialises through serde's array impl, which bcs writes unprefixed) to
+   little-endian u64 values in ascending key order, then one bool byte, and
+   nothing else. [sorted_map] re-checks ascending order on decode, which also
+   rules out a repeated key.
+
+   These are the very bytes [Sub_dag.preimage] hashes for its scores section,
+   so the two share this codec rather than agreeing by coincidence. *)
 let wire_codec =
   Bcs.pair
-    (Bcs.pair
-       (Bcs.sorted_map (Bcs.fixed_bytes 32) Bcs.u64 ~compare:String.compare)
-       Bcs.bool)
-    Bcs.u32
+    (Bcs.sorted_map (Bcs.fixed_bytes 32) Bcs.u64 ~compare:String.compare)
+    Bcs.bool
 
 let to_wire t =
-  ( ( List.map
-        (fun (id, score) -> (Authority_id.to_bytes id, Int64.of_int score))
-        (bindings t),
-      is_final t ),
-    total_authorities t )
+  ( List.map
+      (fun (id, score) -> (Authority_id.to_bytes id, Int64.of_int score))
+      (bindings t),
+    is_final t )
 
 (* A u64 the host int cannot hold is refused rather than wrapped. *)
 let fits_host s =
@@ -78,11 +80,9 @@ let fits_host s =
 let id_of_raw raw =
   Authority_id.of_bytes raw |> Option.value ~default:Authority_id.zero
 
-let of_wire ((entries, final), total) =
+let of_wire (entries, final) =
   if not (List.for_all (fun (_, score) -> fits_host score) entries) then
     Error "reputation scores: a score does not fit a host integer"
-  else if not (Int.equal total (List.length entries)) then
-    Error "reputation scores: the declared authority count is not the number of bindings"
   else
     Ok
       (of_persisted ~final

@@ -75,6 +75,15 @@ val decode_prefix : 'a t -> string -> ('a * int, error) result
 (** As {!decode}, but tolerates trailing bytes and reports how many were
     consumed. *)
 
+val write : 'a t -> Writer.t -> 'a -> unit
+(** Runs a codec's encoder against a writer the caller already holds, so a
+    hand-rolled struct writer can embed a field's codec instead of restating
+    that field's layout. *)
+
+val read : 'a t -> Reader.t -> ('a, error) result
+(** Runs a codec's decoder against a reader the caller already holds, the
+    counterpart of {!write}. *)
+
 (** {2 Primitives} *)
 
 val unit : unit t
@@ -93,6 +102,16 @@ val fixed_bytes : int -> string t
     other length is a programming error and is reported on decode as
     {!Length_out_of_range}; prefer wrapping this in a newtype that maintains
     the width as an invariant. *)
+
+val sized_bytes : int -> string t
+(** Exactly [n] bytes WITH the ULEB128 length prefix. This is the class serde
+    reaches through [serialize_bytes], which bcs always length-prefixes: Rust's
+    [Digest<32>], [B256] and every [FixedBytes<N>] take this path, so their wire
+    form is [0x20] then 32 bytes, not a bare 32. {!fixed_bytes} is the other
+    class, the one serde reaches through [serialize_tuple]. Decoding requires
+    the prefix to read exactly [n]; any other length is {!Length_out_of_range}
+    at the prefix offset, so a bare 32-byte value is refused rather than
+    re-framed. *)
 
 (** {2 Combinators} *)
 

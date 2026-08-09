@@ -104,14 +104,12 @@ let codec : t Bcs.t =
 
 let preimage t = Bcs.encode codec t
 
-(* Stub-era digest: the Tn_crypto seam hash over the domain-tagged preimage,
-   following Header's precedent (header.ml:96-97). Rust hashes the BARE
-   preimage with blake3 (sealed_batch.rs:116-124); tn_crypto_blst must swap
-   the hash AND drop the tag for byte-compat. The preimage itself is frozen
-   by the golden vectors. *)
-let digest t =
-  Digests.Batch_digest.of_digest
-    (Tn_crypto.Digest.hash (Digests.Batch_digest.domain ^ preimage t))
+(* The byte-compat digest: the Tn_crypto seam hash over the BARE preimage, no
+   tag and no prefix, exactly Rust's blake3(bcs(Batch)) (sealed_batch.rs:
+   116-124). Under tn_crypto_blst the seam IS blake3, so this equals the Rust
+   digest byte for byte; under the stub it is the same formula over BLAKE2s.
+   The preimage itself is frozen by the golden vectors. *)
+let digest t = Digests.Batch_digest.of_digest (Tn_crypto.Digest.hash (preimage t))
 
 (* Fork-blind bounds: the epoch is accepted and ignored exactly as upstream
    (sealed_batch.rs:190-200, "can change in the future at a fork"). *)
@@ -139,6 +137,34 @@ module Sealed = struct
   let batch t = t.batch
   let digest t = t.claimed
   let split t = (t.batch, t.claimed)
+
+  (* The outer Batch codec, named before the inner [codec] shadows it. *)
+  let batch_codec : batch Bcs.t = codec
+
+  (* The claimed digest is a Rust [BlockHash] = [FixedBytes<32>], whose serde
+     routes through [serialize_bytes], so bcs LENGTH-PREFIXES it: 0x20 then the
+     32 bytes. [sized_bytes] rejects a bare 32-byte leg rather than re-reading
+     it as a 0x?? length with the remainder shifted. *)
+  let digest_codec : Digests.Batch_digest.t Bcs.t =
+    Bcs.refine
+      ~inject:(fun s ->
+        Tn_crypto.Digest.of_bytes s
+        |> Option.map Digests.Batch_digest.of_digest
+        |> Option.to_result ~none:"batch digest is not exactly 32 bytes")
+      ~project:(fun d ->
+        Tn_crypto.Digest.to_bytes (Digests.Batch_digest.to_digest d))
+      (Bcs.sized_bytes Tn_crypto.Digest.length)
+
+  (* Rust derives the codec on [SealedBatch { batch, digest }]
+     (sealed_batch.rs:17-31), and a BCS struct is bare field concatenation in
+     declaration order, so the wire is bcs(Batch) then the prefixed digest. The
+     claim is still unverified on decode, exactly as [SealedBatch::new] leaves
+     it: a wrong claim is a validator rejection, not a decode error. *)
+  let codec : t Bcs.t =
+    Bcs.iso
+      ~inject:(fun (batch, claimed) -> { batch; claimed })
+      ~project:(fun t -> (t.batch, t.claimed))
+      (Bcs.pair batch_codec digest_codec)
 
   let equal a b =
     equal a.batch b.batch && Digests.Batch_digest.equal a.claimed b.claimed

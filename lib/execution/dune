@@ -1,4 +1,10 @@
+; tn_std, tn_vertex and tn_hash32 became DIRECT dependencies when the genesis
+; anchor stopped being a placeholder constant: computing it builds Rust's
+; default Header (tn_vertex) inside a singleton Nonempty (tn_std), and the
+; block's [extra] field is the 32-byte gate (tn_hash32). Every one of them
+; already sits below tn_consensus, so no edge is new to the graph.
 (library
  (name tn_execution)
  (public_name telcoin_ocaml.execution)
- (libraries tn_codec tn_crypto tn_types tn_consensus))
+ (libraries tn_std tn_codec tn_crypto tn_types tn_hash32 tn_vertex
+   tn_consensus))

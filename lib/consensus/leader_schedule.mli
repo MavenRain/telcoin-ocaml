@@ -49,9 +49,10 @@ val committee : t -> Committee.t
 val leader : t -> Leader_round.t -> Authority.t
 (** The elected authority: round-robin index into the id-sorted roster, then
     remapped through the swap table when the elected authority is currently bad.
-    The replacement is drawn from the good nodes by a {!Tn_std.Prng} seeded with
-    the queried round, so the same round always swaps to the same authority.
-    Total. *)
+    The replacement is the one [choose] draw Rust makes from
+    [StdRng::from_seed(24 zero bytes ++ LE round)]
+    ([leader_schedule.rs:209-218]), so the same round always swaps to the same
+    authority and to the SAME authority Rust picks. Total. *)
 
 val leader_certificate :
   t -> Dag.t -> Leader_round.t -> Authority.t * Certificate.t option

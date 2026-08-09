@@ -111,7 +111,7 @@ let raw_batch ?(base_fee = fee 0) txs =
    here need. *)
 let single ~at ~r bs =
   let header =
-    Header.make ~author:id0 ~round:(round r) ~epoch:Units.Epoch.zero
+    Header.make ~latest_execution_block:Tn_types.Block_num_hash.zero ~author:id0 ~round:(round r) ~epoch:Units.Epoch.zero
       ~created_at:(ts at)
       ~payload:(List.map (fun b -> (Batch.digest b, w0)) bs)
       ~parents:genesis_parents

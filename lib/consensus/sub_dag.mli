@@ -27,6 +27,17 @@ open Tn_vertex
 
 type t
 
+val default_signature_bytes : string
+(** [BlsSignature::default().to_bytes()]: the 48-byte compressed point at
+    infinity on G1, [0xc0] then 47 zero bytes. The pre-image of the
+    missing-signature randomness branch, exposed because the consensus-chain
+    genesis anchor hashes the same bytes and the two must never drift. *)
+
+val default_randomness : Tn_hash32.Hash32.t
+(** [keccak256] of {!default_signature_bytes}: the randomness of a sub-DAG
+    whose leader carries no aggregate signature, and of Rust's default
+    [CommittedSubDag]. *)
+
 val create :
   sequence:Certificate.t Nonempty.t ->
   scores:Reputation_scores.t ->
@@ -37,16 +48,16 @@ val create :
     construction: every other certificate is a strict ancestor of the leader, so
     the ascending stable sort puts the unique highest-round certificate, the
     leader, last. Certificates are stripped to their headers, the counterpart of
-    Rust's [Certificate::into_header]. The randomness is the protocol hash of the
+    Rust's [Certificate::into_header]. The randomness is [keccak256] of the
     leader's aggregate signature bytes; a certificate without one (only genesis,
-    which cannot lead) hashes fixed empty bytes, the analogue of Rust's
-    default-signature fallback. *)
+    which cannot lead) hashes {!default_signature_bytes}, exactly as Rust's
+    default-signature fallback does. *)
 
 val of_persisted :
   headers:Header.t Nonempty.t ->
   scores:Reputation_scores.t ->
   stored:Units.Timestamp.t ->
-  randomness:Tn_crypto.Digest.t ->
+  randomness:Tn_hash32.Hash32.t ->
   t
 (** Rebuild a sub-DAG field-wise from its persisted representation, recomputing
     the cached digest from the same {!preimage} {!create} hashes. RESERVED for
@@ -100,30 +111,35 @@ val commit_timestamp : t -> Units.Timestamp.t
 (** The accessor view: the stored value, or the leader's [created_at] when the
     stored value is zero — Rust's replay fallback, kept out of the digest. *)
 
-val randomness : t -> Tn_crypto.Digest.t
-(** Protocol hash of the leader's aggregate signature bytes (Rust hashes with
-    keccak256; here it goes through the {!Tn_crypto} seam like every other
-    digest). Epoch-boundary shuffle entropy. *)
+val randomness : t -> Tn_hash32.Hash32.t
+(** [keccak256] of the leader's aggregate signature bytes, the epoch-boundary
+    shuffle entropy. Keccak, never the {!Tn_crypto} seam: Rust fixes this hash
+    at [CommittedSubDag::new] (output.rs:378-382) and a link-time substitution
+    of it would fork the chain while every type still checked. *)
 
 val preimage : t -> string
-(** The digest pre-image, {e without} the domain tag: every header digest in
+(** The digest pre-image: every header digest in
     sequence order, then the canonically BCS-encoded scores, then the 8-byte
-    little-endian stored timestamp, then the raw randomness bytes — no length
+    little-endian stored timestamp, then the raw randomness bytes, with no length
     prefixes or separators between sections. This byte layout is the frozen
     wire-compatibility contract (the exact Rust [CommittedSubDag] pre-image field
-    order); a future codec/crypto chunk may change only the hash function and the
-    domain-tag policy around it, never this layout. *)
+    order); the crypto seam may change only the hash function around it, never
+    this layout. *)
 
 val digest : t -> Digests.Sub_dag_digest.t
-(** Domain-tagged protocol hash of {!preimage}. The sequence number is
+(** Protocol hash of the BARE {!preimage}, with no tag and no prefix, exactly as
+    Rust hashes it (primary/output.rs:457-471). The sequence number is
     deliberately absent, matching Rust: two sub-DAGs differing only in index are
     identical. *)
 
 val codec : t Tn_codec.Bcs.t
 (** The persisted wire codec. RESERVED for the storage chunk. The four stored
     fields in {!preimage} order — the header sequence, the
-    {!Reputation_scores}, the 8-byte stored timestamp, the raw randomness —
-    rebuilt through {!of_persisted}.
+    {!Reputation_scores}, the 8-byte stored timestamp, the randomness —
+    rebuilt through {!of_persisted}. The randomness is LENGTH-PREFIXED here
+    ([0x20] then 32 bytes), because Rust's [B256] serialises through
+    [serialize_bytes]; {!preimage} writes the same 32 bytes bare. The
+    asymmetry is Rust's, not this port's.
 
     The cached {!digest} is {e not} on the wire: it is recomputed from the
     decoded fields on every read, so no byte a reader is handed can install a

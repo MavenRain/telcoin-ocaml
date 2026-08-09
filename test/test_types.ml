@@ -68,14 +68,14 @@ let test_digest_zero () =
     (Tn_crypto.Digest.to_hex Tn_crypto.Digest.zero);
   Alcotest.(check bool) "zero is NOT the hash of the empty string" false
     (Tn_crypto.Digest.equal Tn_crypto.Digest.zero (Tn_crypto.Digest.hash ""));
-  (* Each domain newtype wraps the same constant: the tag separates pre-images,
-     and an absent value has no pre-image to separate. *)
+  (* Each digest newtype wraps the same constant: the types separate the kinds,
+     and an absent value has no pre-image at all. *)
   Alcotest.(check string) "Batch_digest.zero carries the same bytes" nuls
     (Tn_crypto.Digest.to_bytes (Digests.Batch_digest.to_digest Digests.Batch_digest.zero));
   Alcotest.(check bool) "Batch_digest.zero is of_digest of it" true
     (Digests.Batch_digest.equal Digests.Batch_digest.zero
        (Digests.Batch_digest.of_digest Tn_crypto.Digest.zero));
-  Alcotest.(check string) "Output_digest.zero agrees, domain tag and all"
+  Alcotest.(check string) "Output_digest.zero agrees byte for byte"
     (Digests.Batch_digest.to_hex Digests.Batch_digest.zero)
     (Digests.Output_digest.to_hex Digests.Output_digest.zero)
 

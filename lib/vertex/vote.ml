@@ -11,7 +11,8 @@ type t = {
 }
 
 let signing_message hd =
-  Intent.wrap Intent.Consensus_vote (D.to_bytes (Digests.Header_digest.to_digest hd))
+  Intent.wrap Intent.Consensus_vote
+    ("\x20" ^ D.to_bytes (Digests.Header_digest.to_digest hd))
 
 let sign sk ~voter header =
   let hd = Header.digest header in

@@ -1,4 +1,7 @@
+; tn_hash32 is the 32-byte gate Block_num_hash needs for the execution block
+; hash in a header. The edge is acyclic: tn_hash32 -> tn_keccak -> digestif is
+; a leaf chain and neither of those libraries names tn_types.
 (library
  (name tn_types)
  (public_name telcoin_ocaml.types)
- (libraries tn_crypto tn_codec))
+ (libraries tn_crypto tn_codec tn_hash32))

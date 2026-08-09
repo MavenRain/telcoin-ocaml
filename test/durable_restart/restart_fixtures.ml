@@ -177,7 +177,7 @@ let db = Batch.digest body_b
 let sub_dag_of ~cmt ~sk_for ~author ~epoch ~r ~at ~payload =
   let seats = List.map Authority.id (Committee.authorities cmt) in
   let header =
-    Header.make ~author
+    Header.make ~latest_execution_block:Tn_types.Block_num_hash.zero ~author
       ~round:(get "round" (Round.of_int r))
       ~epoch
       ~created_at:(get "timestamp" (Units.Timestamp.of_sec at))

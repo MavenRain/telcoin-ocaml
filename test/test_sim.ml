@@ -148,16 +148,34 @@ let test_agreement_oracle () =
    byte-identical, and these constants are what make that claim falsifiable
    rather than asserted. Recorded from the run itself and red-verified against
    the [ts_of_ms] coarsening (ms/1001), which shifts the header timestamps the
-   nodes fold into their committed digests. *)
+   nodes fold into their committed digests.
+
+   Chunk-41 S1 re-recorded the two DIGEST constants: dropping the domain tag
+   from the header, sub-DAG and authority-id pre-images changes every committed
+   digest by construction. Chunk-41 S2 re-recorded them again, for the same
+   reason at the header layer: the payload keys and parents became
+   length-prefixed and [latest_execution_block] joined the pre-image, so every
+   header digest moved and every sub-DAG digest over those headers with it.
+   Chunk-41 S3 re-recorded them a THIRD time: the sub-DAG randomness became
+   [keccak256] of the leader's aggregate signature instead of a seam hash, so
+   every sub-DAG pre-image moved and every committed digest over it with them.
+   Chunk-41 S4 re-recorded them a FOURTH time: [Vote.signing_message] gained
+   the BCS length prefix ([prefix ^ 0x20 ^ raw32] instead of [prefix ^ raw32]),
+   so the stub signer's structural signature bytes moved, so the leader's
+   aggregate signature bytes moved, so the [keccak256] randomness derived from
+   them moved with everything downstream of it. [golden_steps] and
+   [golden_commit_count] did NOT move across any of the four re-recordings and
+   were deliberately left alone, which is the evidence that all four changes
+   moved digest bytes and not the schedule or the delivery order. *)
 let golden_steps = 1959
 
 let golden_commit_count = 23
 
 let golden_first_digest =
-  "93e2c79ad5434db18d88191f4ec7072f7100e6466149ea831871e53a5fba64c8"
+  "50ae8888e5d9f2be94f2c366342f8df40fcddf00cc3c255441c9ed5adc041361"
 
 let golden_last_digest =
-  "4f6774b7da1e290e2bab3034b40559a21bbad308aa0a7a8f624eadc330d2e1ea"
+  "63680d11d85607180c49ead1ca44f266e91fcc0ee627c26718e2f4d2d4cf3ef4"
 
 let test_pre_injection_golden () =
   let sim, committee = run 4 in

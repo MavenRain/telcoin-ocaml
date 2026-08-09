@@ -692,6 +692,44 @@ let infinity_sig_decode_case =
                (fixture_sig "infinity_sig_hex"))))
 
 (* ------------------------------------------------------------------ *)
+(* Chunk 41 S1: the Batch golden vectors' blake3 column, now LIVE.    *)
+(* ------------------------------------------------------------------ *)
+
+(* [Tn_types.Batch.digest] is the BARE seam hash of the BCS pre-image, with no
+   domain tag (batch.ml). test_batch.ml T1 pins the pre-image against the Rust
+   oracle and T7 pins that formula seam-independently under the stub; here the
+   seam IS blake3 1.8.3, so hashing the oracle's own pre-image row must
+   reproduce the oracle's blake3 row. The three greens together are the
+   byte-compat claim for [Batch_digest], and this executable needs no
+   [tn_types] dependency to make it. *)
+let batch_vector_case name preimage_hex blake3_hex =
+  Alcotest.test_case (Printf.sprintf "batch %s" name) `Quick (fun () ->
+      Alcotest.(check (option string))
+        "blake3 of the oracle pre-image against the oracle digest row"
+        (Some blake3_hex)
+        (Option.map
+           (fun bytes -> Tn_crypto.Digest.to_hex (Tn_crypto.Digest.hash bytes))
+           (hex_decode preimage_hex)))
+
+(* The negative control for the S1 tag removal. The retired formula,
+   [hash ("tn:batch" ^ preimage)], must NOT reproduce the oracle row: without
+   this the positive rows above would stay green if a tag came back and the
+   vectors were re-pinned to it. [Some false] is the expectation, not [false],
+   so a pre-image row that fails to decode is red rather than vacuously green. *)
+let batch_retired_tag_case =
+  Alcotest.test_case "the retired tn:batch tag does not reproduce V1" `Quick
+    (fun () ->
+      Alcotest.(check (option bool))
+        "hash of \"tn:batch\" ^ V1 pre-image equals the oracle V1 row"
+        (Some false)
+        (Option.map
+           (fun bytes ->
+             String.equal Batch_vectors.v1_blake3
+               (Tn_crypto.Digest.to_hex
+                  (Tn_crypto.Digest.hash ("tn:batch" ^ bytes))))
+           (hex_decode Batch_vectors.v1_preimage)))
+
+(* ------------------------------------------------------------------ *)
 (* Stage S8: the shared impl-agnostic conformance functor.            *)
 (* ------------------------------------------------------------------ *)
 
@@ -701,6 +739,257 @@ let infinity_sig_decode_case =
    telcoin_ocaml.crypto_blst. Green in both executables is the
    behavioral-parity claim for the seam's observable contract. *)
 module Conformance = Crypto_conformance.Make (Tn_crypto)
+
+(* ------------------------------------------------------------------ *)
+(* Chunk 41 S4: the digest columns of header_vectors.ml,              *)
+(* sealed_batch_vectors.ml, sub_dag_vectors.ml and                    *)
+(* consensus_block_vectors.ml. Every other executable's seam is       *)
+(* BLAKE2s, so these columns are UNASSERTED everywhere but here.      *)
+(* ------------------------------------------------------------------ *)
+
+module HV = Header_vectors
+module SBV = Sealed_batch_vectors
+module SDV = Sub_dag_vectors
+module CBV = Consensus_block_vectors
+module OH = Oracle_headers
+module Sd = Tn_consensus.Sub_dag
+module Rs = Tn_consensus.Reputation_scores
+module Cb = Tn_execution.Consensus_block
+module Digests = Tn_types.Digests
+
+(* A hash of pinned bytes against a pinned digest, the same shape as
+   {!batch_vector_case}. Used wherever there is no port VALUE to hash
+   (the two malformed header rows, which {!Tn_vertex.Header.codec} refuses
+   to decode by design, and the two retired-formula NEG rows), so what is
+   asserted is the digest FORMULA over the oracle's own bytes, never this
+   port's own decoder. *)
+let hash_case name preimage_hex digest_hex =
+  Alcotest.test_case name `Quick (fun () ->
+      Alcotest.(check (option string))
+        "blake3 of the oracle bytes against the oracle digest row"
+        (Some digest_hex)
+        (Option.map
+           (fun bytes -> Tn_crypto.Digest.to_hex (Tn_crypto.Digest.hash bytes))
+           (hex_decode preimage_hex)))
+
+(* H1-H6: the header this port BUILDS from {!Oracle_headers} (not the
+   oracle's bytes) must digest to the oracle's row -- construction, codec
+   and hash all agreeing with Rust, not merely that hashing known-good bytes
+   reproduces a known-good digest. *)
+let header_digest_case name header expected =
+  Alcotest.test_case name `Quick (fun () ->
+      Alcotest.(check string) "Header.digest = the oracle's row" expected
+        (Digests.Header_digest.to_hex (Tn_vertex.Header.digest header)))
+
+let header_digest_cases =
+  [ header_digest_case "H1" (OH.h1 ()) HV.h1_digest;
+    header_digest_case "H2" (OH.h2 ()) HV.h2_digest;
+    header_digest_case "H3" (OH.h3 ()) HV.h3_digest;
+    header_digest_case "H4" (OH.h4 ()) HV.h4_digest;
+    header_digest_case "H5" (OH.h5 ()) HV.h5_digest;
+    header_digest_case "H6 (= H4, descending parents canonicalise)" (OH.h6 ())
+      HV.h6_digest ]
+
+(* MUT-CONTROL: H4 with author[31] flipped 0x01 -> 0x02, built the same way
+   H4 is rather than by mutating bytes, so this exercises the port's OWN
+   field wiring rather than a copy-pasted pre-image. *)
+let mut_control_header () =
+  Tn_vertex.Header.make
+    ~author:(OH.author_of "MUT_CONTROL author" HV.mut_control_author)
+    ~round:(OH.round_of "MUT_CONTROL round" 1)
+    ~epoch:(OH.epoch_of "MUT_CONTROL epoch" 7)
+    ~created_at:(OH.created_of "MUT_CONTROL created_at" 1_700_000_000L)
+    ~payload:(OH.h4_payload ()) ~parents:(OH.h4_parents ())
+    ~latest_execution_block:
+      (OH.anchor "MUT_CONTROL anchor" ~number:0L ~hash:OH.zeros32)
+
+let mut_control_case =
+  header_digest_case "MUT_CONTROL: H4 with author[31] flipped"
+    (mut_control_header ()) HV.mut_control_digest
+
+(* H_NEG_A/H_NEG_B are the pre-fix, bare-digest shapes: not headers this port
+   can build or decode, so the FORMULA is pinned by hashing the oracle's own
+   malformed bytes. *)
+let header_neg_cases =
+  [ hash_case "H_NEG_A: bare payload/parent digests" HV.h_neg_a_bcs
+      HV.h_neg_a_digest;
+    hash_case "H_NEG_B: latest_execution_block omitted" HV.h_neg_b_bcs
+      HV.h_neg_b_digest ]
+
+(* H_DUP: the attacker's wire repeats one payload key. Rust collapses it on
+   decode and digests the collapsed header, so the digest this port reaches
+   from the SAME bytes must be the oracle's H_DUP row. This is the case that
+   would go red if the port kept the repeat, which is why it decodes the wire
+   rather than hashing a pinned pre-image. *)
+let header_dup_case =
+  Alcotest.test_case
+    "H_DUP: repeated payload key digests as Rust's collapsed map" `Quick
+    (fun () ->
+      let digest_of_wire =
+        hex_decode HV.h_dup_wire_bcs
+        |> Option.to_result ~none:"H_DUP hex is malformed"
+        |> Result.map (Tn_codec.Bcs.decode Tn_vertex.Header.codec)
+        |> Result.map (Result.map_error Tn_codec.Bcs.error_to_string)
+        |> Result.join
+        |> Result.map (fun h ->
+               Digests.Header_digest.to_hex (Tn_vertex.Header.digest h))
+      in
+      Alcotest.(check (result string string))
+        "Header.digest of the decoded wire = the oracle's row"
+        (Ok HV.h_dup_digest) digest_of_wire)
+
+(* SB1-SB3: {!Tn_types.Batch.Sealed.claim} pairs an unverified digest, so the
+   claim worth checking is not the type but the FORMULA -- that hashing the
+   batch pre-image really does reproduce the digest the wire row claims. *)
+let sealed_batch_digest_cases =
+  [ hash_case "SB1 (= Batch V1)" SBV.sb1_batch_preimage SBV.sb1_digest;
+    hash_case "SB2 (= Batch V4)" SBV.sb2_batch_preimage SBV.sb2_digest;
+    hash_case "SB3 (= Batch V7)" SBV.sb3_batch_preimage SBV.sb3_digest ]
+
+(* Sub-DAG rows, built exactly as test_byte_compat.ml's sd1/sd2/sd3, so the
+   PRE-IMAGE and DIGEST columns activated here are over the identical values
+   whose CODEC and STRUCTURE columns are already pinned there. *)
+let scores_of bindings ~final =
+  Rs.of_persisted
+    ~bindings:
+      (List.map (fun (id, s) -> (OH.author_of "score authority" id, s)) bindings)
+    ~final
+
+let stored_of secs = OH.force "stored timestamp" (Tn_types.Units.Timestamp.of_sec secs)
+
+let sd1 () =
+  Sd.of_persisted
+    ~headers:(OH.force "SD1 sequence" (Tn_std.Nonempty.of_list [ OH.h1 () ]))
+    ~scores:(scores_of [] ~final:false)
+    ~stored:Tn_types.Units.Timestamp.zero
+    ~randomness:(OH.hash32_of "SD1 randomness" OH.zeros32)
+
+let sd2_scores () =
+  scores_of [ (OH.repeat32 "01", 5); (OH.repeat32 "02", 9) ] ~final:true
+
+let sd2 () =
+  Sd.of_persisted
+    ~headers:
+      (OH.force "SD2 sequence"
+         (Tn_std.Nonempty.of_list [ OH.h2 (); OH.h4 (); OH.h5 () ]))
+    ~scores:(sd2_scores ())
+    ~stored:(stored_of 1_700_000_001L)
+    ~randomness:(OH.hash32_of "SD2 randomness" SDV.sd_rand1_keccak256)
+
+let sd3 () =
+  Sd.of_persisted
+    ~headers:
+      (OH.force "SD3 sequence"
+         (Tn_std.Nonempty.of_list [ OH.h2 (); OH.h4 (); OH.h5 () ]))
+    ~scores:
+      (scores_of [ (OH.repeat32 "01", 5); (OH.repeat32 "02", 9) ] ~final:false)
+    ~stored:Tn_types.Units.Timestamp.zero
+    ~randomness:(OH.hash32_of "SD3 randomness" SDV.sd_rand1_keccak256)
+
+let sub_dag_preimage_and_digest_case name sd preimage_hex digest_hex =
+  Alcotest.test_case name `Quick (fun () ->
+      Alcotest.(check string) "preimage = the oracle's bytes" preimage_hex
+        (Hex_bytes.encode (Sd.preimage sd));
+      Alcotest.(check string) "digest = the oracle's row" digest_hex
+        (Digests.Sub_dag_digest.to_hex (Sd.digest sd)))
+
+let sub_dag_digest_cases =
+  [ sub_dag_preimage_and_digest_case "SD1" (sd1 ()) SDV.sd1_preimage
+      SDV.sd1_digest;
+    sub_dag_preimage_and_digest_case "SD2" (sd2 ()) SDV.sd2_preimage
+      SDV.sd2_digest;
+    sub_dag_preimage_and_digest_case "SD3" (sd3 ()) SDV.sd3_preimage
+      SDV.sd3_digest ]
+
+(* SD-NEG: the retired "tn:subdag" domain tag must reproduce the oracle's
+   OWN tagged row, not merely differ from SD2's real digest -- the stronger
+   claim, since a wrong tag could differ from SD2 for the wrong reason. *)
+let sub_dag_neg_domain_tag_case =
+  Alcotest.test_case "SD-NEG: the retired tn:subdag tag reproduces the row"
+    `Quick (fun () ->
+      let pre = Sd.preimage (sd2 ()) in
+      Alcotest.(check string) "hash(tag ^ preimage) = the oracle's SD_NEG row"
+        SDV.sd_neg_digest
+        (Tn_crypto.Digest.to_hex
+           (Tn_crypto.Digest.hash (SDV.sd_neg_domain_tag ^ pre)));
+      Alcotest.(check bool) "and it differs from SD2's real digest" false
+        (String.equal SDV.sd_neg_digest SDV.sd2_digest))
+
+(* Consensus-block rows, built exactly as test_byte_compat.ml's cb1/cb2/cb3. *)
+let output_digest label h = Digests.Output_digest.of_digest (OH.crypto_digest label h)
+let number_of n = OH.force "block number" (Cb.Number.of_int n)
+
+let cb1 () =
+  Cb.of_persisted
+    ~parent_hash:(output_digest "CB1 parent" CBV.cb1_parent_hash)
+    ~sub_dag:(sd1 ()) ~number:Cb.Number.genesis
+    ~extra:(OH.hash32_of "CB1 extra" CBV.cb1_extra)
+
+let cb2 () =
+  Cb.of_persisted
+    ~parent_hash:(output_digest "CB2 parent" CBV.cb2_parent_hash)
+    ~sub_dag:(sd2 ()) ~number:(number_of 1)
+    ~extra:(OH.hash32_of "CB2 extra" CBV.cb2_extra)
+
+let cb3 () =
+  Cb.of_persisted
+    ~parent_hash:(output_digest "CB3 parent" CBV.cb2_parent_hash)
+    ~sub_dag:(sd2 ()) ~number:(number_of 1)
+    ~extra:(OH.hash32_of "CB3 extra" CBV.cb3_extra)
+
+let cb_digest_case name cb expected =
+  Alcotest.test_case name `Quick (fun () ->
+      Alcotest.(check string) "Consensus_block.digest = the oracle's row"
+        expected
+        (Digests.Output_digest.to_hex (Cb.digest cb)))
+
+let consensus_block_digest_cases =
+  [ cb_digest_case "CB1" (cb1 ()) CBV.cb1_digest;
+    cb_digest_case "CB2" (cb2 ()) CBV.cb2_digest;
+    cb_digest_case "CB3 (= CB2, extra off the digest)" (cb3 ()) CBV.cb3_digest
+  ]
+
+(* Drop the trailing [n] characters of [s] by filtering the indexed
+   sequence, so no partial accessor is involved. *)
+let drop_suffix s ~n =
+  String.to_seqi s
+  |> Seq.filter (fun (i, (_ : char)) -> i < String.length s - n)
+  |> Seq.map snd |> String.of_seq
+
+(* CB-NEG: CB2's digest over a THREE-field pre-image, the trailing 32
+   zero bytes (the [extra] slot) dropped. *)
+let consensus_block_neg_case =
+  Alcotest.test_case "CB-NEG: three-field pre-image (no trailing zero extra)"
+    `Quick (fun () ->
+      let three_field = drop_suffix (Cb.preimage (cb2 ())) ~n:32 in
+      Alcotest.(check string)
+        "hash(three-field pre-image) = the oracle's CB_NEG row"
+        CBV.cb_neg_digest
+        (Tn_crypto.Digest.to_hex (Tn_crypto.Digest.hash three_field)))
+
+(* CB-GENESIS: the chain anchor, computed rather than pinned (spec risk 5).
+   The default sub-DAG shares SD1's single default header but NOT its
+   randomness, so its own digest is checked first to rule out the anchor
+   accidentally landing on SD1's value. *)
+let default_sub_dag () =
+  Sd.of_persisted
+    ~headers:(OH.force "genesis sequence" (Tn_std.Nonempty.of_list [ OH.h1 () ]))
+    ~scores:(scores_of [] ~final:false)
+    ~stored:Tn_types.Units.Timestamp.zero ~randomness:Sd.default_randomness
+
+let cb_genesis_case =
+  Alcotest.test_case
+    "CB-GENESIS: genesis_parent = ConsensusHeader::default().digest()" `Quick
+    (fun () ->
+      Alcotest.(check string) "the default sub-DAG's digest = the oracle's row"
+        CBV.cb_genesis_sub_dag_digest
+        (Digests.Sub_dag_digest.to_hex (Sd.digest (default_sub_dag ())));
+      Alcotest.(check bool) "the genesis sub-DAG differs from SD1" false
+        (Digests.Sub_dag_digest.equal (Sd.digest (default_sub_dag ()))
+           (Sd.digest (sd1 ())));
+      Alcotest.(check string) "genesis_parent = the oracle's row"
+        CBV.cb_genesis_digest
+        (Digests.Output_digest.to_hex Cb.genesis_parent))
 
 let () =
   Alcotest.run "tn_crypto_blst"
@@ -733,4 +1022,30 @@ let () =
           verify_agg_rev_case; empty_pks_general_case;
           empty_pks_infinity_case; dup_pk_single_sig_case;
           dup_pk_doubled_sig_case ] );
-      ("conformance", Conformance.tests) ]
+      ( "batch_vectors",
+        [ batch_vector_case "V1" Batch_vectors.v1_preimage
+            Batch_vectors.v1_blake3;
+          batch_vector_case "V2" Batch_vectors.v2_preimage
+            Batch_vectors.v2_blake3;
+          batch_vector_case "V3" Batch_vectors.v3_preimage
+            Batch_vectors.v3_blake3;
+          batch_vector_case "V4" Batch_vectors.v4_preimage
+            Batch_vectors.v4_blake3;
+          batch_vector_case "V5" Batch_vectors.v5_preimage
+            Batch_vectors.v5_blake3;
+          batch_vector_case "V6 (serde-skip proof, V5's row)"
+            Batch_vectors.v6_preimage Batch_vectors.v6_blake3;
+          batch_vector_case "V7" Batch_vectors.v7_preimage
+            Batch_vectors.v7_blake3;
+          batch_retired_tag_case ] );
+      ("conformance", Conformance.tests);
+      ( "chunk41 header digests",
+        header_digest_cases
+        @ [ mut_control_case; header_dup_case ]
+        @ header_neg_cases );
+      ("chunk41 sealed batch digests", sealed_batch_digest_cases);
+      ( "chunk41 sub-DAG digests",
+        sub_dag_digest_cases @ [ sub_dag_neg_domain_tag_case ] );
+      ( "chunk41 consensus-block digests",
+        consensus_block_digest_cases
+        @ [ consensus_block_neg_case; cb_genesis_case ] ) ]

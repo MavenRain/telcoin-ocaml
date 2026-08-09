@@ -9,8 +9,39 @@
 (rule
  (copy ../fixtures/tn_crypto_blst_vectors.txt tn_crypto_blst_vectors.txt))
 
+; The Batch golden vectors are shared SOURCE, not a fixture file. Copying the
+; module in lets THIS executable, the only one where the seam is real BLAKE3,
+; assert their blake3 column. The module is pure string constants, so it pulls
+; in no library and cannot drag the stub seam back in.
+(rule
+ (copy ../batch_vectors.ml batch_vectors.ml))
+
+; Chunk 41 S4: the header, sealed-batch, sub-DAG and consensus-block digest
+; columns are live only where the seam is real BLAKE3, i.e. here. The four
+; vector modules are pure string constants (no library pulled in);
+; oracle_headers.ml is not, it names Tn_types and Tn_vertex, which is why this
+; stanza's libraries grow below to match.
+(rule
+ (copy ../header_vectors.ml header_vectors.ml))
+
+(rule
+ (copy ../sealed_batch_vectors.ml sealed_batch_vectors.ml))
+
+(rule
+ (copy ../sub_dag_vectors.ml sub_dag_vectors.ml))
+
+(rule
+ (copy ../consensus_block_vectors.ml consensus_block_vectors.ml))
+
+(rule
+ (copy ../hex_bytes.ml hex_bytes.ml))
+
+(rule
+ (copy ../oracle_headers.ml oracle_headers.ml))
+
 (test
  (name test_crypto_blst)
  (deps blake3_official_vectors.txt tn_crypto_blst_vectors.txt)
  (libraries tn_crypto telcoin_ocaml.crypto_blst crypto_conformance bls12-381
-   bls12-381-signature alcotest))
+   bls12-381-signature alcotest tn_std tn_types tn_vertex tn_consensus
+   tn_execution tn_hash32 tn_keccak))

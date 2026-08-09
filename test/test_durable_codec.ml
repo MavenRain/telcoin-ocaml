@@ -21,6 +21,7 @@ module Chain = Tn_execution.Consensus_chain
 module Record = Tn_execution.Consensus_store.Record
 module Rc = Tn_durable_store.Record_codec
 module Nonempty = Tn_std.Nonempty
+module Hash32 = Tn_hash32.Hash32
 
 (* Totalise an option under a named expectation; [Result.fold] keeps both arms
    lazy, where [Option.fold]'s [~none] is eager. *)
@@ -106,7 +107,7 @@ let certify header =
     (Certificate.assemble committee header votes)
 
 let mk_header ~author ~r ~payload =
-  Header.make ~author
+  Header.make ~latest_execution_block:Tn_types.Block_num_hash.zero ~author
     ~round:(get "round" (Round.of_int r))
     ~epoch:Units.Epoch.zero
     ~created_at:(get "timestamp" (Units.Timestamp.of_sec (Int64.of_int (50 + r))))
@@ -292,8 +293,8 @@ let check_sub_dag what a b =
     (Units.Timestamp.to_string (Sub_dag.commit_timestamp b));
   Alcotest.(check string)
     (what ^ ": randomness")
-    (Tn_crypto.Digest.to_hex (Sub_dag.randomness a))
-    (Tn_crypto.Digest.to_hex (Sub_dag.randomness b));
+    (Hash32.to_hex (Sub_dag.randomness a))
+    (Hash32.to_hex (Sub_dag.randomness b));
   Alcotest.(check string)
     (what ^ ": preimage")
     (Sub_dag.preimage a) (Sub_dag.preimage b);
@@ -313,6 +314,10 @@ let check_block what a b =
     (Cb.Number.to_int (Cb.number a))
     (Cb.Number.to_int (Cb.number b));
   check_sub_dag (what ^ " sub_dag") (Cb.sub_dag a) (Cb.sub_dag b);
+  Alcotest.(check string)
+    (what ^ ": extra")
+    (Hash32.to_hex (Cb.extra a))
+    (Hash32.to_hex (Cb.extra b));
   Alcotest.(check string) (what ^ ": preimage") (Cb.preimage a) (Cb.preimage b);
   Alcotest.(check string)
     (what ^ ": digest")
@@ -490,14 +495,20 @@ let test_scores_finality_is_on_the_wire () =
        (Bcs.encode Reputation_scores.codec scores_final)
        (Bcs.encode Reputation_scores.codec scores_bumped))
 
-let test_scores_reject_a_disagreeing_count () =
+(* Rust's [ReputationScores] is a map and a bool and nothing else, so the wire
+   ends at the flag: no declared count, and no room for one. *)
+let test_scores_end_at_the_final_flag () =
   let bytes = Bcs.encode Reputation_scores.codec scores_bumped in
-  let at = String.length bytes - 4 in
-  let total = Reputation_scores.total_authorities scores_bumped in
-  Alcotest.(check string) "the tail is the declared count"
-    (Bcs.encode Bcs.u32 total) (sub_at bytes ~off:at ~len:4);
-  let doctored = splice bytes ~at ~bytes:(Bcs.encode Bcs.u32 (total + 1)) in
-  let e = refused "count off by one" Reputation_scores.codec doctored in
+  let entries = List.length (Reputation_scores.bindings scores_bumped) in
+  Alcotest.(check int) "a ULEB128 count, n entries of 32 + 8, then one bool"
+    (1 + (entries * 40) + 1)
+    (String.length bytes);
+  Alcotest.(check string) "the tail is the final flag, not a count" "\x00"
+    (sub_at bytes ~off:(String.length bytes - 1) ~len:1);
+  let e =
+    refused "a trailing count" Reputation_scores.codec
+      (bytes ^ Bcs.encode Bcs.u32 entries)
+  in
   Alcotest.(check bool) "renders" true (String.length (Bcs.error_to_string e) > 0)
 
 let test_scores_reject_a_non_ascending_map () =
@@ -543,7 +554,10 @@ let test_the_cached_digest_is_not_on_the_wire () =
       let headers_len, scores_len = sub_dag_sections sd in
       Alcotest.(check int)
         (Printf.sprintf "sub-DAG %d: four sections and no fifth" i)
-        (headers_len + scores_len + 8 + Tn_crypto.Digest.length)
+        (* The randomness leg is LENGTH-PREFIXED on the wire (Rust's [B256]
+           goes through [serialize_bytes]), so it is 1 + 32, not a bare 32.
+           The pre-image writes the same bytes bare. *)
+        (headers_len + scores_len + 8 + 1 + Hash32.length)
         (String.length bytes);
       Alcotest.(check bool)
         (Printf.sprintf "sub-DAG %d: the digest bytes are absent" i)
@@ -559,8 +573,11 @@ let test_tampering_moves_the_digest () =
   let headers_len, scores_len = sub_dag_sections sd in
   let bytes = Bcs.encode Sub_dag.codec sd in
   let back =
+    (* Past the 0x20 length prefix, so the flip lands on a randomness BYTE and
+       not on the framing: flipping the prefix would be refused, which is a
+       different test. *)
     decoded "tampered randomness" Sub_dag.codec
-      (flip bytes ~at:(headers_len + scores_len + 8))
+      (flip bytes ~at:(headers_len + scores_len + 8 + 1))
   in
   let expected =
     Sub_dag.of_persisted ~headers:(Sub_dag.headers sd) ~scores:(Sub_dag.scores sd)
@@ -568,7 +585,7 @@ let test_tampering_moves_the_digest () =
       ~randomness:(Sub_dag.randomness back)
   in
   Alcotest.(check bool) "the randomness really changed" false
-    (Tn_crypto.Digest.equal (Sub_dag.randomness sd) (Sub_dag.randomness back));
+    (Hash32.equal (Sub_dag.randomness sd) (Sub_dag.randomness back));
   Alcotest.(check string) "the digest is RECOMPUTED over the tampered fields"
     (Digests.Sub_dag_digest.to_hex (Sub_dag.digest expected))
     (Digests.Sub_dag_digest.to_hex (Sub_dag.digest back));
@@ -611,15 +628,17 @@ let test_block_round_trips () =
       check_block what b (decoded what Cb.codec (Bcs.encode Cb.codec b)))
     all_blocks
 
-let test_block_wire_omits_the_digest_and_the_extra_field () =
+let test_block_wire_omits_the_digest () =
   List.iteri
     (fun i b ->
       let bytes = Bcs.encode Cb.codec b in
       Alcotest.(check int)
-        (Printf.sprintf "block %d: parent, sub-DAG, number and nothing else" i)
-        (Tn_crypto.Digest.length
+        (Printf.sprintf "block %d: parent, sub-DAG, number, extra, no fifth" i)
+        (* Both 32-byte legs are LENGTH-PREFIXED, so each costs 1 + 32; the
+           number is a bare 8. The cached digest is the field that is absent. *)
+        (1 + Tn_crypto.Digest.length
         + String.length (Bcs.encode Sub_dag.codec (Cb.sub_dag b))
-        + 8)
+        + 8 + 1 + Hash32.length)
         (String.length bytes);
       Alcotest.(check bool)
         (Printf.sprintf "block %d: the digest bytes are absent" i)
@@ -630,10 +649,32 @@ let test_block_wire_omits_the_digest_and_the_extra_field () =
                 (Digests.Output_digest.to_digest (Cb.digest b)))))
     all_blocks
 
+(* [extra] is on the wire and off the digest: two blocks that differ only there
+   encode differently and digest identically. This is the positive control for
+   the field being carried at all — without it a port that dropped [extra]
+   entirely would still pass every other block row. *)
+let test_the_extra_field_is_on_the_wire_and_off_the_digest () =
+  let b = nth "block" all_blocks 1 in
+  let loud =
+    Cb.of_persisted ~parent_hash:(Cb.parent_hash b) ~sub_dag:(Cb.sub_dag b)
+      ~number:(Cb.number b)
+      ~extra:(get "32 bytes" (Hash32.of_bytes (String.make 32 '\xff')))
+  in
+  Alcotest.(check bool) "the wire bytes differ" false
+    (String.equal (Bcs.encode Cb.codec b) (Bcs.encode Cb.codec loud));
+  Alcotest.(check string) "the digest does not move"
+    (Digests.Output_digest.to_hex (Cb.digest b))
+    (Digests.Output_digest.to_hex (Cb.digest loud));
+  Alcotest.(check string) "and it round-trips"
+    (Hash32.to_hex (Cb.extra loud))
+    (Hash32.to_hex
+       (Cb.extra (decoded "loud extra" Cb.codec (Bcs.encode Cb.codec loud))))
+
 let test_a_block_height_below_genesis_is_refused () =
   let b = nth "block" all_blocks 1 in
   let bytes = Bcs.encode Cb.codec b in
-  let at = String.length bytes - 8 in
+  (* The height is no longer the tail: the length-prefixed [extra] follows it. *)
+  let at = String.length bytes - 8 - 1 - Hash32.length in
   Alcotest.(check string) "the tail is the height"
     (Bcs.encode Bcs.u64 (Cb.Number.to_int64 (Cb.number b)))
     (sub_at bytes ~off:at ~len:8);
@@ -858,8 +899,8 @@ let () =
             test_scores_round_trip;
           Alcotest.test_case "finality survives the wire" `Quick
             test_scores_finality_is_on_the_wire;
-          Alcotest.test_case "a disagreeing authority count is refused" `Quick
-            test_scores_reject_a_disagreeing_count;
+          Alcotest.test_case "the wire ends at the final flag" `Quick
+            test_scores_end_at_the_final_flag;
           Alcotest.test_case "a non-ascending map is refused" `Quick
             test_scores_reject_a_non_ascending_map;
         ] );
@@ -884,8 +925,10 @@ let () =
         [
           Alcotest.test_case "every projection round-trips" `Quick
             test_block_round_trips;
-          Alcotest.test_case "the wire omits the digest and the extra field" `Quick
-            test_block_wire_omits_the_digest_and_the_extra_field;
+          Alcotest.test_case "the wire omits the cached digest" `Quick
+            test_block_wire_omits_the_digest;
+          Alcotest.test_case "extra is on the wire and off the digest" `Quick
+            test_the_extra_field_is_on_the_wire_and_off_the_digest;
           Alcotest.test_case "a height below genesis is refused" `Quick
             test_a_block_height_below_genesis_is_refused;
         ] );

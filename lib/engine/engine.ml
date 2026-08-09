@@ -31,7 +31,6 @@ type error =
       proposed : Units.Timestamp.t;
     }
   | Plan of Block_plan.error
-  | Randomness_width of int
   | Withdrawals of Rewards_counter.error
   | Context of { number : int; error : Tn_evm.Block_context.error }
   | Execution of { number : int; error : Tn_evm.Block_execution.error }
@@ -48,8 +47,6 @@ let error_to_string = function
         (Units.Timestamp.to_sec proposed)
         (Units.Timestamp.to_sec closed_at)
   | Plan error -> "block plan: " ^ Block_plan.error_to_string error
-  | Randomness_width width ->
-      Printf.sprintf "sub-DAG randomness is %d bytes, not 32" width
   | Withdrawals error ->
       "withdrawals: " ^ Rewards_counter.error_to_string error
   | Context { number; error } ->
@@ -344,26 +341,19 @@ let seal output (state, blocks) =
 (* The closing commitment: the 32 bytes that go verbatim into [extra_data] and
    the withdrawal records the header roots.
 
-   The randomness is CONVERTED, never recomputed. The sub-DAG already carries
-   the hash of the leader certificate's aggregate signature
-   ([types/src/primary/output.rs:258-265]), so re-deriving it here would be a
-   second implementation of the same rule, free to drift. The width is checked
-   rather than assumed because {!Hash32.of_bytes} refuses anything but 32 bytes
-   and this port has no substitute 32 bytes to fall back on: a sub-DAG that
-   carries the wrong width is a failure, not a default.
+   The randomness is TAKEN, never recomputed. The sub-DAG already carries the
+   keccak256 of the leader certificate's aggregate signature
+   ([types/src/primary/output.rs:378-382]), so re-deriving it here would be a
+   second implementation of the same rule, free to drift. No width check is
+   possible or needed: the sub-DAG carries the 32-byte gate itself, so there is
+   no string to measure.
 
    The counts read are the ones this output already advanced, so the leader of
    the closing output appears in its OWN withdrawals, which is what telcoin's
    ordering at [payload_builder.rs:40] produces. *)
 let closing_boundary (state : t) output =
-  let bytes =
-    Tn_crypto.Digest.to_bytes
-      (Sub_dag.randomness (Consensus_block.sub_dag (Output.consensus output)))
-  in
-  let* randomness =
-    Option.to_result
-      ~none:(Randomness_width (String.length bytes))
-      (Hash32.of_bytes bytes)
+  let randomness =
+    Sub_dag.randomness (Consensus_block.sub_dag (Output.consensus output))
   in
   Result.map
     (fun withdrawals -> Epoch_boundary.Closing { randomness; withdrawals })

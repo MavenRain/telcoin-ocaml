@@ -11,6 +11,15 @@ val of_randomness : Tn_hash32.Hash32.t -> t
     ([block.rs:438-443]). Total because {!Tn_hash32.Hash32.t} is 32 bytes by
     construction. *)
 
+val of_leader_round : Stdlib.Int64.t -> t
+(** [StdRng::from_seed] over the leader-swap seed
+    ([crates/consensus/primary/src/consensus/leader_schedule.rs:209-218]): 24
+    zero bytes, then the round as 8 LITTLE-ENDIAN bytes. Rust widens the [u32]
+    [Round] to [u64] and writes it into [seed_bytes[24..32]], leaving the first
+    24 bytes zero, so a big-endian or four-byte write produces a different
+    stream from the same round. Total: the seed is 32 bytes by construction,
+    so no length failure can reach the caller. *)
+
 val next_u32 : t -> int * t
 (** One u32 draw: the next keystream word ([BlockRng::next_u32],
     [rand_core-0.9.5/src/block.rs:186-194]). *)

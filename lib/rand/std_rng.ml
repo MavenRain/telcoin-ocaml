@@ -9,7 +9,24 @@
 
 type t = Chacha12.t
 
+module Hash32 = Tn_hash32.Hash32
+
 let of_randomness = Chacha12.of_key
+
+(* leader_schedule.rs:210-213: [seed_bytes] starts as 32 zero bytes and the
+   round, widened from u32 to u64, is written LITTLE-ENDIAN into
+   [seed_bytes[24..32]], so the first 24 bytes stay zero and a big-endian or
+   four-byte write yields a different stream from the same round. The buffer
+   is local and nothing mutable escapes, the way [Tn_codec.Bcs]'s writer
+   works. *)
+let of_leader_round round =
+  let seed = Bytes.make 32 '\000' in
+  Bytes.set_int64_le seed 24 round;
+  (* 32 bytes by construction, so the default is unreachable; the constructor
+     stays total at the boundary instead of handing the caller an option. *)
+  of_randomness
+    (Option.value (Hash32.of_bytes (Bytes.to_string seed)) ~default:Hash32.zero)
+
 let next_u32 = Chacha12.next_word
 
 (* BlockRng::next_u64 (rand_core-0.9.5/src/block.rs:197-219) reads the low

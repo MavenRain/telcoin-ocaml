@@ -3,9 +3,10 @@
 
    The preimage rows are the byte-exact output of the pinned Rust oracle
    (bcs 0.1.6 + the alloy Address serde), so a green T1 is wire evidence,
-   not round-trip self-consistency. The blake3 column stays inert until
-   tn_crypto_blst lands; T7 pins the stub-seam digest formula (seam hash of
-   domain ^ preimage) instead. *)
+   not round-trip self-consistency. T7 pins the digest FORMULA, which is
+   seam-independent: the bare seam hash of the preimage, no tag. The blake3
+   column of the same rows is asserted in test/crypto_blst, where the seam
+   is real BLAKE3; the two together are the byte-compat claim. *)
 
 open Tn_types
 module Bcs = Tn_codec.Bcs
@@ -152,16 +153,18 @@ let t6 () =
   Alcotest.(check bool) "reflexive on V5" true (Batch.equal v5 v5);
   Alcotest.(check bool) "reflexive on V6" true (Batch.equal v6 v6)
 
-(* T7: the stub-era digest formula, recomputed in-test through the seam. *)
-let stub_digest b =
-  Digests.Batch_digest.of_digest
-    (Tn_crypto.Digest.hash (Digests.Batch_digest.domain ^ Batch.preimage b))
+(* T7: the byte-compat digest formula, recomputed in-test through the seam.
+   Bare preimage, no tag: whatever the seam hashes with, [Batch.digest] must be
+   exactly [hash preimage], which is what makes the blst executable's blake3
+   column assert the Rust digest. *)
+let seam_digest b =
+  Digests.Batch_digest.of_digest (Tn_crypto.Digest.hash (Batch.preimage b))
 
 let t7 () =
-  Alcotest.(check bool) "V1 digest is seam hash of domain ^ preimage" true
-    (Digests.Batch_digest.equal (Batch.digest v1) (stub_digest v1));
-  Alcotest.(check bool) "V4 digest is seam hash of domain ^ preimage" true
-    (Digests.Batch_digest.equal (Batch.digest v4) (stub_digest v4));
+  Alcotest.(check bool) "V1 digest is the seam hash of the bare preimage" true
+    (Digests.Batch_digest.equal (Batch.digest v1) (seam_digest v1));
+  Alcotest.(check bool) "V4 digest is the seam hash of the bare preimage" true
+    (Digests.Batch_digest.equal (Batch.digest v4) (seam_digest v4));
   Alcotest.(check bool) "V1 and V4 digests differ" false
     (Digests.Batch_digest.equal (Batch.digest v1) (Batch.digest v4))
 
@@ -186,6 +189,96 @@ let t8 () =
        (Batch.Sealed.claim ~batch:v5 ~digest:(Batch.digest v5)));
   Alcotest.(check bool) "a wrong claim differs from seal" false
     (Batch.Sealed.equal sealed claimed)
+
+(* ---- chunk-41 S2: the Rust-oracle SealedBatch rows ----
+
+   Expected values are the oracle's hex (sealed_batch_vectors.ml), never a
+   value this port computed for itself. Both legs of every row come from the
+   oracle: the batch leg is a frozen Batch pre-image and the digest leg is the
+   oracle's blake3 output, CLAIMED rather than computed, so the rows assert the
+   codec's byte layout without depending on which hash the Tn_crypto seam
+   provides in this executable. *)
+module SB = Sealed_batch_vectors
+
+(* Fold, then one tail call: [Option.fold]'s [~none] is eager, so the failure
+   has to sit behind a thunk. *)
+let force label o =
+  Option.fold
+    ~none:(fun () -> Alcotest.failf "chunk-41 vector %s is malformed" label)
+    ~some:(fun v () -> v)
+    o ()
+
+let of_hex label h = force label (Hex_bytes.decode h)
+
+let claimed_digest label h =
+  Digests.Batch_digest.of_digest
+    (force label (Tn_crypto.Digest.of_bytes (of_hex label h)))
+
+let sealed_of_row label ~preimage ~digest =
+  let batch =
+    Bcs.decode Batch.codec (of_hex (label ^ " batch") preimage)
+    |> Result.to_option
+    |> force (label ^ " batch decode")
+  in
+  Batch.Sealed.claim ~batch ~digest:(claimed_digest (label ^ " digest") digest)
+
+let sealed_rows =
+  [
+    ("SB1", SB.sb1_batch_preimage, SB.sb1_digest, SB.sb1_wire);
+    ("SB2", SB.sb2_batch_preimage, SB.sb2_digest, SB.sb2_wire);
+    ("SB3", SB.sb3_batch_preimage, SB.sb3_digest, SB.sb3_wire);
+  ]
+
+(* T10: the wire of each row is exactly bcs(Batch), then 0x20, then 32 bytes.
+   The first check is against the oracle's own concatenation, which catches a
+   mis-copied constant; the second is against this port's encoder. *)
+let t10 () =
+  List.iter
+    (fun (label, preimage, digest, wire) ->
+      Alcotest.(check string)
+        (label ^ ": oracle wire = batch ++ 0x20 ++ digest")
+        wire
+        (preimage ^ "20" ^ digest);
+      Alcotest.(check string)
+        (label ^ ": Sealed.codec = oracle wire")
+        wire
+        (to_hex
+           (Bcs.encode Batch.Sealed.codec (sealed_of_row label ~preimage ~digest))))
+    sealed_rows
+
+(* T11: decode is the inverse of encode on every row, and it leaves the claim
+   unverified, exactly as [SealedBatch::new] does. *)
+let t11 () =
+  List.iter
+    (fun (label, preimage, digest, wire) ->
+      let expected = sealed_of_row label ~preimage ~digest in
+      Bcs.decode Batch.Sealed.codec (of_hex (label ^ " wire") wire)
+      |> Result.fold
+           ~ok:(fun decoded ->
+             Alcotest.(check bool)
+               (label ^ ": decoded equals the claimed pair")
+               true
+               (Batch.Sealed.equal decoded expected);
+             Alcotest.(check string)
+               (label ^ ": re-encodes to its own bytes")
+               wire
+               (to_hex (Bcs.encode Batch.Sealed.codec decoded)))
+           ~error:(fun e ->
+             Alcotest.failf "%s decode: %s" label (Bcs.error_to_string e)))
+    sealed_rows
+
+(* T12: SB_NEG is SB1 with the 0x20 prefix byte gone, so the digest leg is a
+   bare 32 bytes. It must be REFUSED, not re-framed: 0xef is not the length 32
+   and every following byte is shifted. *)
+let t12 () =
+  Alcotest.(check bool) "SB_NEG differs from SB1" false
+    (String.equal SB.sb_neg_wire SB.sb1_wire);
+  Alcotest.(check int) "SB_NEG is one byte shorter than SB1"
+    (String.length SB.sb1_wire - 2)
+    (String.length SB.sb_neg_wire);
+  Alcotest.(check bool) "a bare digest leg is refused" false
+    (Result.is_ok
+       (Bcs.decode Batch.Sealed.codec (of_hex "SB_NEG" SB.sb_neg_wire)))
 
 (* T9: the fork-blind bounds and the protocol base-fee floor. *)
 let t9 () =
@@ -218,9 +311,15 @@ let () =
       ( "semantics",
         [
           Alcotest.test_case "T6 equal includes received_at" `Quick t6;
-          Alcotest.test_case "T7 digest = stub hash of domain ^ preimage"
+          Alcotest.test_case "T7 digest = seam hash of the bare preimage"
             `Quick t7;
           Alcotest.test_case "T8 Sealed seal/claim/split" `Quick t8;
           Alcotest.test_case "T9 constants" `Quick t9;
+        ] );
+      ( "sealed batch oracle vectors",
+        [
+          Alcotest.test_case "T10 SB1-SB3 wire = oracle hex" `Quick t10;
+          Alcotest.test_case "T11 SB1-SB3 round-trip" `Quick t11;
+          Alcotest.test_case "T12 SB_NEG bare digest leg refused" `Quick t12;
         ] );
     ]

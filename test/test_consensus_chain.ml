@@ -209,7 +209,7 @@ let synthetic_sub_dag ~author ~r ~payload =
       (Certificate.assemble committee header votes)
   in
   let header =
-    Header.make ~author ~round:(get "round" (Round.of_int r))
+    Header.make ~latest_execution_block:Tn_types.Block_num_hash.zero ~author ~round:(get "round" (Round.of_int r))
       ~epoch:Units.Epoch.zero
       ~created_at:(get "timestamp" (Units.Timestamp.of_sec 55L))
       ~payload

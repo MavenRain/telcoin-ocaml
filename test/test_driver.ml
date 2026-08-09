@@ -122,7 +122,7 @@ let sub_dag_on ~r ~at entries =
           if i = n - 1 then ts at else ts (Int64.of_int (10 + i))
         in
         let header =
-          Header.make ~author ~round:(round (r + i)) ~epoch:Units.Epoch.zero
+          Header.make ~latest_execution_block:Tn_types.Block_num_hash.zero ~author ~round:(round (r + i)) ~epoch:Units.Epoch.zero
             ~created_at ~payload ~parents
         in
         (header :: acc, [ Header.digest header ]))

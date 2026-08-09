@@ -30,11 +30,13 @@
    row carries the beneficiary as 0x14 + 20 bytes; V1 doubles as
    Batch::default(), pinning MIN_PROTOCOL_BASE_FEE = 7.
 
-   The blake3 column is INERT: the port's stub crypto seam hashes
-   domain ^ preimage with BLAKE2s, so nothing can assert against these
-   hexes yet. The assertions activate when tn_crypto_blst lands (it must
-   hash the BARE preimage with real BLAKE3 and drop the domain tag for
-   Batch_digest byte-compat). *)
+   The blake3 column is LIVE, asserted in test/crypto_blst (the only
+   executable where the Tn_crypto seam is real BLAKE3) against
+   Digest.hash of the decoded preimage. That is exactly the formula
+   Batch.digest now uses, the bare preimage with no domain tag, which
+   test_batch.ml T7 pins seam-independently. Under the default (stub)
+   executables the seam is BLAKE2s, so these hexes are not assertable
+   there and the preimage column carries the wire evidence instead. *)
 
 (* V1-default: txs [], epoch 0, beneficiary 0x00..00, base fee 7, worker 0.
    Hand-check: 00 (empty tx vec) + 00000000 (epoch) + 14 + 20x00

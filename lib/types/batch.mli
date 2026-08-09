@@ -10,9 +10,8 @@
     LE; worker id as u16 LE. [received_at] contributes ZERO bytes
     ([#[serde(skip)]], sealed_batch.rs:86-88). Pinned by golden vectors V1-V7
     (test/batch_vectors.ml, emitted by a Rust oracle pinned to bcs 0.1.6,
-    blake3 1.8.3, alloy-primitives 1.5.7). A future crypto chunk may change
-    only the hash function and the domain-tag policy around it, never this
-    layout. *)
+    blake3 1.8.3, alloy-primitives 1.5.7). The crypto seam may change only the
+    hash function around it, never this layout. *)
 
 type t
 (** A batch: raw EIP-2718 transaction byte strings plus the epoch,
@@ -69,11 +68,11 @@ val preimage : t -> string
     comment. *)
 
 val digest : t -> Digests.Batch_digest.t
-(** Protocol hash of [Batch_digest.domain ^ preimage] through the [Tn_crypto]
-    seam, following [Header]'s precedent (header.ml:96-97). Rust hashes the
-    BARE preimage with blake3 and no domain tag (sealed_batch.rs:116-124);
-    hash byte-compat (real BLAKE3, tag dropped) is [tn_crypto_blst]'s
-    obligation, while the preimage bytes are frozen already. *)
+(** Protocol hash of the BARE {!preimage} through the [Tn_crypto] seam, with no
+    tag and no prefix: Rust's [blake3(bcs(Batch))] (sealed_batch.rs:116-124).
+    The preimage bytes are frozen by the golden vectors, so under
+    [tn_crypto_blst], where the seam is real BLAKE3, this is the Rust digest
+    byte for byte; under the stub it is the same formula over BLAKE2s. *)
 
 val max_batch_gas : Units.Epoch.t -> int64
 (** 30_000_000. Fork-blind: the epoch argument is accepted and ignored,
@@ -117,6 +116,15 @@ module Sealed : sig
   val split : t -> batch * Digests.Batch_digest.t
   (** Both components; the inverse of {!seal} only when the claim is honest
       (Rust [split], sealed_batch.rs:48-53). *)
+
+  val codec : t Tn_codec.Bcs.t
+  (** The BCS wire codec of Rust's derived [SealedBatch { batch, digest }]
+      (sealed_batch.rs:17-31): {!Batch.codec}'s bytes, then the claimed digest
+      LENGTH-PREFIXED as [0x20] followed by its 32 bytes, because [BlockHash] is
+      a [FixedBytes<32>] and alloy routes that through [serialize_bytes]. A bare
+      32-byte digest leg is REFUSED on decode, not re-framed. Decoding does not
+      check the claim against the batch, matching [SealedBatch::new]: a wrong
+      claim is a validator rejection, never a decode error. *)
 
   val equal : t -> t -> bool
   (** Structural on both components. *)

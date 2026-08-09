@@ -152,7 +152,7 @@ let certify_next header =
    the epoch-1 committee itself. *)
 let epoch1_sub_dag ~r ~at payload =
   let header =
-    Header.make
+    Header.make ~latest_execution_block:Tn_types.Block_num_hash.zero
       ~author:
         (nth "epoch-1 seat"
            (List.map Authority.id (Committee.authorities committee_next))

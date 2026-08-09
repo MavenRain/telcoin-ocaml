@@ -216,10 +216,16 @@ let propose t ~now =
     let taken, rest = take_digests t.config.max_batches_per_header t.digests in
     let parents = List.map Certificate.digest t.last_parents in
     let header =
+      (* Upstream reads this from the execution side of the node
+         (proposer.rs, [consensus_bus.app().n_num_hash()]). This proposer is
+         driven by DAG events alone and is given no execution channel, so it
+         proposes the zero anchor. The field is on the wire and in the digest
+         either way, so plumbing a real value later changes only the value. *)
       Header.make ~author:t.authority ~round:next
         ~epoch:(Committee.epoch t.committee)
         ~created_at:(created_at_of ~now t.last_parents)
         ~payload:taken ~parents
+        ~latest_execution_block:Block_num_hash.zero
     in
     let t =
       {

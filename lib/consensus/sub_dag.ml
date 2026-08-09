@@ -2,14 +2,26 @@ open Tn_std
 open Tn_types
 open Tn_vertex
 module Bcs = Tn_codec.Bcs
+module Hash32 = Tn_hash32.Hash32
 
 type t = {
   sequence : Header.t Nonempty.t; (* commit order: ascending round, leader last *)
   scores : Reputation_scores.t;
   stored : Units.Timestamp.t; (* the raw clamped value that feeds the digest *)
-  randomness : Tn_crypto.Digest.t;
+  randomness : Hash32.t; (* keccak256, NOT the Tn_crypto seam *)
   digest : Digests.Sub_dag_digest.t; (* computed once in create and cached *)
 }
+
+(* [BlsSignature::default().to_bytes()]: the compressed point at infinity on
+   G1, so byte 0 is 0xc0 (the compressed flag or the infinity flag) and the
+   remaining 47 bytes are zero. Rust's [CommittedSubDag::new] falls back to
+   exactly these bytes when the leader carries no aggregate signature
+   (primary/output.rs:378-382), so the fallback pre-image is this constant and
+   never the empty string. *)
+let default_signature_bytes = "\xc0" ^ String.make 47 '\000'
+
+let default_randomness =
+  Hash32.of_keccak (Tn_keccak.digest default_signature_bytes)
 
 let headers t = t.sequence
 
@@ -38,19 +50,6 @@ let commit_timestamp t =
   if Units.Timestamp.equal t.stored Units.Timestamp.zero then Header.created_at (leader t)
   else t.stored
 
-(* BCS shape of the scores, matching Rust exactly: a ULEB128-counted map with
-   32-byte keys ascending bytewise and u64 little-endian values, followed by the
-   final-of-schedule bool. [Reputation_scores.bindings] is already ascending id
-   (= ascending bytes), which [sorted_map] re-checks. *)
-let scores_codec =
-  Bcs.pair (Bcs.sorted_map (Bcs.fixed_bytes 32) Bcs.u64 ~compare:String.compare) Bcs.bool
-
-let scores_value scores =
-  ( List.map
-      (fun (id, s) -> (Authority_id.to_bytes id, Int64.of_int s))
-      (Reputation_scores.bindings scores),
-    Reputation_scores.is_final scores )
-
 let header_digest_bytes sequence =
   let buf = Buffer.create (Tn_crypto.Digest.length * Nonempty.length sequence) in
   Nonempty.iter
@@ -61,12 +60,16 @@ let header_digest_bytes sequence =
   Buffer.contents buf
 
 (* The frozen pre-image: header digests in sequence order, BCS scores, 8-byte
-   LE stored timestamp, raw randomness — no domain tag, no separators. *)
+   LE stored timestamp, raw randomness, with no separators between them. The
+   scores section is {!Reputation_scores.codec} itself, not a second copy of
+   its shape: Rust hashes [bcs(inner.reputation_scores)] (output.rs:466), the
+   very bytes the wire carries, so sharing the codec makes the agreement
+   structural instead of a comment. *)
 let preimage_bytes ~sequence ~scores ~stored ~randomness =
   header_digest_bytes sequence
-  ^ Bcs.encode scores_codec (scores_value scores)
+  ^ Bcs.encode Reputation_scores.codec scores
   ^ Bcs.encode Bcs.u64 (Units.Timestamp.to_sec stored)
-  ^ Tn_crypto.Digest.to_bytes randomness
+  ^ Hash32.to_bytes randomness
 
 let preimage t =
   preimage_bytes ~sequence:t.sequence ~scores:t.scores ~stored:t.stored
@@ -76,10 +79,9 @@ let preimage t =
    storage decoder so the two can never drift. *)
 let of_persisted ~headers ~scores ~stored ~randomness =
   let pre = preimage_bytes ~sequence:headers ~scores ~stored ~randomness in
-  let digest =
-    Digests.Sub_dag_digest.of_digest
-      (Tn_crypto.Digest.hash (Digests.Sub_dag_digest.domain ^ pre))
-  in
+  (* The BARE pre-image, no tag: Rust's [CommittedSubDag::digest] feeds the four
+     parts straight into the hasher (primary/output.rs:457-471). *)
+  let digest = Digests.Sub_dag_digest.of_digest (Tn_crypto.Digest.hash pre) in
   { sequence = headers; scores; stored; randomness; digest }
 
 let create ~sequence ~scores ~previous =
@@ -91,17 +93,16 @@ let create ~sequence ~scores ~previous =
       (previous |> Option.fold ~none:Units.Timestamp.zero ~some:stored_timestamp)
       (Header.created_at leader_header)
   in
-  (* Divergence: Rust derives randomness with keccak256 of the aggregate BLS
-     signature bytes and falls back to [BlsSignature::default().to_bytes()] on
-     the (leader-unreachable) missing-signature case; this port routes the same
-     bytes through the {!Tn_crypto} seam and hashes empty bytes on that dead
-     branch. Deterministic either way; aligning the concrete hash and the
-     fallback constant is deferred to the codec/crypto chunk. *)
-  let randomness =
+  (* keccak256 of the leader's aggregate signature bytes, with the default
+     signature standing in when the leader carries none — Rust's
+     [CommittedSubDag::new] (primary/output.rs:378-382). Keccak is a fixed fact
+     of the protocol, not a seam choice, so this does not route through
+     {!Tn_crypto}. *)
+  let signature_bytes =
     Certificate.aggregate_signature leader_cert
-    |> Option.fold ~none:"" ~some:Tn_crypto.Aggregate.to_bytes
-    |> Tn_crypto.Digest.hash
+    |> Option.fold ~none:default_signature_bytes ~some:Tn_crypto.Aggregate.to_bytes
   in
+  let randomness = Hash32.of_keccak (Tn_keccak.digest signature_bytes) in
   of_persisted ~headers ~scores ~stored ~randomness
 
 (* A whole-second timestamp beyond the representable range is refused, not
@@ -113,12 +114,17 @@ let timestamp_codec =
         (Units.Timestamp.of_sec secs))
     ~project:Units.Timestamp.to_sec Bcs.u64
 
+(* [pfx32], not the pre-image's bare 32: Rust's [randomness: B256] serialises
+   through alloy's [serialize_bytes], which bcs always length-prefixes, so the
+   wire carries 0x20 then the 32 bytes while {!preimage} carries them bare
+   (output.rs:470). The two classes are deliberately different here; unifying
+   them breaks one side or the other. [sized_bytes] fixes the width at the
+   codec, so [of_bytes] cannot miss and the eager default is a constant. *)
 let randomness_codec =
   Bcs.iso
-    ~inject:(fun raw ->
-      Option.value (Tn_crypto.Digest.of_bytes raw) ~default:Tn_crypto.Digest.zero)
-    ~project:Tn_crypto.Digest.to_bytes
-    (Bcs.fixed_bytes Tn_crypto.Digest.length)
+    ~inject:(fun raw -> Option.value (Hash32.of_bytes raw) ~default:Hash32.zero)
+    ~project:Hash32.to_bytes
+    (Bcs.sized_bytes Hash32.length)
 
 (* Non-emptiness survives the wire as a refusal, never as a repaired value. *)
 let sequence_codec =

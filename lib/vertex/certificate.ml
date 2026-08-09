@@ -75,9 +75,14 @@ let genesis committee =
   List.map
     (fun authority ->
       let header =
+        (* Rust builds the genesis header through [HeaderBuilder::default()]
+           (certificate.rs:52-55), which leaves the execution anchor at alloy's
+           default, so the zero anchor here is the upstream value and not a
+           placeholder. *)
         Header.make ~author:(Authority.id authority) ~round:Round.genesis
           ~epoch:(Committee.epoch committee) ~created_at:Units.Timestamp.zero
           ~payload:[] ~parents:[]
+          ~latest_execution_block:Block_num_hash.zero
       in
       { header; signers = Authority_id.Set.empty; verification = Genesis })
     (Committee.authorities committee)

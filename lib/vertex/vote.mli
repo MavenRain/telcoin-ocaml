@@ -14,7 +14,9 @@ val sign : Tn_crypto.Secret_key.t -> voter:Authority_id.t -> Header.t -> t
 
 val signing_message : Digests.Header_digest.t -> string
 (** The exact byte string a vote signs for a given header digest:
-    [Intent.wrap Consensus_vote (digest bytes)]. Shared with certificate
+    [Intent.wrap Consensus_vote (0x20 :: digest bytes)], the BCS
+    length-prefixed encoding of the digest ({!Tn_crypto.Digest.length} is 32,
+    so this is 33 bytes), for 36 bytes total. Shared with certificate
     verification so the aggregate is checked against the very bytes signed. *)
 
 val header_digest : t -> Digests.Header_digest.t

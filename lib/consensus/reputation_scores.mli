@@ -58,17 +58,16 @@ val total_authorities : t -> int
 val all_zero : t -> bool
 
 val codec : t Tn_codec.Bcs.t
-(** The persisted wire codec. RESERVED for the storage chunk. Three sections:
-    the ULEB128-counted map of 32-byte authority ids to u64 scores in ascending
-    id order — byte-identical to the section {!Sub_dag.preimage} already
-    freezes — then the {!is_final} flag, then the declared
-    {!total_authorities}.
+(** The wire codec, byte-identical to Rust's derived [ReputationScores]
+    (primary/reputation.rs:8-18). TWO sections and no third: the
+    ULEB128-counted map of BARE 32-byte authority ids to little-endian u64
+    scores in ascending id order, then the {!is_final} flag.
 
-    The count is a CROSS-CHECK, never a source of truth: the value's own
-    authority count is the cardinality of its binding set, so a wire whose
-    count disagrees with the number of bindings it carries is refused rather
-    than reconciled. Sorting by id means two equal score sets cannot produce
-    two byte strings, so a byte-level differential over this codec stays
-    meaningful. *)
+    {!total_authorities} is deliberately NOT on the wire. It is the cardinality
+    of the binding set, so carrying it would be a field that can only ever
+    agree with the bytes beside it, and Rust does not carry it either. Sorting
+    by id means two equal score sets cannot produce two byte strings, so a
+    byte-level differential over this codec stays meaningful. These are the
+    same bytes {!Sub_dag.preimage} hashes for its scores section. *)
 
 val equal : t -> t -> bool
