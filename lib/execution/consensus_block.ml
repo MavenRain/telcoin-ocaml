@@ -11,9 +11,23 @@ module Number = struct
   let succ n = if n = max_int then n else n + 1
   let to_int n = n
   let to_int64 = Int64.of_int
+  let of_int n = if n < 0 then None else Some n
   let equal = Int.equal
   let compare = Int.compare
   let to_string = string_of_int
+
+  (* A wire u64 the host int cannot hold is refused rather than wrapped, and a
+     negative one is below genesis, which is not a height at all. *)
+  let of_int64 v =
+    if Int64.compare v 0L < 0 || Int64.compare v (Int64.of_int max_int) > 0 then
+      None
+    else of_int (Int64.to_int v)
+
+  let codec : t Bcs.t =
+    Bcs.refine
+      ~inject:(fun v ->
+        Option.to_result ~none:"consensus block number out of range" (of_int64 v))
+      ~project:to_int64 Bcs.u64
 end
 
 type t = {
@@ -61,6 +75,24 @@ let genesis_parent =
 
 let create ~parent_hash ~sub_dag ~number =
   { parent_hash; sub_dag; number; digest = digest_of ~parent_hash ~sub_dag ~number }
+
+(* [fixed_bytes] fixes the width at the codec, so [of_bytes] cannot miss and the
+   eager default is a constant. *)
+let output_digest_codec =
+  Bcs.iso
+    ~inject:(fun raw ->
+      Digests.Output_digest.of_digest
+        (Option.value (Tn_crypto.Digest.of_bytes raw)
+           ~default:Tn_crypto.Digest.zero))
+    ~project:(fun d -> Tn_crypto.Digest.to_bytes (Digests.Output_digest.to_digest d))
+    (Bcs.fixed_bytes Tn_crypto.Digest.length)
+
+let codec : t Bcs.t =
+  Bcs.iso
+    ~inject:(fun (parent_hash, sub_dag, number) ->
+      create ~parent_hash ~sub_dag ~number)
+    ~project:(fun t -> (t.parent_hash, t.sub_dag, t.number))
+    (Bcs.triple output_digest_codec Sub_dag.codec Number.codec)
 
 let equal a b = Digests.Output_digest.equal a.digest b.digest
 let compare a b = Digests.Output_digest.compare a.digest b.digest

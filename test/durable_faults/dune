@@ -1,0 +1,3 @@
+(library
+ (name durable_faults)
+ (libraries tn_durable unix))

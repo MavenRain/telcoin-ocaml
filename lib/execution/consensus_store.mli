@@ -147,6 +147,27 @@ module Record : sig
   val bodies : t -> Batch.t list
   (** Every referenced body, in the flat commit-order payload sequence
       {!create} derived them from. *)
+
+  val to_wire : t -> Consensus_block.t * Batch.t list
+  (** The two components a storage encoder writes: the block, and the bodies in
+      the order {!create} derived. RESERVED for the storage chunk, the
+      precedent {!Tn_consensus.Dag.insert_recovered} sets. Nothing else is
+      written because nothing else is stored — {!number}, {!digest},
+      {!parent_hash} and {!epoch} are all projections of the block. *)
+
+  val of_wire : Consensus_block.t * Batch.t list -> (t, error) result
+  (** The inverse a storage decoder needs, and the reason it is not a plain
+      pairing: {!create} needs a [lookup] that a decoder must synthesise. The
+      decoded bodies are indexed by their own {!Tn_types.Batch.digest} and that
+      index is handed to {!create}, so the header still orders the bodies and
+      still fixes their multiplicity. RESERVED for the storage chunk.
+
+      Two consequences, and they are exactly what the byte stream is not
+      trusted for. A body list that cannot supply a digest the block's own
+      sub-DAG names is {!Missing_body}, never a record. A body list that is
+      merely re-ordered, or that carries a repeated digest only once, is
+      neither trusted nor refused: it decodes to the same record the canonical
+      body list decodes to, with commit order and multiplicity re-derived. *)
 end
 
 (** Why the store cannot answer as asked. Four diagnoses, deliberately not

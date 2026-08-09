@@ -7,6 +7,15 @@ let digest s = H.to_raw_string (H.digest_string s)
 let empty = digest ""
 let to_bytes t = t
 
+(* The storage door. The representation IS the raw bytes, so a digest read back
+   out of an artefact this port wrote is the same value the writer held; what
+   the gate refuses is a string of any other width, which is the only way a
+   caller could name something that is not a digest at all. *)
+let of_stored_bytes s =
+  match Int.equal (String.length s) length with
+  | true -> Some s
+  | false -> None
+
 (* Rendered directly from the bytes rather than through [H.to_hex], which would
    need a round trip back through [H.of_raw_string_opt] and so an [Option.get].
    There is no partial function in this port. The shape is {!Tn_state.U256.to_hex}'s. *)

@@ -1,0 +1,11 @@
+; The durable checkpoint: the execution side's small artefact, published by
+; rename. It is a library of its own so the dependency edge from storage to the
+; whole execution stack (state, evm, engine, driver) is drawn once and in one
+; place; nothing below it learns that a checkpoint exists. Every library any
+; module here names is listed explicitly, as every other library in this repo
+; does: the implicit transitive closure is never relied on.
+(library
+ (name tn_durable_checkpoint)
+ (public_name telcoin_ocaml.durable_checkpoint)
+ (libraries tn_durable tn_durable_store tn_codec tn_crypto tn_keccak tn_types
+   tn_execution tn_state tn_evm tn_engine tn_driver))

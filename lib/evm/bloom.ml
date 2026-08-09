@@ -43,4 +43,28 @@ let to_bytes t =
       in
       Char.chr mask)
 
+(* The scatter [to_bytes] is the gather of. Byte [j] of the serialization holds
+   the eight bits whose [bit / 8] is [255 - j], so byte [j]'s bit [k] is bit
+   index [(255 - j) * 8 + k]. Folded over the string with the index carried in
+   the accumulator, so no character is reached by an offset accessor. *)
+let of_bytes s =
+  match Int.equal (String.length s) 256 with
+  | false -> None
+  | true ->
+      Some
+        (snd
+           (String.fold_left
+              (fun (j, bits) c ->
+                let byte = Char.code c in
+                let target = 255 - j in
+                ( Stdlib.succ j,
+                  List.fold_left
+                    (fun acc k ->
+                      if byte land (1 lsl k) <> 0 then
+                        Bit_set.add ((target * 8) + k) acc
+                      else acc)
+                    bits
+                    (List.init 8 Fun.id) ))
+              (0, Bit_set.empty) s))
+
 let equal = Bit_set.equal

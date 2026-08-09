@@ -1069,6 +1069,341 @@ let test_seam_conformance_after_roll () =
           (crossed_ref
           :: List.map (fun (_, (reference, _)) -> reference) rolled_only)))
 
+(* {1 Chunk-40 stage S5: the conformance differential against a real disk}
+
+   The three groups above compare two IN-MEMORY implementations. This one adds a
+   third that is not in memory at all: [Tn_durable_store.Consensus_store_disk],
+   joined through [store_disk_adapter.ml] and profiled by the SAME [Profile]
+   functor at :895, which is reused unchanged.
+
+   Four rungs, in increasing strength. (1) The three implementations agree at
+   all five prefixes. (2) The five prefixes are still pairwise distinct, or the
+   agreement is vacuous. (3) A dead disk instance is diagnosed BEFORE anything
+   is compared, because every read member of a dead instance still answers. (4)
+   The reopen rung: each prefix is closed and opened again on its own root, and
+   the reopened store must render exactly what it rendered before - which is
+   only possible if the mirror was rebuilt by the replay scan over durable
+   bytes rather than remembered. No in-memory implementation can offer rung 4,
+   and that is the point of adding a disk one. *)
+
+module Disk = Tn_durable_store.Consensus_store_disk
+module Io = Tn_durable.Io
+module Io_ops = Tn_durable.Io_ops
+
+let io_ok what r =
+  Result.fold ~ok:Fun.id
+    ~error:(fun e -> Alcotest.failf "%s: %s" what (Io.error_to_string e))
+    r
+
+let disk_run_root =
+  Filename.concat (Filename.get_temp_dir_name ())
+    (Printf.sprintf "tn-store-adapter-%d" (Unix.getpid ()))
+
+(* The FILESYSTEM is the register of roots already minted: a name is free when
+   nothing is at it, and [fresh_root] creates the directory before handing it
+   out, so the next caller sees the name taken. Nothing mutable has to survive
+   between calls, and because the sweep empties a root rather than removing the
+   directory, a name is never handed out twice inside one run. *)
+let rec free_root_name base n =
+  let path = Printf.sprintf "%s-%d" base n in
+  if io_ok "look for a free store root" (Io.exists ~ops:Io_ops.real ~path) then
+    free_root_name base (Stdlib.succ n)
+  else path
+
+let fresh_root label =
+  let path = free_root_name (Filename.concat disk_run_root label) 0 in
+  let () = io_ok "create a store root" (Io.mkdir_p ~ops:Io_ops.real ~path) in
+  (* Alcotest shows a case's own output only when the case FAILS, so this is
+     the kept-evidence path announcing itself exactly when it is wanted. *)
+  let () = Printf.printf "  store root: %s\n" path in
+  path
+
+module Disk_adapter = Store_disk_adapter.Make (struct
+  let fresh_root () = fresh_root "conformance"
+  let ops () = Io_ops.real
+end)
+
+(* THE THIRD INSTANTIATION. *)
+module Disk_profile = Profile (Disk_adapter)
+
+(* The negative control for rung 3: a table whose FIRST flush fails, so the
+   instance never opens and every read member answers a poisoned value. *)
+module Dead_adapter = Store_disk_adapter.Make (struct
+  let fresh_root () = fresh_root "poisoned"
+
+  let ops () =
+    Durable_faults.fail_at ~nth:1 ~op:Io.Fsync ~code:Durable_faults.Absent
+end)
+
+module Dead_profile = Profile (Dead_adapter)
+
+(* {2 Root lifecycle} *)
+
+(* Close one instance, reporting the root it held and whatever the close said. A
+   dead instance never opened, so it has no handle to close and its root is
+   exactly the one that should be left behind. *)
+let closing t =
+  Result.fold
+    ~ok:(fun d ->
+      let root = (Disk.origin d).Disk.dir in
+      Result.fold
+        ~ok:(fun () -> (Some root, None))
+        ~error:(fun f -> (Some root, Some (Disk.fault_to_string f)))
+        (Disk.close d))
+    ~error:(fun (_ : Disk.fault) -> (None, None))
+    t
+
+let sweep root =
+  List.iter
+    (fun name ->
+      io_ok "sweep a store root"
+        (Io.unlink_if_present ~ops:Io_ops.real
+           ~path:(Filename.concat root name)))
+    [ "consensus.log"; "LOCK" ]
+
+(* The result-returning finally. It runs on BOTH paths: every instance is
+   closed, the roots are swept when the case agreed and KEPT (with their paths
+   printed) when it did not, and the verdict comes back as a string so the case
+   reports it through an ordinary named check instead of through an exception
+   raised from inside the cleanup. *)
+let disk_lifecycle instances outcome =
+  let closings = List.map closing instances in
+  let roots = List.filter_map fst closings in
+  let unclosed = List.filter_map snd closings in
+  let verdict =
+    Result.bind outcome (fun () ->
+        if Int.equal (List.length unclosed) 0 then Ok ()
+        else Error ("close: " ^ String.concat "; " unclosed))
+  in
+  let () =
+    Result.fold
+      ~ok:(fun () -> List.iter sweep roots)
+      ~error:(fun (_ : string) ->
+        List.iter
+          (fun root -> Printf.printf "  kept for evidence: %s\n" root)
+          roots)
+      verdict
+  in
+  Result.fold ~ok:(fun () -> "") ~error:Fun.id verdict
+
+(* {2 The rungs, as values a case can call} *)
+
+let strings_agree what expected got =
+  if List.equal String.equal expected got then Ok ()
+  else
+    Error
+      (Printf.sprintf "%s:\n    expected [%s]\n    got      [%s]" what
+         (String.concat " ; " expected)
+         (String.concat " ; " got))
+
+let in_sequence outcomes =
+  List.fold_left (fun acc o -> Result.bind acc (fun () -> o)) (Ok ()) outcomes
+
+(* RUNG 3, and it runs FIRST. [S] is total, so every read member of an instance
+   that never opened still answers something; a differential that compares
+   before it diagnoses would score a store that met a device failure as
+   agreement. *)
+let sound what t =
+  Option.fold ~none:(Ok ())
+    ~some:(fun (_ : Disk.fault) ->
+      Error
+        (Printf.sprintf "%s: the disk instance is dead: %s" what
+           (Disk_adapter.render_error t)))
+    (Disk_adapter.fault t)
+
+(* RUNG 2, the OS-T14 guard as a VALUE, so that the live rungs and its own
+   negative control call one definition. A differential whose observation never
+   moves is vacuously true, so agreement means nothing until the profile is
+   shown to tell the five prefixes apart. *)
+let all_distinct profiles =
+  Int.equal (List.length profiles)
+    (List.length (List.sort_uniq (List.compare String.compare) profiles))
+
+let disk_asks = List.map number_of [ 0; 1; 2; 3; 4; 5; 6 ]
+let disk_afters = None :: List.map Option.some [ sb1; sb2; sb3; sb4 ]
+let disk_records = [ r1; r2; r3; r4 ]
+let disk_prefixes = [ 0; 1; 2; 3; 4 ]
+
+let reference_at k =
+  Result.fold
+    ~ok:(fun s ->
+      Reference_profile.profile s ~asks:disk_asks ~afters:disk_afters)
+    ~error:(fun m -> Alcotest.failf "reference prefix %d: %s" k m)
+    (Reference_profile.prefix ~anchor:Cb.Number.genesis
+       ~parent:Cb.genesis_parent disk_records k)
+
+let assoc_at k =
+  Result.fold
+    ~ok:(fun s -> Assoc_profile.profile s ~asks:disk_asks ~afters:disk_afters)
+    ~error:(fun m -> Alcotest.failf "assoc prefix %d: %s" k m)
+    (Assoc_profile.prefix ~anchor:Cb.Number.genesis ~parent:Cb.genesis_parent
+       disk_records k)
+
+let disk_instance_at k =
+  Result.fold ~ok:Fun.id
+    ~error:(fun m -> Alcotest.failf "disk prefix %d: %s" k m)
+    (Disk_profile.prefix ~anchor:Cb.Number.genesis ~parent:Cb.genesis_parent
+       disk_records k)
+
+let disk_render t = Disk_profile.profile t ~asks:disk_asks ~afters:disk_afters
+
+(* [fsyncs] is a delta against a process-wide counter, so it is the handle's own
+   cost only when it is read with nothing else in between - which is why every
+   reading below is taken immediately after the step it measures. *)
+let flushes t = Result.fold ~ok:Disk.fsyncs ~error:(fun (_ : Disk.fault) -> -1) t
+
+(* Prefix indices and their instances are carried as ONE list of pairs rather
+   than two lists walked together: [List.map2] and [List.combine] raise on a
+   length mismatch, and a pairing carried in the type cannot mismatch. *)
+let disk_instances () =
+  List.map (fun k -> (k, disk_instance_at k)) disk_prefixes
+
+let handles pairs = List.map (fun (_, t) -> t) pairs
+
+(* RUNG 1: one profile, five prefixes, three implementations - one of which
+   answers from bytes it flushed to a filesystem. The fault check runs before a
+   single string is compared. *)
+let test_three_implementations_agree_at_every_prefix () =
+  let instances = disk_instances () in
+  let outcome =
+    in_sequence
+      (List.map
+         (fun (k, t) ->
+           Result.bind (sound (Printf.sprintf "prefix %d" k) t) (fun () ->
+               let disk = disk_render t in
+               Result.bind
+                 (strings_agree
+                    (Printf.sprintf "reference and disk at prefix %d" k)
+                    (reference_at k) disk)
+                 (fun () ->
+                   strings_agree
+                     (Printf.sprintf "assoc and disk at prefix %d" k)
+                     (assoc_at k) disk)))
+         instances)
+  in
+  let verdict = disk_lifecycle (handles instances) outcome in
+  Alcotest.(check int) "all five prefixes were built on a real root" 5
+    (List.length instances);
+  Alcotest.(check string)
+    "reference, assoc and disk answer identically at every prefix" "" verdict
+
+(* RUNG 2 on the live fixture. *)
+let test_the_three_instances_still_tell_the_prefixes_apart () =
+  let instances = disk_instances () in
+  let disks = List.map (fun (_, t) -> disk_render t) instances in
+  let outcome =
+    in_sequence
+      (List.map (fun (k, t) -> sound (Printf.sprintf "prefix %d" k) t) instances)
+  in
+  let verdict = disk_lifecycle (handles instances) outcome in
+  Alcotest.(check string) "every disk instance opened" "" verdict;
+  Alcotest.(check bool) "the reference tells the five prefixes apart" true
+    (all_distinct (List.map reference_at disk_prefixes));
+  Alcotest.(check bool) "so does the second in-memory implementation" true
+    (all_distinct (List.map assoc_at disk_prefixes));
+  Alcotest.(check bool)
+    "and so does the disk, so the agreement above is not vacuous" true
+    (all_distinct disks)
+
+(* The guard's own negative control, and the ONLY case that a deleted or
+   neutered [all_distinct] takes down. The fixture is degenerate on purpose: it
+   profiles five real stores through an observation that reports only the OPEN
+   EPOCH, which no prefix changes, so all five renderings are identical. *)
+let test_the_distinctness_guard_refuses_a_degenerate_fixture () =
+  let degenerate =
+    List.map
+      (fun k ->
+        Result.fold
+          ~ok:(fun s -> [ Units.Epoch.to_string (Store.epoch s) ])
+          ~error:(fun m -> Alcotest.failf "degenerate prefix %d: %s" k m)
+          (Reference_profile.prefix ~anchor:Cb.Number.genesis
+             ~parent:Cb.genesis_parent disk_records k))
+      disk_prefixes
+  in
+  Alcotest.(check int)
+    "the fixture really is degenerate - five prefixes, one rendering" 1
+    (List.length (List.sort_uniq (List.compare String.compare) degenerate));
+  Alcotest.(check bool) "and the guard the rungs above run refuses it" false
+    (all_distinct degenerate);
+  Alcotest.(check bool) "while it admits a profile that does move" true
+    (all_distinct (List.map reference_at disk_prefixes))
+
+(* RUNG 3 as a case rather than only as a precondition. *)
+let test_a_dead_disk_instance_cannot_pass_as_agreement () =
+  let dead =
+    Result.fold ~ok:Fun.id
+      ~error:(fun m -> Alcotest.failf "the poisoned prefix: %s" m)
+      (Dead_profile.prefix ~anchor:Cb.Number.genesis ~parent:Cb.genesis_parent
+         disk_records 4)
+  in
+  let dead_profile =
+    Dead_profile.profile dead ~asks:disk_asks ~afters:disk_afters
+  in
+  let live = disk_instance_at 2 in
+  let live_fault = Disk_adapter.fault live in
+  let live_render = Disk_adapter.render_error live in
+  let verdict = disk_lifecycle [ live ] (sound "the live control" live) in
+  Alcotest.(check string) "the live control opened" "" verdict;
+  Alcotest.(check bool) "an instance whose first flush failed reports a fault"
+    true
+    (Option.is_some (Dead_adapter.fault dead));
+  Alcotest.(check bool)
+    "and renders it, so a dead instance is never an empty disagreement" false
+    (String.equal "" (Dead_adapter.render_error dead));
+  Alcotest.(check bool) "the live control reports no fault" true
+    (Option.is_none live_fault);
+  Alcotest.(check string) "and renders the empty string" "" live_render;
+  Alcotest.(check bool)
+    "the dead instance's profile is not the reference's either" false
+    (List.equal String.equal (reference_at 4) dead_profile)
+
+(* RUNG 4: the rung no pure store can offer.
+
+   The equality on its own would be satisfied by a [reopen] that returned its
+   argument, so the case also pins that the handle really is a new one: a
+   freshly opened handle has flushed nothing, while the handle that wrote k
+   records has flushed exactly k times. *)
+let test_a_reopened_store_renders_what_it_wrote () =
+  let before =
+    List.map
+      (fun k ->
+        let t = disk_instance_at k in
+        (k, t, disk_render t, flushes t))
+      disk_prefixes
+  in
+  let after =
+    List.map
+      (fun (k, t, was, _) ->
+        let r = Disk_adapter.reopen t in
+        (k, r, was, disk_render r, flushes r))
+      before
+  in
+  let outcome =
+    in_sequence
+      (List.map
+         (fun (k, t, was, now, _) ->
+           Result.bind
+             (sound (Printf.sprintf "the reopened prefix %d" k) t)
+             (fun () ->
+               strings_agree
+                 (Printf.sprintf "prefix %d across a close and an open" k)
+                 was now))
+         after)
+  in
+  let verdict =
+    disk_lifecycle (List.map (fun (_, t, _, _, _) -> t) after) outcome
+  in
+  Alcotest.(check string)
+    "a reopened store renders exactly what it rendered before the close" ""
+    verdict;
+  Alcotest.(check (list int))
+    "the pre-close handles had flushed one frame per record" [ 0; 1; 2; 3; 4 ]
+    (List.map (fun (_, _, _, n) -> n) before);
+  Alcotest.(check (list int))
+    "and every reopened handle is a NEW one, which has flushed nothing"
+    [ 0; 0; 0; 0; 0 ]
+    (List.map (fun (_, _, _, _, n) -> n) after)
+
 let () =
   Alcotest.run "consensus_store"
     [
@@ -1120,5 +1455,21 @@ let () =
             test_seam_conformance_above_genesis;
           Alcotest.test_case "and identically across an epoch roll" `Quick
             test_seam_conformance_after_roll;
+        ] );
+      ( "the seam, on disk",
+        [
+          Alcotest.test_case
+            "reference, assoc and disk agree at all five prefixes" `Quick
+            test_three_implementations_agree_at_every_prefix;
+          Alcotest.test_case
+            "and the profile still tells those five prefixes apart" `Quick
+            test_the_three_instances_still_tell_the_prefixes_apart;
+          Alcotest.test_case
+            "the distinctness guard refuses a degenerate fixture" `Quick
+            test_the_distinctness_guard_refuses_a_degenerate_fixture;
+          Alcotest.test_case "a dead disk instance cannot pass as agreement"
+            `Quick test_a_dead_disk_instance_cannot_pass_as_agreement;
+          Alcotest.test_case "a reopened store renders what it wrote" `Quick
+            test_a_reopened_store_renders_what_it_wrote;
         ] );
     ]

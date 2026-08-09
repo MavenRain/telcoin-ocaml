@@ -11,7 +11,9 @@
    test_batch_validator test_payload_seam test_engine test_engine_epoch
    test_engine_txskip test_consensus_chain test_consensus_store test_driver_spec
    test_driver_subscriber test_driver test_driver_epoch test_driver_sim
-   test_driver_resume)
+   test_driver_resume test_durable_io test_durable_frame test_durable_log
+   test_durable_codec test_store_disk test_checkpoint_file)
  (libraries tn_std tn_codec tn_types tn_crypto tn_vertex tn_consensus tn_sim
    tn_execution tn_state tn_evm tn_keccak tn_rlp tn_trie tn_rand tn_batch
-   tn_engine tn_driver zarith alcotest qcheck))
+   tn_engine tn_driver tn_durable tn_durable_store tn_durable_checkpoint
+   durable_faults unix zarith alcotest qcheck))

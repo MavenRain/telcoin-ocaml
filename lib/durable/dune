@@ -1,0 +1,4 @@
+(library
+ (name tn_durable)
+ (public_name telcoin_ocaml.durable)
+ (libraries unix digestif))

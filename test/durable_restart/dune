@@ -1,0 +1,35 @@
+; test/durable_restart -- NEW.  A directory of its own, because the parent must
+; SPAWN the child, and a spawned child needs an executable stanza of its own.
+;
+; The ConsensusRegistry genesis account is COPIED rather than duplicated: the
+; epoch family closes a real epoch, the close makes two registry system calls
+; and a reverted call is fatal, so the fixture world has to hold the real
+; testnet runtime.  [copy_files] keeps exactly one copy of those bytes in the
+; tree, in test/registry_genesis.ml, where the driver suites already keep it.
+(copy_files
+ (files ../registry_genesis.ml))
+
+; The fixtures, once, in a library both stanzas name: the committee, the chain
+; specs, the hand-minted sub-DAGs and the renderings.  Two copies of these
+; would let a row go green for a reason that is not the row - a drifted
+; timestamp moves one side's epoch boundary, a drifted committee moves one
+; side's leader - which is the same argument test/driver_prelude.ml makes for
+; the driver suites.
+(library
+ (name restart_fixtures)
+ (modules restart_fixtures registry_genesis)
+ (libraries tn_std tn_types tn_crypto tn_vertex tn_consensus tn_execution
+   tn_state tn_evm tn_keccak tn_engine tn_driver unix))
+
+(test
+ (name test_durable_restart)
+ (modules test_durable_restart)
+ (deps restart_child.exe)
+ (libraries restart_fixtures tn_durable tn_durable_store tn_durable_checkpoint
+   tn_execution tn_driver tn_engine tn_types unix alcotest))
+
+(executable
+ (name restart_child)
+ (modules restart_child)
+ (libraries restart_fixtures durable_faults tn_durable tn_durable_store
+   tn_durable_checkpoint tn_execution tn_driver tn_engine tn_types unix))

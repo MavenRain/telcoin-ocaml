@@ -20,5 +20,14 @@ val to_bytes : t -> string
     highest-order byte, matching alloy's [self.0.(255 - bit/8)]). Always 256
     bytes, built by a pure gather (no in-place mutation). *)
 
+val of_bytes : string -> t option
+(** The inverse of {!to_bytes}: [Some] exactly for a 256-byte string, reading
+    each byte back into the bit indices {!to_bytes} gathered it from. RESERVED
+    for the storage chunk, the precedent [Tn_consensus.Dag.insert_recovered]
+    sets: a persisted header carries a bloom that no decoder could otherwise
+    rebuild, because {!accrue} takes a log's pre-image and a resumed node no
+    longer holds the logs. It adds no way to build a bloom that {!accrue} could
+    not have built, since every 2048-bit subset is reachable by accrual. *)
+
 val equal : t -> t -> bool
 (** Same set of bits. *)

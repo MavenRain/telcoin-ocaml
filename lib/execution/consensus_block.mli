@@ -34,6 +34,18 @@ module Number : sig
   val to_int : t -> int
   (** The height as a plain integer, for display and assertions. *)
 
+  val of_int : int -> t option
+  (** The inverse of {!to_int}: [None] below genesis, because a negative height
+      is not a count of ancestors. RESERVED for the storage chunk's decoder,
+      the precedent {!Tn_consensus.Dag.insert_recovered} sets. Without it a
+      decoder would have to fold {!succ} [n] times to reach height [n]. *)
+
+  val codec : t Tn_codec.Bcs.t
+  (** The persisted wire codec: an 8-byte little-endian height, the same field
+      {!to_int64} puts into the digest pre-image, refined through {!of_int} so
+      a below-genesis or unrepresentable wire value is refused rather than
+      wrapped. RESERVED for the storage chunk. *)
+
   val to_int64 : t -> int64
   (** The value as it enters the digest pre-image: an 8-byte little-endian
       field, matching Rust's [number.to_le_bytes()]. *)
@@ -91,6 +103,17 @@ val digest : t -> Digests.Output_digest.t
     the pre-image with no domain tag; the tag is prepended here for the same
     port-wide digest domain separation every other {!Tn_types.Digests} kind
     uses, and that tag (like the concrete hash) is byte-compatibility-deferred. *)
+
+val codec : t Tn_codec.Bcs.t
+(** The persisted wire codec. RESERVED for the storage chunk. The three fields
+    {!create} takes — the 32-byte {!parent_hash}, the {!sub_dag}, the
+    {!Number} — rebuilt through {!create}.
+
+    The cached {!digest} is {e not} on the wire; {!create} recomputes it, so a
+    decoded block's digest is always the hash of the bytes beside it and a
+    reader cannot be handed a block that claims a digest it does not have. The
+    zero-filled [extra] field of {!preimage} is likewise not stored: it is a
+    constant of the pre-image, not data. *)
 
 val equal : t -> t -> bool
 (** By digest. *)

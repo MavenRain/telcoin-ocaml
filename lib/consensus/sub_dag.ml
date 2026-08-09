@@ -72,10 +72,20 @@ let preimage t =
   preimage_bytes ~sequence:t.sequence ~scores:t.scores ~stored:t.stored
     ~randomness:t.randomness
 
+(* The only place the cached digest is computed, shared by [create] and by the
+   storage decoder so the two can never drift. *)
+let of_persisted ~headers ~scores ~stored ~randomness =
+  let pre = preimage_bytes ~sequence:headers ~scores ~stored ~randomness in
+  let digest =
+    Digests.Sub_dag_digest.of_digest
+      (Tn_crypto.Digest.hash (Digests.Sub_dag_digest.domain ^ pre))
+  in
+  { sequence = headers; scores; stored; randomness; digest }
+
 let create ~sequence ~scores ~previous =
   let leader_cert = Nonempty.last sequence in
   let leader_header = Certificate.header leader_cert in
-  let sequence = Nonempty.map Certificate.header sequence in
+  let headers = Nonempty.map Certificate.header sequence in
   let stored =
     Units.Timestamp.max
       (previous |> Option.fold ~none:Units.Timestamp.zero ~some:stored_timestamp)
@@ -92,12 +102,40 @@ let create ~sequence ~scores ~previous =
     |> Option.fold ~none:"" ~some:Tn_crypto.Aggregate.to_bytes
     |> Tn_crypto.Digest.hash
   in
-  let pre = preimage_bytes ~sequence ~scores ~stored ~randomness in
-  let digest =
-    Digests.Sub_dag_digest.of_digest
-      (Tn_crypto.Digest.hash (Digests.Sub_dag_digest.domain ^ pre))
-  in
-  { sequence; scores; stored; randomness; digest }
+  of_persisted ~headers ~scores ~stored ~randomness
+
+(* A whole-second timestamp beyond the representable range is refused, not
+   clamped: a clamped value would hash to a digest the writer never wrote. *)
+let timestamp_codec =
+  Bcs.refine
+    ~inject:(fun secs ->
+      Option.to_result ~none:"sub-DAG: stored timestamp out of range"
+        (Units.Timestamp.of_sec secs))
+    ~project:Units.Timestamp.to_sec Bcs.u64
+
+let randomness_codec =
+  Bcs.iso
+    ~inject:(fun raw ->
+      Option.value (Tn_crypto.Digest.of_bytes raw) ~default:Tn_crypto.Digest.zero)
+    ~project:Tn_crypto.Digest.to_bytes
+    (Bcs.fixed_bytes Tn_crypto.Digest.length)
+
+(* Non-emptiness survives the wire as a refusal, never as a repaired value. *)
+let sequence_codec =
+  Bcs.refine
+    ~inject:(fun headers ->
+      Option.to_result ~none:"sub-DAG: the committed sequence is never empty"
+        (Nonempty.of_list headers))
+    ~project:Nonempty.to_list (Bcs.list Header.codec)
+
+let codec : t Bcs.t =
+  Bcs.iso
+    ~inject:(fun ((headers, scores, stored), randomness) ->
+      of_persisted ~headers ~scores ~stored ~randomness)
+    ~project:(fun t -> ((t.sequence, t.scores, t.stored), t.randomness))
+    (Bcs.pair
+       (Bcs.triple sequence_codec Reputation_scores.codec timestamp_codec)
+       randomness_codec)
 
 let equal a b = Digests.Sub_dag_digest.equal a.digest b.digest
 let compare a b = Digests.Sub_dag_digest.compare a.digest b.digest

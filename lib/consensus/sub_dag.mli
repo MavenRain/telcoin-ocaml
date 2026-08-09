@@ -42,6 +42,23 @@ val create :
     which cannot lead) hashes fixed empty bytes, the analogue of Rust's
     default-signature fallback. *)
 
+val of_persisted :
+  headers:Header.t Nonempty.t ->
+  scores:Reputation_scores.t ->
+  stored:Units.Timestamp.t ->
+  randomness:Tn_crypto.Digest.t ->
+  t
+(** Rebuild a sub-DAG field-wise from its persisted representation, recomputing
+    the cached digest from the same {!preimage} {!create} hashes. RESERVED for
+    the storage chunk's decoder, the precedent {!Dag.insert_recovered} sets.
+
+    It cannot be replaced by {!create}: [create] takes certificates and a
+    [previous] sub-DAG, and neither survives into the value. Stripping
+    certificates to headers is not invertible, and re-running the monotone
+    timestamp clamp against a [previous] a resumed reader does not have would
+    move the digest. So the stored fields are handed over as they were stored,
+    and only the digest — never a stored field — is re-derived. *)
+
 val leader : t -> Header.t
 (** Total: the last header of the sequence. *)
 
@@ -101,6 +118,20 @@ val digest : t -> Digests.Sub_dag_digest.t
 (** Domain-tagged protocol hash of {!preimage}. The sequence number is
     deliberately absent, matching Rust: two sub-DAGs differing only in index are
     identical. *)
+
+val codec : t Tn_codec.Bcs.t
+(** The persisted wire codec. RESERVED for the storage chunk. The four stored
+    fields in {!preimage} order — the header sequence, the
+    {!Reputation_scores}, the 8-byte stored timestamp, the raw randomness —
+    rebuilt through {!of_persisted}.
+
+    The cached {!digest} is {e not} on the wire: it is recomputed from the
+    decoded fields on every read, so no byte a reader is handed can install a
+    digest that disagrees with the fields beside it, and tampering with a
+    digest that is not there is inert. This mirrors Rust's own [Header]
+    deserialize, which recomputes and discards whatever the wire carried. An
+    empty sequence and an out-of-range timestamp are refused rather than
+    repaired. *)
 
 val equal : t -> t -> bool
 (** By digest. *)

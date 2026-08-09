@@ -133,6 +133,41 @@ let assemble ~context ~finished =
       requests_hash = empty_requests_hash;
     }
 
+(* The storage producer. Field for field, with nothing derived and nothing
+   checked: [assemble] earns its fields from an execution, this one copies them
+   out of an artefact, and the .mli states which guarantee that costs. The
+   record is listed in declaration order so a missing or transposed field is a
+   type error rather than a silently wrong header. *)
+let of_persisted ~parent_hash ~ommers_hash ~beneficiary ~state_root
+    ~transactions_root ~receipts_root ~logs_bloom ~position ~number ~gas_limit
+    ~gas_used ~timestamp ~extra_data ~mix_hash ~nonce ~base_fee_per_gas
+    ~withdrawals ~withdrawals_root ~parent_beacon_block_root ~blob_gas_used
+    ~excess_blob_gas ~requests_hash =
+  {
+    parent_hash;
+    ommers_hash;
+    beneficiary;
+    state_root;
+    transactions_root;
+    receipts_root;
+    logs_bloom;
+    position;
+    number;
+    gas_limit;
+    gas_used;
+    timestamp;
+    extra_data;
+    mix_hash;
+    nonce;
+    base_fee_per_gas;
+    withdrawals;
+    withdrawals_root;
+    parent_beacon_block_root;
+    blob_gas_used;
+    excess_blob_gas;
+    requests_hash;
+  }
+
 let parent_hash t = t.parent_hash
 let ommers_hash t = t.ommers_hash
 let beneficiary t = t.beneficiary

@@ -32,6 +32,16 @@ val bump : t -> Authority_id.t -> t
 val with_final : bool -> t -> t
 (** The schedule-cadence flag, recomputed by the commit rule on every sub-DAG. *)
 
+val of_persisted : bindings:(Authority_id.t * int) list -> final:bool -> t
+(** Rebuild a scores value field-wise from a decoded binding set. RESERVED for
+    the storage chunk's decoder, the precedent {!Dag.insert_recovered} sets: no
+    live consensus path may call it, because {!fresh} and {!bump} are what tie
+    the key set to a committee. A decoder has no committee, and rebuilding a
+    score of [k] by [k] {!bump} calls is O(total score), so a total field-wise
+    producer is both cheaper and honest. The last binding for a repeated id
+    wins; {!codec} never feeds it one, since its map section rejects a
+    non-ascending key. *)
+
 val is_final : t -> bool
 
 val get : t -> Authority_id.t -> int
@@ -46,5 +56,19 @@ val by_score_desc : t -> (Authority_id.t * int) list
 
 val total_authorities : t -> int
 val all_zero : t -> bool
+
+val codec : t Tn_codec.Bcs.t
+(** The persisted wire codec. RESERVED for the storage chunk. Three sections:
+    the ULEB128-counted map of 32-byte authority ids to u64 scores in ascending
+    id order — byte-identical to the section {!Sub_dag.preimage} already
+    freezes — then the {!is_final} flag, then the declared
+    {!total_authorities}.
+
+    The count is a CROSS-CHECK, never a source of truth: the value's own
+    authority count is the cardinality of its binding set, so a wire whose
+    count disagrees with the number of bindings it carries is refused rather
+    than reconciled. Sorting by id means two equal score sets cannot produce
+    two byte strings, so a byte-level differential over this codec stays
+    meaningful. *)
 
 val equal : t -> t -> bool

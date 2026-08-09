@@ -38,6 +38,25 @@ module Record = struct
   let parent_hash t = Consensus_block.parent_hash t.consensus
   let epoch t = Sub_dag.leader_epoch (Consensus_block.sub_dag t.consensus)
   let bodies t = t.bodies
+
+  (* The bodies indexed by their own digest, which is what makes [of_wire] a
+     re-derivation rather than a transcription. *)
+  module By_digest = Map.Make (Digests.Batch_digest)
+
+  let to_wire t = (t.consensus, t.bodies)
+
+  let of_wire (consensus, bodies) =
+    let index =
+      List.fold_left
+        (fun m body ->
+          (* First occurrence wins, so the index does not depend on how the
+             wire happened to order a digest it repeats. *)
+          By_digest.update (Batch.digest body)
+            (fun kept -> Option.fold ~none:(Some body) ~some:Option.some kept)
+            m)
+        By_digest.empty bodies
+    in
+    create ~consensus ~lookup:(fun digest -> By_digest.find_opt digest index)
 end
 
 type miss =

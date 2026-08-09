@@ -1,0 +1,4 @@
+(library
+ (name tn_durable_store)
+ (public_name telcoin_ocaml.durable_store)
+ (libraries tn_durable tn_codec tn_crypto tn_types tn_consensus tn_execution))

@@ -25,13 +25,16 @@
 type t
 (** A Keccak-256 digest: exactly {!length} bytes.
 
-    Abstract, and {!digest} is its {e only} producer. There is deliberately no
-    [of_bytes], no [of_word] and no [zero], so a value of this type is always
-    the hash of a byte string that really was hashed. That is what will let the
-    next chunk express "the code hash of an account that does not exist" as a
-    constructor which provably is not a digest, rather than as a [None] whose
-    default someone later simplifies to {!empty}. Adding a second producer here
-    would remove that theorem before it is used. *)
+    Abstract, and {!digest} is its {e only} FRESH producer. There is
+    deliberately no [of_bytes], no [of_word] and no [zero], so a value of this
+    type is always the hash of a byte string that really was hashed, or
+    ({!of_stored_bytes}, and only that) a copy of such a value read back out of
+    bytes this port itself persisted. That is what lets the code-hash reader
+    express "the code hash of an account that does not exist" as a constructor
+    which provably is not a digest, rather than as a [None] whose default
+    someone later simplifies to {!empty}. A general second producer would remove
+    that theorem before it is used, which is why the storage door below is
+    narrow and named rather than a plain [of_bytes]. *)
 
 val length : int
 (** [32]. Read from [Digestif.KECCAK_256.digest_size] rather than written, so
@@ -50,6 +53,26 @@ val empty : t
     It is a named constant rather than a call to {!digest} at the use site
     because the zero-length path deliberately never reads memory, so it must
     never reach a hash of a byte string it did not read. *)
+
+val of_stored_bytes : string -> t option
+(** [Some] exactly when the string is {!length} bytes. RESERVED for the storage
+    chunk, the precedent [Tn_consensus.Dag.insert_recovered] sets, and named for
+    what it does: it restores a digest this port already computed and wrote
+    down, it does not claim a pre-image.
+
+    Why it cannot be avoided. A durable checkpoint carries the [BLOCKHASH]
+    window and the anchor's parent hash, both of which are {!t}, and Keccak is
+    pre-image resistant, so a decoder has no way to re-derive them from anything
+    smaller than the blocks that produced them — which a resumed node no longer
+    holds. Persisting the pre-images instead is not an option either: the window
+    reaches back further than the headers a checkpoint carries.
+
+    What the one-producer rule was FOR is untouched. [EXTCODEHASH]'s zero for an
+    account that does not exist is still produced by the interpreter as a bare
+    word and never as a {!t}, and {!Tn_evm.Hash32} remains the 32-byte gate for
+    every header field that is not a digest at all, so nothing that used to be
+    inexpressible becomes expressible by accident: reaching this function means
+    naming it. *)
 
 val to_bytes : t -> string
 (** The {!length} bytes, most significant first: exactly the width

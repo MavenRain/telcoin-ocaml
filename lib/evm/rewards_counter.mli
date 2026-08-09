@@ -38,6 +38,27 @@ val clear : t -> t
     [leader_counts] lock ([gas_accumulator.rs:109-113]). Called at epoch
     boundaries. *)
 
+val leader_counts : t -> (Tn_types.Authority_id.t * int) list
+(** The raw per-authority counts, in ascending {!Tn_types.Authority_id} order,
+    with an authority that has led nothing simply absent (a stored count is
+    never zero: {!inc_leader_count} is the only writer and it inserts one).
+    RESERVED for the storage chunk, the precedent
+    [Tn_consensus.Dag.insert_recovered] sets.
+
+    A READER, not a producer: a decoder rebuilds the value by folding
+    {!inc_leader_count} over these bindings after {!set_committee}, so
+    [lib/engine/engine.mli]'s standing claim that the counter is reachable only
+    through [empty]/[clear]/[set_committee]/[inc_leader_count] is unchanged.
+    {!address_counts} cannot serve instead: it merges two authorities sharing an
+    execution address into one summed entry, so it is lossy in exactly the
+    direction a round trip would have to invert. *)
+
+val committee : t -> Tn_types.Committee.t option
+(** The committee {!set_committee} installed, or [None] before any was. The
+    other half of what a decoder must restore, for {!leader_counts}'s reason:
+    without it {!address_counts} silently answers the empty list and a
+    round-tripped counter would resolve no addresses at all. *)
+
 val address_counts : t -> (Tn_types.Units.Address.t * int) list
 (** The [BTreeMap<Address, u32>] of [get_address_counts]
     ([gas_accumulator.rs:122-142]): ascending execution-address (byte) order,

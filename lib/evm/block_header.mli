@@ -130,6 +130,64 @@ val assemble :
     [batch-validator/src/validator.rs:198-206]). [requests_hash] is
     {!empty_requests_hash}, unconditionally. *)
 
+val of_persisted :
+  parent_hash:Tn_keccak.t ->
+  ommers_hash:Tn_types.Digests.Batch_digest.t ->
+  beneficiary:Tn_types.Units.Address.t ->
+  state_root:Hash32.t ->
+  transactions_root:Hash32.t ->
+  receipts_root:Hash32.t ->
+  logs_bloom:Bloom.t ->
+  position:Batch_position.t ->
+  number:int ->
+  gas_limit:int ->
+  gas_used:int ->
+  timestamp:int ->
+  extra_data:string ->
+  mix_hash:Tn_state.U256.t ->
+  nonce:Tn_types.Units.Sequence_number.t ->
+  base_fee_per_gas:Tn_state.U256.t ->
+  withdrawals:Withdrawal.t list ->
+  withdrawals_root:Hash32.t ->
+  parent_beacon_block_root:Tn_types.Digests.Output_digest.t ->
+  blob_gas_used:int ->
+  excess_blob_gas:int ->
+  requests_hash:Hash32.t ->
+  t
+(** Rebuild a header from the fields a durable artefact stored. RESERVED for the
+    storage chunk, the precedent [Tn_consensus.Dag.insert_recovered] sets.
+
+    {2 Why it cannot be avoided}
+
+    {!assemble} is the only other producer and it needs a
+    {!Block_execution.Finished.t} — a whole executed block — so no decoder can
+    rebuild a header from bytes without it. Storing only
+    [(hash, number, base_fee, gas_limit)] instead was considered and refused:
+    [Tn_engine.Anchor.header] would come back [None], which
+    [lib/engine/anchor.mli] says "would tell the engine its parent has no header
+    when it has one". [encode_rlp] exists, but there is no RLP decoder and the
+    RLP deliberately omits {!withdrawals}, so it is not a round trip either.
+
+    {2 What is and is not restated}
+
+    One labelled argument per STORED field, twenty-two of them, in the record's
+    own declaration order. {!difficulty} is deliberately not among them: it is
+    [Batch_position.word] of {!position} and taking it as a twenty-third
+    argument would be a second door to one value, which is the drift this
+    module removed when it stopped storing it.
+
+    {2 The obligation it moves rather than discharges}
+
+    {!assemble} guarantees that the four roots are the roots of the block this
+    header commits to, and this function guarantees nothing of the kind: it
+    trusts its arguments exactly as far as the artefact they were read from is
+    trusted. That is the same trade [Tn_engine.Engine.persisted] documents for
+    its world — "the world is carried, not proven" — and it is stated here so
+    the weaker guarantee travels with the entry point rather than with the
+    caller. Nothing is recomputed, so {!hash} of a restored header equals
+    {!hash} of the header that was stored, which is the property a resumed
+    chain needs. *)
+
 val parent_hash : t -> Tn_keccak.t
 (** The previous execution block's hash, as a real digest rather than as bytes.
     *)

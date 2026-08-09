@@ -21,6 +21,7 @@
   (dune
    (>= 3.24))
   zarith
+  base-unix
   (digestif
    (>= 1.1.0))
   eio

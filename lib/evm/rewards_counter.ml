@@ -29,6 +29,12 @@ let set_committee t committee = { t with committee = Some committee }
    committee survives the epoch-boundary reset. *)
 let clear t = { t with counts = Tn_types.Authority_id.Map.empty }
 
+(* The two storage readers. Neither adds a producer: a decoder folds
+   [inc_leader_count] over these bindings on top of [set_committee], so the
+   value it rebuilds is one this module's own operations could have reached. *)
+let leader_counts t = Tn_types.Authority_id.Map.bindings t.counts
+let committee t = t.committee
+
 (* get_address_counts (gas_accumulator.rs:122-142). The source HashMap's
    iteration order is arbitrary in Rust and ascending-id here; neither can be
    observed, because a shared-address collision merges by SUM (order-blind)
