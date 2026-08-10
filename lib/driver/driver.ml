@@ -278,6 +278,7 @@ let resume spec ~committee ~checkpoint ~store ~address_of =
                 Subscriber.create (Checkpoint.accumulator checkpoint);
               engine =
                 Engine.resume
+                  ~fork_schedule:(Chain_spec.fork_schedule spec)
                   ~chain_id:(Chain_spec.chain_id spec)
                   ~basefee_address:(Chain_spec.basefee_address spec)
                   (Checkpoint.engine checkpoint);

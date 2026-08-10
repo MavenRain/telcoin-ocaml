@@ -19,38 +19,49 @@
     one-field third record would enforce nothing.
 
     [PREVRANDAO] and [DIFFICULTY] are the same code byte [0x44]. revm chooses
-    between them by fork; this port targets Prague, where the beacon-randomness
-    reading always applies, so the field is named for the reading that holds and
-    the pre-merge one is not representable.
+    between them by fork, and every level of {!Spec.t} is post-Merge, so the
+    beacon-randomness reading holds at all of them: the field is named for the
+    reading that holds and the pre-merge one is not representable.
 
-    {2 The fork level, stated once}
+    {2 The fork schedule, stated once}
 
     This is the port's SINGLE statement of its fork scope; every other module
-    that needs the claim cites this paragraph rather than restating it. Prague
-    is the level of TN {e testnet} (chain 2017) and of the TN test suite:
-    [chain-configs/testnet/genesis.yaml:15-17] sets [shanghaiTime],
-    [cancunTime] and [pragueTime] all to [0], and every test genesis routes
-    through [set_genesis_defaults], which backfills [prague_time]
-    ([crates/types/src/genesis.rs:24, 71-74]). TN {e mainnet} (chain 487) runs
-    at [SpecId::SHANGHAI]: its committed genesis declares [shanghaiTime] as
-    its only timestamp fork ([chain-configs/mainnet/genesis.yaml:15]),
-    [Config::load_mainnet] deserialises it directly, never calling
-    [set_genesis_defaults] ([crates/config/src/node.rs:155-156]), and reth
-    filter-maps an absent fork time to [ForkCondition::Never]
-    ([reth] [chainspec/src/spec.rs:896-901]), which is never active. On that
-    chain a type-[0x04] transaction is rejected with [Eip7702NotSupported]
-    before pre-execution ([revm-handler] [validation.rs:191-195]),
-    [TLOAD]/[TSTORE]/[MCOPY] halt [NotActivated], and neither BEACON_ROOTS
-    nor HISTORY_STORAGE is ever written, because telcoin's own gates are
-    timestamp-driven ([tn-reth/src/evm/block.rs:643-645, 698-700]). This port
-    models the TESTNET configuration, unconditionally; the enumerated
-    inventory of what a mainnet-faithful fork schedule would have to gate
-    lives in [block_execution.mli].
+    cites this paragraph rather than restating it. The port carries a
+    {!Fork_schedule.t} per chain and resolves each block's {!Spec.t} from it by
+    that block's own timestamp, so the scope is a RANGE of levels and no longer
+    one level.
+
+    TN {e testnet} (chain 2017) activates Shanghai, Cancun and Prague all at
+    [0] ([chain-configs/testnet/genesis.yaml:15-17]), and every test genesis
+    routes through [set_genesis_defaults], which backfills [prague_time]
+    ([crates/types/src/genesis.rs:24, 71-74]). That all-at-zero schedule is
+    {!Fork_schedule.testnet}, and it is the DEFAULT wherever a schedule is
+    optional ({!Block.make}, [Config.create], [Chain_spec.create]), so every
+    construction site that names no fork describes exactly the chain it
+    described before chunk 42, byte for byte.
+
+    TN {e mainnet} (chain 487) runs at [SpecId::SHANGHAI]: its committed
+    genesis declares [shanghaiTime] as its only timestamp fork
+    ([chain-configs/mainnet/genesis.yaml:15]), [Config::load_mainnet]
+    deserialises it directly, never calling [set_genesis_defaults]
+    ([crates/config/src/node.rs:155-156]), and reth filter-maps an absent fork
+    time to [ForkCondition::Never] ([reth] [chainspec/src/spec.rs:896-901]),
+    which is never active. That chain is {!Fork_schedule.mainnet} and, as of
+    chunk 42, it is expressible rather than only described: on it a type-[0x04]
+    transaction is rejected with [Eip7702NotSupported] before pre-execution
+    ([revm-handler] [validation.rs:191-195]), [TLOAD]/[TSTORE]/[MCOPY] halt
+    [NotActivated], and neither BEACON_ROOTS nor HISTORY_STORAGE is ever
+    written, because telcoin's own gates are timestamp-driven
+    ([tn-reth/src/evm/block.rs:610-612, 665-667]). Which of those this port
+    gates as of chunk 42, and what is still deferred, is inventoried in
+    [block_execution.mli].
 
     Before chunk 33 the port rejected a type-4 transaction as
     [Unknown_type_byte 4], which agreed with TN mainnet for the wrong reason.
-    It now executes one. That accidental agreement is deliberately given up in
-    exchange for modelling the chain the port actually targets.
+    Chunk 33 made it execute one, giving that agreement up. Chunk 42 buys it
+    back for the right reason: a type-4 transaction executes at Prague and is
+    refused below Prague ([Executor.Eip7702_not_activated]), so the two chains
+    now agree and disagree exactly where their schedules do.
 
     Two fields the real machine has are absent, and their absence is the point.
     There is no static-call flag, so [SSTORE]'s [require_non_staticcall] guard
@@ -68,6 +79,27 @@ module Block : sig
   type t
   (** What every frame of every transaction in one block reads. *)
 
+  val make_at_spec :
+    spec:Spec.t ->
+    coinbase:Units.Address.t ->
+    timestamp:word ->
+    number:word ->
+    prevrandao:word ->
+    gas_limit:word ->
+    basefee:word ->
+    basefee_address:Units.Address.t ->
+    chain_id:word ->
+    blob_gasprice:word ->
+    hashes:Block_hashes.t ->
+    t
+  (** One block's environment at a stated fork level. This is the constructor
+      the two production sites use: the engine passes the level its chain's
+      {!Fork_schedule.t} gives this block's timestamp, and {!System_call}
+      passes the level of the block it rebuilds.
+
+      The fork level is a required argument here and defaulted only by {!make},
+      so a caller that knows which chain it is on cannot forget to say. *)
+
   val make :
     coinbase:Units.Address.t ->
     timestamp:word ->
@@ -80,6 +112,26 @@ module Block : sig
     blob_gasprice:word ->
     hashes:Block_hashes.t ->
     t
+  (** {!make_at_spec} at {!Spec.Prague}: the level TN testnet activates at
+      genesis, and the level this port ran at before a fork schedule existed,
+      so a caller that says nothing about forks keeps exactly the behaviour it
+      had.
+
+      It is a separate constructor rather than an optional argument on
+      {!make_at_spec} because OCaml erases an optional argument only when a
+      positional argument follows it, and this constructor has none: an
+      [?spec] here would change the type of every existing call site rather
+      than defaulting quietly. *)
+
+  val spec : t -> Spec.t
+  (** The EVM fork level every frame of this block executes at.
+
+      It rides on the block for the same reason the chain id does: it is one
+      fact for the whole block, so no two frames of it can disagree, and it is
+      the port's analog of the [SpecId] upstream folds into the per-block
+      configuration environment before handing it to the EVM. Every fork gate
+      in this library reads it from here and phrases itself as
+      {!Spec.is_enabled}. *)
 
   val coinbase : t -> Units.Address.t
   (** [COINBASE]: the block's beneficiary. EIP-3651 pre-warms it, which is

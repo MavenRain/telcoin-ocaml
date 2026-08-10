@@ -246,6 +246,16 @@ let plan_destruction t ~address ~beneficiary =
      apart — {!commit_store} accepts only an [Sstore_state.t load]. *)
   { value = plan; warmth = touched; effects = { t with access }; commit = Fun.id }
 
+(* Does this destruction really destroy? EIP-6780 arrived at Cancun and is what
+   narrowed [SELFDESTRUCT] to "created in this transaction"; below Cancun the
+   rule is not a check that is skipped but a restriction that does not exist
+   yet, so EVERY planned destruction removes its account. Written as a
+   disjunction rather than as a branch over the three outcomes because that is
+   all the fork changes: the balance still moves the same way, and the three
+   outcomes below stay three. *)
+let destruction_deletes plan ~spec =
+  Destruction.deletes plan || not (Spec.is_enabled spec ~from:Spec.Cancun)
+
 (* Apply a planned destruction, EIP-6780 as revm branches it
    ([revm-context] [journal/inner.rs:507-549]). Three outcomes, not two:
 
@@ -262,19 +272,25 @@ let plan_destruction t ~address ~beneficiary =
 
    The removal is recorded rather than performed: the account is still callable,
    readable and destroyable for the rest of the transaction, and only the
-   transaction layer takes it out. *)
-let commit_destruction l (_permit : Mutability.permit) =
+   transaction layer takes it out.
+
+   Below Cancun {!destruction_deletes} answers [true] for every plan, which
+   collapses the second and third outcomes into the first: the pre-6780 rule
+   that [SELFDESTRUCT] destroys whatever it names, with a self-named
+   beneficiary burning the balance. *)
+let commit_destruction l (_permit : Mutability.permit) ~spec =
   let plan = l.value in
   let address = Destruction.address plan in
   let beneficiary = Destruction.beneficiary plan in
   let effects = l.effects in
+  let deletes = destruction_deletes plan ~spec in
   let recorded =
-    if Destruction.deletes plan then
+    if deletes then
       { effects with lifecycle = Lifecycle.record_destruction effects.lifecycle address }
     else effects
   in
   if Tn_types.Units.Address.equal address beneficiary then
-    if Destruction.deletes plan then
+    if deletes then
       (* Burned: debiting the whole balance always succeeds, so this is total. *)
       Option.map
         (fun emptied ->

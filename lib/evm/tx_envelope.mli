@@ -86,6 +86,14 @@
     which is a real transaction on a Prague chain. That is this port's standing
     deferral of the blob transaction type, stated in {!Transaction} and in the
     README, surfacing at the decoder; it closes only when that chunk lands.
+    Below Cancun the same refusal is not a deferral at all but the correct
+    answer, since revm itself rejects a type-[0x03] transaction before
+    execution with [Eip4844NotSupported] whenever Cancun is not enabled
+    ([revm-handler] [validation.rs:177-180]); so on a Shanghai-only chain such
+    as {!Fork_schedule.mainnet} this decoder is already faithful, and the gap is
+    exactly the Cancun-and-later acceptance. That is why the deferral is not
+    gated on {!Spec.t} here: a gate would only turn one refusal into a
+    differently-named refusal until the blob structure exists to accept.
     (EIP-7702 was such a deferral until chunk 33 narrowed the gap by exactly one
     type byte.) A wide scalar is {e not} such a case: a [chain_id],
     [nonce] or [gas_limit] above [2^64] is refused here as {!Scalar_too_wide}

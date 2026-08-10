@@ -5,6 +5,7 @@ type word = U256.t
 
 module Block = struct
   type t = {
+    spec : Spec.t;
     coinbase : Units.Address.t;
     timestamp : word;
     number : word;
@@ -17,9 +18,10 @@ module Block = struct
     hashes : Block_hashes.t;
   }
 
-  let make ~coinbase ~timestamp ~number ~prevrandao ~gas_limit ~basefee
-      ~basefee_address ~chain_id ~blob_gasprice ~hashes =
+  let make_at_spec ~spec ~coinbase ~timestamp ~number ~prevrandao ~gas_limit
+      ~basefee ~basefee_address ~chain_id ~blob_gasprice ~hashes =
     {
+      spec;
       coinbase;
       timestamp;
       number;
@@ -32,6 +34,22 @@ module Block = struct
       hashes;
     }
 
+  (* [make] is [make_at_spec] at [Spec.Prague], and this line is the ONLY
+     statement of that default. Prague is the level TN testnet activates at
+     genesis and the level this port ran at before a fork schedule existed, so
+     a construction site that says nothing about forks keeps exactly the
+     behaviour it had. It is a second constructor rather than an optional
+     argument on this one because OCaml never erases an optional argument that
+     no positional argument follows, so [?spec] here would change the type of
+     every existing call site. The two production sites call [make_at_spec]:
+     the engine with the level its chain's schedule gives this block's
+     timestamp, and [System_call] with the level of the block it rebuilds. *)
+  let make ~coinbase ~timestamp ~number ~prevrandao ~gas_limit ~basefee
+      ~basefee_address ~chain_id ~blob_gasprice ~hashes =
+    make_at_spec ~spec:Spec.Prague ~coinbase ~timestamp ~number ~prevrandao
+      ~gas_limit ~basefee ~basefee_address ~chain_id ~blob_gasprice ~hashes
+
+  let spec t = t.spec
   let coinbase t = t.coinbase
   let timestamp t = t.timestamp
   let number t = t.number
@@ -49,8 +67,11 @@ module Block = struct
      [U256.of_int]; [U256.sub] is wrapping and exact here since [2^128 >= 1]. *)
   let consensus_blob_gasprice = U256.sub (U256.two_pow 128) U256.one
 
+  (* The fork level is compared through [Spec.compare], which is the sum's only
+     ordering surface; there is no [Spec.equal] to drift from it. *)
   let equal a b =
-    Units.Address.equal a.coinbase b.coinbase
+    Int.equal (Spec.compare a.spec b.spec) 0
+    && Units.Address.equal a.coinbase b.coinbase
     && U256.equal a.timestamp b.timestamp
     && U256.equal a.number b.number
     && U256.equal a.prevrandao b.prevrandao

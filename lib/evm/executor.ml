@@ -11,6 +11,7 @@ type error =
   | Missing_chain_id
   | Gas_price_below_base_fee
   | Priority_fee_above_max_fee
+  | Eip7702_not_activated
   | Empty_authorization_list
   | Gas_limit_above_block
   | Init_code_size_limit
@@ -26,6 +27,7 @@ let error_to_string = function
   | Missing_chain_id -> "missing chain id"
   | Gas_price_below_base_fee -> "gas price below base fee"
   | Priority_fee_above_max_fee -> "priority fee above max fee"
+  | Eip7702_not_activated -> "set-code transaction before Prague (EIP-7702)"
   | Empty_authorization_list -> "empty authorization list (EIP-7702)"
   | Gas_limit_above_block -> "gas limit above block gas limit"
   | Init_code_size_limit -> "init code size limit (EIP-3860)"
@@ -89,17 +91,30 @@ let declared_warm access_list =
   in
   (addresses, slots)
 
-(* The precompile addresses warmed before the first frame: 0x01..0x0a. This
-   approximates the Prague warm set, which additionally warms the EIP-2537 BLS
-   addresses 0x0b..0x11; those are unimplemented in this port's {!Precompile} and
-   are not warmed, an approximation that is unobservable unless executed code
-   touches one of them. *)
-let precompile_addresses =
+(* The precompile addresses warmed before the first frame, which is the one
+   EIP-2929 set that varies with the fork level. Cancun's KZG point-evaluation
+   precompile 0x0a joins the Berlin set 0x01..0x09 at Cancun and not before, so
+   a Shanghai block warms nine addresses and a Cancun or Prague block warms ten
+   (revm reaches the same two sets by mapping SHANGHAI back onto BERLIN's
+   precompile table and installing 0x0a at CANCUN).
+
+   Prague additionally warms the EIP-2537 BLS addresses 0x0b..0x11; those are
+   unimplemented in this port's {!Precompile} and are not warmed, an
+   approximation that is unobservable unless executed code touches one of them,
+   and deliberately left in place by the fork-schedule chunk. The two lists are
+   written out rather than derived from a bound so that moving one address
+   between forks is a visible edit. *)
+let precompile_addresses spec =
+  let warmed =
+    if Spec.is_enabled spec ~from:Spec.Cancun then
+      [ 1; 2; 3; 4; 5; 6; 7; 8; 9; 10 ]
+    else [ 1; 2; 3; 4; 5; 6; 7; 8; 9 ]
+  in
   List.filter_map
     (fun n ->
       Units.Address.of_bytes
         (String.make (Units.Address.length - 1) '\000' ^ String.make 1 (Char.chr n)))
-    [ 1; 2; 3; 4; 5; 6; 7; 8; 9; 10 ]
+    warmed
 
 (* Post-execution: EIP-3529 refund cap, then the EIP-7623 floor, then telcoin's
    settlement. The order is load-bearing ([handler.rs:227-234]): the cap divides
@@ -209,6 +224,7 @@ let execute world ~block tx =
   let gas_limit = Transaction.gas_limit tx in
   let gl_word = word_of_int gas_limit in
   let coinbase = Env.Block.coinbase block in
+  let spec = Env.Block.spec block in
   let intrinsic_kind =
     match Transaction.kind tx with
     | Transaction.Call _ -> Intrinsic.Call
@@ -227,7 +243,19 @@ let execute world ~block tx =
       ~access_list:effective_access_list
       ~authorizations:(Transaction.authorizations tx)
   in
-  let floor_gas = Intrinsic.floor_gas ~data:(Transaction.data tx) in
+  (* EIP-7623's calldata floor is installed at PRAGUE and at no earlier fork:
+     below it the floor is not a rule that is skipped but a table entry that is
+     zero. Answering zero here rather than branching at the two sites that read
+     it is what makes that literal — [floor_gas = 0] turns the validation below
+     into [0 > gas_limit], false for every allowance, and turns {!finalize}'s
+     floor branch into [spent - refund < 0], false because the EIP-3529 cap
+     never lets a refund pass a fifth of the spend. Both sites stay arithmetic
+     no-ops rather than gaining a fork test each. *)
+  let floor_gas =
+    if Spec.is_enabled spec ~from:Spec.Prague then
+      Intrinsic.floor_gas ~data:(Transaction.data tx)
+    else 0
+  in
   (* VALIDATE: environment, then initial-gas, then against-state. *)
   let* () =
     match Transaction.chain_id tx with
@@ -265,6 +293,19 @@ let execute world ~block tx =
        every other defect is a per-entry skip inside the application loop. *)
     | Transaction.Set_code { max_fee = mf; max_priority; target = _; authorizations }
       ->
+        (* The activation test is the HEAD of the arm, before both fee checks and
+           before the empty-list guard, exactly where revm puts it
+           ([validation.rs:191-195] opening [validation.rs:191-204]). The order
+           is observable in the same way the fee checks are: below Prague a
+           set-code transaction with a bad priority fee, or with an empty list,
+           reports this and never the other two. It gates the TYPE and not the
+           list, because the type is what revm's arm selects on: an empty-list
+           type-4 transaction is still a type-4 transaction, and Shanghai has no
+           EIP-7702 rule under which its list could be wrong. *)
+        let* () =
+          if Spec.is_enabled spec ~from:Spec.Prague then Ok ()
+          else Error Eip7702_not_activated
+        in
         let* () =
           if U256.compare max_priority mf > 0 then Error Priority_fee_above_max_fee
           else Ok ()
@@ -365,7 +406,9 @@ let execute world ~block tx =
      neither order nor multiplicity, so folding {!Auth_list.warmed} in here is
      exactly equivalent to warming inside the loop. *)
   let base_addresses =
-    sender :: coinbase :: (precompile_addresses @ al_addresses @ Auth_list.warmed auth)
+    sender
+    :: coinbase
+    :: (precompile_addresses spec @ al_addresses @ Auth_list.warmed auth)
   in
   (* At depth 0 the handler loads BOTH the designator and its delegate outside
      any gas metering ([handler.rs:314-332]), so a delegated target's delegate

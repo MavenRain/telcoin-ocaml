@@ -282,12 +282,23 @@ val plan_destruction :
     It takes no permit because looking is not changing; the permit is demanded
     where the change happens. *)
 
-val commit_destruction : Destruction.t load -> Mutability.permit -> t option
+val commit_destruction :
+  Destruction.t load -> Mutability.permit -> spec:Spec.t -> t option
 (** Apply the planned destruction, EIP-6780's three outcomes
     ([revm-context] [journal/inner.rs:507-549]): an account created in this
     transaction is emptied and recorded for removal, any other account merely
     hands its balance over and keeps its code and storage, and an uncreated
     account naming itself as beneficiary is left completely alone.
+
+    [spec] is the block's fork level, and it selects between those three
+    outcomes and the ONE that preceded them. EIP-6780 arrived at
+    {!Spec.Cancun}; below it there is no "created in this transaction"
+    restriction to apply, so every destruction is a real one — the balance
+    moves, or is burned when the beneficiary is the account itself, and the
+    account is recorded for removal either way. The gate is on the RULE, not on
+    the instruction: [SELFDESTRUCT] is ancient and runs at every level of
+    {!Spec.t}, which is why this takes a spec rather than {!Interpreter} adding
+    it to its activation list.
 
     A destroyed account is {e recorded}, not removed. It keeps its code, its
     storage and its callability for the rest of the transaction, which is what

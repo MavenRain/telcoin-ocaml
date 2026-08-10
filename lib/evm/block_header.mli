@@ -290,7 +290,9 @@ val encode_rlp : t -> string
     transactions_root, receipts_root, logs_bloom, difficulty, number, gas_limit,
     gas_used, timestamp, extra_data, mix_hash, nonce, base_fee_per_gas,
     withdrawals_root, blob_gas_used, excess_blob_gas, parent_beacon_block_root,
-    requests_hash].
+    requests_hash]. "Post-Prague" names the SHAPE and not the block's fork
+    level: the same 21 chunks are written for a block executing at any level of
+    {!Spec.t}, for the reason set out under DO NOT NARROW below.
 
     Hashes, the 256-byte bloom, the address and [extra_data] take the
     byte-string rule ({!Tn_rlp.Rlp.encode_bytes}, leading zeros PRESERVED);
@@ -312,18 +314,25 @@ val encode_rlp : t -> string
     from a payload that always supplies it ([payload.rs:117-120]). The
     narrowing, stated: this port cannot encode a foreign pre-Prague header.
 
-    DO NOT NARROW this list on account of the fork level. TN mainnet runs at
-    [SpecId::SHANGHAI] ({!Env} states the fork scope once, [env.mli:26-53]),
-    and the tempting "consistency fix" is to drop the four post-Shanghai
-    fields for it. It would be wrong: TN's assembler writes
+    DO NOT NARROW this list on account of the fork level, and note that chunk
+    42 sharpened the temptation rather than removing it: TN mainnet runs at
+    [SpecId::SHANGHAI], and {!Fork_schedule.mainnet} now makes that chain
+    expressible in the port ({!Env} states the schedule once, [env.mli:26-64]),
+    so the "consistency fix" of dropping the four post-Shanghai fields for it
+    finally has a value to hang itself on. It would still be wrong, and the
+    reason is that the header SHAPE is fork-independent upstream where the
+    pre-block system calls are not. TN's assembler writes
     [parent_beacon_block_root], [blob_gas_used], [excess_blob_gas] and
     [requests_hash] unconditionally, with no fork gate of any kind
-    ([tn-reth/src/evm/block.rs:998-1001]), and nothing downstream rejects the
-    fork-inconsistent header, because [TNExecution]'s
+    ([tn-reth/src/evm/block.rs:998-1001]) — the contrast with the two calls
+    telcoin DOES gate, at [:610] and [:665], is the whole point — and nothing
+    downstream rejects the fork-inconsistent header, because [TNExecution]'s
     HeaderValidator/Consensus/FullConsensus impls are unconditional [Ok(())]
     ([tn-reth/src/traits.rs:50-53]). TN mainnet headers are therefore
     post-Prague-SHAPED even at Shanghai semantics, and the 21-element list
-    above is correct for BOTH networks as it stands.
+    above is correct for BOTH networks as it stands. Accordingly no function in
+    this module takes a {!Spec.t}, and adding one would be the narrowing by
+    another route.
 
     {2 Where the field order came from, and how it is certified}
 

@@ -12,7 +12,8 @@
    test_engine_txskip test_consensus_chain test_consensus_store test_driver_spec
    test_driver_subscriber test_driver test_driver_epoch test_driver_sim
    test_driver_resume test_durable_io test_durable_frame test_durable_log
-   test_durable_codec test_store_disk test_checkpoint_file test_byte_compat)
+   test_durable_codec test_store_disk test_checkpoint_file test_byte_compat
+   test_fork_schedule test_fork_dispatch)
  ; tn_hash32 is a DIRECT dependency here because the header vector cases build
  ; the execution block hash of Header.latest_execution_block; dune only lets a
  ; test name modules of libraries it depends on directly.

@@ -77,6 +77,7 @@ val create :
   genesis_timestamp:Tn_types.Units.Timestamp.t ->
   epoch_duration:Epoch_duration.t ->
   ?ancestors:Tn_keccak.t list ->
+  ?fork_schedule:Tn_evm.Fork_schedule.t ->
   registry:Tn_state.Genesis_account.t ->
   extra_alloc:(Tn_types.Units.Address.t * Tn_state.Genesis_account.t) list ->
   unit ->
@@ -92,8 +93,12 @@ val create :
     by {!Tn_evm.System_contracts.predeploy}. The registry entry is appended
     AFTER [extra_alloc], so under the alloc's later-entry-wins rule an
     [extra_alloc] entry at the registry address cannot displace it - the
-    registry belongs in [~registry], and nowhere else. The only refusal is
-    {!error}. *)
+    registry belongs in [~registry], and nowhere else. [fork_schedule]
+    (default {!Tn_evm.Fork_schedule.testnet}) is when each fork activates on
+    this chain; the default is the all-at-zero schedule this port assumed
+    before one existed, so a spec built without it describes exactly the chain
+    it described before, and a mainnet spec passes
+    {!Tn_evm.Fork_schedule.mainnet}. The only refusal is {!error}. *)
 
 val anchor : t -> Tn_engine.Anchor.t
 (** The genesis anchor: the caller's hash, base fee and gas limit at height
@@ -121,6 +126,13 @@ val ancestors : t -> Tn_keccak.t list
 (** The anchor's ancestor hashes, newest first, excluding the anchor's own;
     [[]] at a true genesis. *)
 
+val fork_schedule : t -> Tn_evm.Fork_schedule.t
+(** When each fork activates on this chain, straight off its genesis config.
+    This record is the port's genesis authority, so the schedule lands here
+    first and reaches the engine through exactly two sites: {!engine_config}
+    at cold start, and {!Driver.resume}'s explicit forwarding at
+    resumption. *)
+
 val first_boundary : t -> Tn_types.Units.Timestamp.t
 (** [genesis_timestamp + epoch_duration]: the instant at or past which epoch
     0's closing output closes it. Every LATER boundary is minted from the
@@ -130,7 +142,12 @@ val first_boundary : t -> Tn_types.Units.Timestamp.t
 
 val engine_config : t -> committee:Tn_types.Committee.t -> Tn_engine.Config.t
 (** The {!Tn_engine.Config.t} a cold start hands to the engine: this spec's
-    anchor, ancestors, world, chain id and basefee address, with the epoch
-    boundary at {!first_boundary}. The committee stays the caller's argument:
+    anchor, ancestors, world, chain id, basefee address and
+    {!fork_schedule}, with the epoch boundary at {!first_boundary}. It is the
+    COLD-START conversion site; the resume path is the other one, where
+    {!Driver.resume} forwards {!fork_schedule} to
+    [Tn_engine.Engine.resume ?fork_schedule]. Between the two, the schedule
+    reaches the engine without any caller naming a fork. The committee stays
+    the caller's argument:
     upstream reads it back from the registry at epoch entry, and the port has
     no registry reader ([tn-reth/src/lib.rs:1867-1913]). *)

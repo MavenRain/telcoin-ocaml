@@ -71,6 +71,27 @@
     remains a code byte that fails to decode, so a program using one halts
     rather than silently doing the wrong thing. See {!Opcode}.
 
+    {2 The fork level}
+
+    Which of those instructions a frame may actually run depends on the block it
+    runs in. The dispatch loop reads {!Env.Block.spec} and refuses, with
+    {!Not_activated}, the five instructions Cancun introduced — [TLOAD],
+    [TSTORE], [MCOPY], [BLOBHASH] and [BLOBBASEFEE] — in a block still at
+    {!Spec.Shanghai}, which is every block of the TN mainnet chain. That gate is
+    one of the module's two fork sensitivities. The other is [SELFDESTRUCT]: the
+    instruction itself runs at every level, but its commit hands the same spec
+    to [Effects.commit_destruction], which applies EIP-6780's
+    created-this-transaction restriction at {!Spec.Cancun} and above and the
+    full pre-Cancun destruction below it. The decode table is spec-invariant,
+    every price is spec-invariant, and the levels below Shanghai are
+    unrepresentable, so nothing else a program can do differs between the three
+    {!Spec.t} values.
+
+    The refusal is a halt like any other, so a pre-Cancun program that reaches
+    one of the five forfeits its whole allowance and returns no output. Its
+    price is never consulted: the gate runs before the charge, exactly as revm's
+    [check!] runs before its [gas!].
+
     {2 Termination}
 
     Every instruction that lets execution continue costs at least one unit of
@@ -168,6 +189,28 @@ type error =
           designated invalid instruction [0xfe]. revm separates the two
           ([OpcodeNotFound] and [InvalidFEOpcode]); both are exceptional
           halts, and so is this. *)
+  | Not_activated of int
+      (** The byte at the program counter names an instruction this interpreter
+          runs, but one the block's {!Spec.t} has not reached yet: [TLOAD]
+          ([0x5c]), [TSTORE] ([0x5d]), [MCOPY] ([0x5e]), [BLOBHASH] ([0x49]) or
+          [BLOBBASEFEE] ([0x4a]) in a block still at {!Spec.Shanghai}, which on
+          the TN mainnet chain is every block. The [int] is the code byte, as in
+          {!Invalid_opcode}.
+
+          It is DISTINCT from {!Invalid_opcode} on purpose, and the distinction
+          is revm's own: [InstructionResult::NotActivated] is what
+          [check!(interpreter, CANCUN)] returns from inside an instruction that
+          exists but is out of reach, while [OpcodeNotFound] is what an
+          undecodable byte returns from the dispatch table. Collapsing them
+          would say a Cancun chain and a Shanghai chain disagree about which
+          bytes are instructions, which they do not: they agree about the
+          bytes and disagree about the fork.
+
+          Both are exceptional halts, so as with every other {!error} the
+          difference is diagnostic and nothing observable turns on it. The gate
+          runs BEFORE the instruction's price is charged, mirroring revm's
+          [check!]-then-[gas!] order, so a frame that could not have afforded
+          the instruction anyway is still refused for the fork. *)
   | Offset_too_large
       (** A memory offset or length this machine will not reach: one too large to
           represent, or one whose extent passes {!Memory.max_extent}. Either way
@@ -209,9 +252,11 @@ type error =
           [require_non_staticcall!] as the first statement of [sstore]
           ([instructions/host.rs:229]) and [log] ([:319]), and as the statement
           after the Cancun hardfork check in [tstore] ([:294], the check itself
-          at [:293]); this port models a fork level where that check always
-          passes ({!Env} states the scope once, [env.mli:26-53]), so the two
-          orders coincide.
+          at [:293]). This port keeps that same order: the activation gate
+          ({!Not_activated}) runs in the dispatch loop, ahead of the
+          instruction, so a [TSTORE] in a static frame on a pre-Cancun block
+          reports {!Not_activated} and not this. Above Cancun the fork check
+          always passes and the two orders coincide.
 
           Being first is observable, and the tests pin it: a static frame
           reports this even when the stack could not have supplied the operands

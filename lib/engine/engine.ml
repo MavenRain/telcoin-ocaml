@@ -12,6 +12,7 @@ module Block_execution = Tn_evm.Block_execution
 module Block_header = Tn_evm.Block_header
 module Env = Tn_evm.Env
 module Epoch_boundary = Tn_evm.Epoch_boundary
+module Fork_schedule = Tn_evm.Fork_schedule
 module Hash32 = Tn_evm.Hash32
 module Rewards_counter = Tn_evm.Rewards_counter
 module U256 = Tn_state.U256
@@ -225,8 +226,15 @@ let build_block (acc : building) ~config ~boundary ~beneficiary ~timestamp
     ~position ~transactions =
   let number = Block_number.succ (Anchor.number acc.anchor) in
   let at = Block_number.to_int number in
+  (* The fork level is resolved ONCE per block, here, from the chain's schedule
+     and this block's own timestamp, and then rides on the environment. That is
+     upstream's shape too: the spec is folded into the per-block configuration
+     before the EVM is handed it, so no later step re-derives it and no two
+     frames of one block can disagree about which fork they are on. *)
   let block =
-    Env.Block.make ~coinbase:beneficiary
+    Env.Block.make_at_spec
+      ~spec:(Fork_schedule.active_at (Config.fork_schedule config) ~timestamp)
+      ~coinbase:beneficiary
       ~timestamp:(U256.of_u64_bits (Units.Timestamp.to_sec timestamp))
       ~number:(word_of_int at)
       ~prevrandao:(word_of_be_bytes mix_hash)
@@ -467,7 +475,7 @@ let execute state output =
       | Block_plan.Batch_blocks specs -> build_blocks rewarded output specs)
 
 (* Everything the engine carries that MOVES: [t] minus [config], which never
-   changes and is rebuilt by [resume] from the two facts that genuinely are
+   changes and is rebuilt by [resume] from the facts that genuinely are
    configuration, and minus [tip], which a resumed engine legitimately lacks
    because the block behind [anchor] was produced in a previous life.
 
@@ -515,16 +523,20 @@ let snapshot (t : t) : persisted =
    [begin_epoch] compares against, so the config describes the engine rather
    than misreporting it. The ancestors are [Recent_hashes.ancestors] and never
    [to_list]: the window's newest entry IS the anchor's own hash (by the
-   re-seat above, not by trust), and [Config.create] wants everything strictly
-   below it, so the whole window would be one entry too long and shift every
-   BLOCKHASH answer by one. *)
-let resume ~chain_id ~basefee_address (p : persisted) : t =
+   re-seat above, not by trust), and [Config.create_on_schedule] wants
+   everything strictly below it, so the whole window would be one entry too
+   long and shift every BLOCKHASH answer by one. [fork_schedule] defaults to
+   [Fork_schedule.testnet], mirroring [Config.create]'s cold-start default;
+   the schedule is not persisted, so [Driver.resume] must forward the chain's
+   own (see the .mli warning). *)
+let resume ?(fork_schedule = Fork_schedule.testnet) ~chain_id ~basefee_address
+    (p : persisted) : t =
   let ancestors = Recent_hashes.ancestors p.hashes in
   let hashes = Recent_hashes.of_genesis (Anchor.hash p.anchor) ~ancestors in
   {
     config =
-      Config.create ~anchor:p.anchor ~ancestors ~world:p.world ~chain_id
-        ~basefee_address
+      Config.create_on_schedule ~fork_schedule ~anchor:p.anchor ~ancestors
+        ~world:p.world ~chain_id ~basefee_address
         ~epoch_boundary:(phase_frontier p.phase)
         ~committee:(phase_committee p.phase);
     anchor = p.anchor;

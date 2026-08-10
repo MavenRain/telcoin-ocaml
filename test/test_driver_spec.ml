@@ -234,6 +234,295 @@ let test_book_union () =
     (Some (addr 'y'))
     (Address_book.find merged (id_of 202L))
 
+(* ---------- chunk 42: the fork schedule, end to end through the driver ------ *)
+
+(* [Chain_spec] is the port's genesis authority, so the chunk-42 schedule lands
+   there and reaches the pre-block system calls through
+   [Chain_spec.engine_config], the engine and the executor without any caller
+   in between naming a fork. These two cases are the end-to-end reading of
+   that: what a produced block DID, off its world, rather than which value an
+   accessor answers (that half is [test_fork_dispatch]).
+
+   One fixture serves both. Four validators, one certified sub-DAG whose single
+   batch the decode layer drops, and a chain spec whose epoch boundary (28800 s
+   past a genesis at second 0) sits far past the commit at second 1000, so
+   nothing here closes the epoch. The produced block is then decided by the
+   genesis world and the fork level alone. *)
+
+module Driver = Tn_driver.Driver
+module Outcome = Tn_driver.Outcome
+module Executed_block = Tn_engine.Executed_block
+module Fork_schedule = Tn_evm.Fork_schedule
+module Certificate = Tn_vertex.Certificate
+module Header = Tn_vertex.Header
+module Vote = Tn_vertex.Vote
+module Reputation_scores = Tn_consensus.Reputation_scores
+module Sub_dag = Tn_consensus.Sub_dag
+
+let fork_seeds = [ 0L; 1L; 2L; 3L ]
+
+(* Distinct execution addresses per seat, for the same reason the address-book
+   cases above use them: a fixture whose seats share an address proves less. *)
+let fork_committee =
+  committee_of
+    [
+      (0L, addr '\xa0'); (1L, addr '\xa1'); (2L, addr '\xa2'); (3L, addr '\xa3');
+    ]
+
+let fork_members = Committee.authorities fork_committee
+let fork_ids = List.map Authority.id fork_members
+
+let fork_sk_of id =
+  get "secret key"
+    (List.find_opt
+       (fun sk ->
+         Authority_id.equal
+           (Authority_id.of_public_key (Tn_crypto.Secret_key.public_key sk))
+           id)
+       (List.map Tn_crypto.Secret_key.derive fork_seeds))
+
+let fork_address_of id =
+  List.find_map
+    (fun a ->
+      if Authority_id.equal (Authority.id a) id then
+        Some (Authority.execution_address a)
+      else None)
+    fork_members
+
+let fork_certify header =
+  Result.fold ~ok:Fun.id
+    ~error:(fun e ->
+      Alcotest.failf "certify: %s" (Certificate.error_to_string e))
+    (Certificate.assemble fork_committee header
+       (List.map (fun id -> Vote.sign (fork_sk_of id) ~voter:id header) fork_ids))
+
+(* A batch the decode layer drops, so the block is built and carries no
+   transaction: what this fixture varies is the fork level, not what runs. *)
+let fork_batch =
+  Batch.make ~transactions:[ "\xde\xad\xbe\xef" ] ~epoch:Units.Epoch.zero
+    ~beneficiary:Units.Address.zero ~base_fee_per_gas:(fee 0) ~worker_id:w0
+
+let fork_sub_dag =
+  let header =
+    Header.make ~latest_execution_block:Tn_types.Block_num_hash.zero
+      ~author:(get "leader id" (List.nth_opt fork_ids 0))
+      ~round:(get "round" (Round.of_int 1))
+      ~epoch:Units.Epoch.zero ~created_at:(ts 1_000L)
+      ~payload:[ (Batch.digest fork_batch, w0) ]
+      ~parents:(List.map Certificate.digest (Certificate.genesis fork_committee))
+  in
+  Sub_dag.create
+    ~sequence:(Tn_std.Nonempty.singleton (fork_certify header))
+    ~scores:(Reputation_scores.fresh fork_committee)
+    ~previous:None
+
+(* A codeless registry entry: neither case reads the registry, and storage on a
+   codeless account is what [of_genesis_alloc] refuses, so it carries none. The
+   two system contracts still arrive, because {!Chain_spec.create} predeploys
+   them whatever the alloc says. *)
+let fork_registry =
+  Tn_state.Genesis_account.make ~nonce:Tn_state.Nonce.zero ~balance:U256.zero
+    ~code:None ~storage:[]
+
+let fork_spec ?fork_schedule () =
+  get "chain spec"
+    (Result.to_option
+       (Chain_spec.create ~chain_id:(u256_int 2017)
+          ~basefee_address:System_contracts.governance_safe_address
+          ~genesis_hash:(Tn_keccak.digest "chunk-42 golden genesis sentinel")
+          ~genesis_base_fee:(u256_int 7) ~genesis_gas_limit:30_000_000
+          ~genesis_timestamp:(ts 0L) ~epoch_duration:duration_28800
+          ?fork_schedule ~registry:fork_registry ~extra_alloc:[] ()))
+
+let fork_block ?fork_schedule () =
+  let _, advance =
+    Result.fold ~ok:Fun.id
+      ~error:(fun e -> Alcotest.failf "step: %s" (Outcome.error_to_string e))
+      (Driver.step
+         (Driver.create (fork_spec ?fork_schedule ()) ~committee:fork_committee)
+         fork_sub_dag
+         ~bodies:(Batch_store.of_bodies [ fork_batch ])
+         ~address_of:fork_address_of)
+  in
+  Alcotest.(check int) "the output builds exactly one block" 1
+    (List.length advance.Outcome.blocks);
+  get "produced block" (List.nth_opt advance.Outcome.blocks 0)
+
+(* What the two pre-block system calls left behind, which is the end-to-end
+   reading of the fork level: EIP-4788 writes a PAIR of slots and EIP-2935 one,
+   so a block that ran both shows [(2, 1)] and one that ran neither [(0, 0)]. *)
+let fork_marks block =
+  let world = Executed_block.world block in
+  ( Bf.slots_set world System_contracts.beacon_roots_address,
+    Bf.slots_set world System_contracts.history_storage_address )
+
+let marks_t = Alcotest.(pair int int)
+let block_hex block = Tn_keccak.to_hex (Executed_block.hash block)
+
+(* The pinned golden. It was computed by this same fixture on the committed
+   PRE-chunk-42 tree (d2da143), where no fork schedule existed, so it is a real
+   before-value and not this file's own output read back:
+   [telcoin-ocaml-chunk42-harness/baseline/golden/golden.ml] is the probe. Any
+   chunk-42 edit that moved a byte of the default path moves this hash. *)
+let fork_golden_hash =
+  "0faeb53ae2bd48837fc471469d06bbe87bae3eb689ce68433b1487174074d38c"
+
+let test_golden_byte_identity () =
+  let default_block = fork_block () in
+  Alcotest.(check string)
+    "a spec that names no schedule reproduces the pre-chunk-42 block"
+    fork_golden_hash (block_hex default_block);
+  let testnet_block = fork_block ~fork_schedule:Fork_schedule.testnet () in
+  Alcotest.(check string)
+    "and so does the same spec handed the testnet schedule explicitly"
+    fork_golden_hash (block_hex testnet_block);
+  (* The hash is a digest of all 21 header fields, so agreeing on it is
+     agreeing on the state root too. The marks say the two calls actually ran,
+     which is the positive control the mainnet case below needs. *)
+  Alcotest.check marks_t "the default block ran both pre-block calls" (2, 1)
+    (fork_marks default_block);
+  Alcotest.check marks_t "and so did the explicitly-testnet one" (2, 1)
+    (fork_marks testnet_block)
+
+let test_driver_mainnet_skips_4788 () =
+  let mainnet_block = fork_block ~fork_schedule:Fork_schedule.mainnet () in
+  Alcotest.check marks_t
+    "a mainnet-scheduled driver block writes neither system contract" (0, 0)
+    (fork_marks mainnet_block);
+  (* Same driver, same sub-DAG, same genesis world, one argument different: the
+     negative above is a gate firing and not a fixture that could never write. *)
+  Alcotest.check marks_t "the same fixture under the default schedule writes"
+    (2, 1)
+    (fork_marks (fork_block ()));
+  Alcotest.(check bool)
+    "so a mainnet block is NOT the default block, byte for byte" false
+    (String.equal (block_hex mainnet_block) fork_golden_hash)
+
+(* ---------- the schedule across a resume ---------- *)
+
+(* The review-fix cases for [Engine.resume ?fork_schedule]: before the fix,
+   [Driver.resume] rebuilt the engine's config through [Config.create], so a
+   mainnet (Shanghai-only) chain silently resumed on the all-at-zero default
+   and built Cancun/Prague blocks. The fixtures are the fork fixtures above;
+   the only new plumbing is the empty store a cold shell opens, so the resume
+   replays nothing and the stepped block is decided by the schedule alone. *)
+
+module Engine = Tn_engine.Engine
+module Config = Tn_engine.Config
+module Block_execution = Tn_evm.Block_execution
+module Consensus_store = Tn_execution.Consensus_store
+module Cb = Tn_execution.Consensus_block
+
+let fork_fresh_store () =
+  Consensus_store.create ~epoch:Units.Epoch.zero ~anchor:Cb.Number.genesis
+    ~parent:Cb.genesis_parent
+
+(* Checkpoint the COLD driver, drop it, resume from the pair. The advances
+   must be empty: an output replayed here would mean the fixture is not the
+   no-replay resume it claims to be. *)
+let fork_resumed ?fork_schedule () =
+  let spec = fork_spec ?fork_schedule () in
+  let checkpoint =
+    Driver.snapshot (Driver.create spec ~committee:fork_committee)
+  in
+  let outcome =
+    Result.fold ~ok:Fun.id
+      ~error:(fun e ->
+        Alcotest.failf "resume: %s" (Driver.resume_error_to_string e))
+      (Driver.resume spec ~committee:fork_committee ~checkpoint
+         ~store:(fork_fresh_store ()) ~address_of:fork_address_of)
+  in
+  match outcome with
+  | Outcome.Advance { driver; advances = [] } -> driver
+  | Outcome.Advance { driver = _; advances = _ :: _ } ->
+      Alcotest.fail "resume replayed outputs over an empty store"
+  | Outcome.Sealed { driver = _; advances = _; rest = _ } ->
+      Alcotest.fail "resume returned Sealed at genesis"
+  | Outcome.Halted { advances = _; error } ->
+      Alcotest.failf "resume halted: %s" (Outcome.error_to_string error)
+
+(* One stepped block through a resumed driver: the same sub-DAG and batch as
+   [fork_block], so the resume path is the only variable. *)
+let fork_resumed_block ?fork_schedule () =
+  let _, advance =
+    Result.fold ~ok:Fun.id
+      ~error:(fun e -> Alcotest.failf "step: %s" (Outcome.error_to_string e))
+      (Driver.step
+         (fork_resumed ?fork_schedule ())
+         fork_sub_dag
+         ~bodies:(Batch_store.of_bodies [ fork_batch ])
+         ~address_of:fork_address_of)
+  in
+  Alcotest.(check int) "the resumed output builds exactly one block" 1
+    (List.length advance.Outcome.blocks);
+  get "post-resume block" (List.nth_opt advance.Outcome.blocks 0)
+
+(* The pre-block dispositions, read off the carried token as test_engine.ml's
+   T-12 reads them; every arm is named so a schedule change shows up as a
+   wrong string rather than as silence. *)
+let fork_root_disposition block =
+  match
+    Block_execution.Pre_block.consensus_root (Executed_block.pre_block block)
+  with
+  | Block_execution.Pre_block.Root_skipped_at_genesis -> "skipped at genesis"
+  | Block_execution.Pre_block.Root_skipped_after_first_batch ->
+      "skipped after the first batch"
+  | Block_execution.Pre_block.Root_skipped_before_cancun ->
+      "skipped before cancun"
+  | Block_execution.Pre_block.Root_written _ -> "written"
+
+let fork_hash_disposition block =
+  match
+    Block_execution.Pre_block.blockhashes (Executed_block.pre_block block)
+  with
+  | Block_execution.Pre_block.Hash_skipped_at_genesis -> "skipped at genesis"
+  | Block_execution.Pre_block.Hash_skipped_before_prague ->
+      "skipped before prague"
+  | Block_execution.Pre_block.Hash_written _ -> "written"
+
+let schedule_t =
+  Alcotest.testable
+    (fun fmt s -> Format.pp_print_string fmt (Fork_schedule.to_string s))
+    Fork_schedule.equal
+
+(* (a) A mainnet chain checkpointed and resumed stays Shanghai: the block the
+   RESUMED driver builds skips both fork-gated pre-block calls, and the same
+   resume path on the default schedule writes both, so the two skips are the
+   schedule surviving the resume and not a fixture that could never write. *)
+let test_resume_forwards_mainnet_schedule () =
+  let block = fork_resumed_block ~fork_schedule:Fork_schedule.mainnet () in
+  Alcotest.(check string)
+    "the post-resume mainnet block skips the consensus root before cancun"
+    "skipped before cancun" (fork_root_disposition block);
+  Alcotest.(check string) "and skips the blockhashes write before prague"
+    "skipped before prague" (fork_hash_disposition block);
+  let control = fork_resumed_block () in
+  Alcotest.(check string)
+    "the resumed default-schedule control writes the consensus root" "written"
+    (fork_root_disposition control);
+  Alcotest.(check string) "and writes the blockhashes" "written"
+    (fork_hash_disposition control)
+
+(* (b) [Engine.resume] WITHOUT [?fork_schedule] still answers the testnet
+   schedule: the byte-identity default, pinned. The engine it snapshots is a
+   mainnet one, so the default genuinely overrides something here. *)
+let test_engine_resume_default_is_testnet () =
+  let spec = fork_spec ~fork_schedule:Fork_schedule.mainnet () in
+  let cold = Driver.engine (Driver.create spec ~committee:fork_committee) in
+  Alcotest.check schedule_t "the snapshotted engine carries mainnet"
+    Fork_schedule.mainnet
+    (Config.fork_schedule (Engine.config cold));
+  let resumed =
+    Engine.resume
+      ~chain_id:(Chain_spec.chain_id spec)
+      ~basefee_address:(Chain_spec.basefee_address spec)
+      (Engine.snapshot cold)
+  in
+  Alcotest.check schedule_t
+    "an Engine.resume that names no schedule defaults to testnet"
+    Fork_schedule.testnet
+    (Config.fork_schedule (Engine.config resumed))
+
 let () =
   Alcotest.run "driver_spec"
     [
@@ -263,5 +552,16 @@ let () =
             test_book_members;
           Alcotest.test_case "union is monotone and newer-biased" `Quick
             test_book_union;
+        ] );
+      ( "fork schedule end to end",
+        [
+          Alcotest.test_case "driver-mainnet-skips-4788" `Quick
+            test_driver_mainnet_skips_4788;
+          Alcotest.test_case "golden-byte-identity" `Quick
+            test_golden_byte_identity;
+          Alcotest.test_case "resume-forwards-mainnet-schedule" `Quick
+            test_resume_forwards_mainnet_schedule;
+          Alcotest.test_case "engine-resume-default-is-testnet" `Quick
+            test_engine_resume_default_is_testnet;
         ] );
     ]

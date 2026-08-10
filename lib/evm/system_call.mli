@@ -57,6 +57,20 @@ val gas_limit : int
     ([evm/mod.rs:176]) and simultaneously swaps into [block.gas_limit], so
     [GASLIMIT] inside a system call reads 30M and not the real block limit. *)
 
+val system_block : Env.Block.t -> Env.Block.t
+(** The block environment a system call made from [block] runs under: [block]
+    with [gas_limit] replaced by {!gas_limit} and [basefee] replaced by zero,
+    and every other field carried through unchanged. Total.
+
+    It is exported rather than left private because it IS the contract this
+    module's "the block environment is rebuilt, not assumed harmless" paragraph
+    states in prose, and a caller of {!run} is entitled to know exactly what the
+    call it triggered will read. The two carried-through fields that a reader
+    would most reasonably expect to be swapped are
+    {!Env.Block.blob_gasprice}, which telcoin's swap list does not touch, and
+    {!Env.Block.spec}: a system call runs at the fork level of the block that
+    made it, since it has no timestamp of its own to derive one from. *)
+
 type outcome
 (** A completed system call: the receipt it produced, and the world with ONLY
     the target's account committed. The two travel together and the world is
@@ -188,9 +202,10 @@ val run :
 
     {2 The block environment is rebuilt, not assumed harmless}
 
-    [block] is rebuilt through {!Env.Block.make} with [gas_limit] set to
-    {!gas_limit} and [basefee] set to zero, carrying the other eight fields
-    through unchanged; this reproduces telcoin's [core::mem::swap] pair
+    [block] is rebuilt through {!Env.Block.make_at_spec} with [gas_limit] set
+    to {!gas_limit} and [basefee] set to zero, carrying the other nine fields
+    through unchanged ({!system_block}); this reproduces telcoin's
+    [core::mem::swap] pair
     ([evm/mod.rs:194-212]). Both replacements are readable INSIDE the frame,
     [GASLIMIT] returns 30M and [BASEFEE] returns 0, so this is a semantic step
     and not a validation trick, even though neither pinned bytecode contains
@@ -202,5 +217,5 @@ val run :
     [cfg.disable_nonce_check], is
     reproduced by the live-nonce choice above: an equality that always holds is
     a disabled check. {!Env.Block} has no [with_] updater, so a rebuild is the
-    only expression of this, and it is total because all ten accessors exist
-    ([env.mli:84-141]). *)
+    only expression of this, and it is total because all eleven accessors
+    exist. *)

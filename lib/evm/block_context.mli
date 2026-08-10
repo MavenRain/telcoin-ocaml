@@ -81,17 +81,24 @@ val make :
     - [consensus_root] is a {!Tn_types.Digests.Output_digest.t}. Telcoin's field
       is called [parent_beacon_block_root] and documented as "the digest of the
       [ConsensusHeader]" ([block.rs:55-56]); naming it for what it is makes
-      passing an actual beacon root a type error. It is NOT an option: on the
-      build path [TNPayload::parent_beacon_block_root] is always [Some]
-      ([payload.rs:117-120]), and telcoin's [MissingParentBeaconBlockRoot] fires
-      only when Cancun is active: always at the testnet fork level this port
-      models ({!Env} states the scope once, [env.mli:26-53]), and never on TN
-      mainnet, whose committed genesis stops at Shanghai, though the build
-      path supplies the root there too ([block.rs:998-1001]). The
-      [None] case is therefore EXCLUDED, not deferred: the rejection set is
-      identical {e at the modelled fork level}, it just moves from execution
-      to construction. If a fork-configurable spec ever lands, this must
-      become an option again and that error variant must return.
+      passing an actual beacon root a type error. It is NOT an option, and it
+      STAYS one field with no [None] case now that the fork-configurable spec
+      has landed. An earlier revision of this note predicted the opposite — that
+      a schedule would force the option and telcoin's
+      [MissingParentBeaconBlockRoot] back — and the prediction was wrong, for a
+      reason worth keeping: the fork level gates the CALL, not the VALUE. The
+      Cancun test is the first statement of
+      [apply_consensus_root_contract_call] ([block.rs:610-612]) and returns
+      before the [ok_or] that raises that error ([block.rs:614-617]), so a
+      Shanghai block never reaches the check that a missing root would fail.
+      Meanwhile the build path supplies the root at every fork:
+      [TNPayload::parent_beacon_block_root] is always [Some]
+      ([payload.rs:117-120]) and the mainnet path supplies it too
+      ([block.rs:998-1001]), even though mainnet's committed genesis stops at
+      Shanghai. The [None] case is therefore EXCLUDED at every level of
+      {!Spec.t} rather than at one modelled level, and the gate that decides
+      whether the root is USED lives in {!Block_execution.apply_pre_block},
+      where it reports {!Block_execution.Pre_block.Root_skipped_before_cancun}.
     - [nonce] is a {!Tn_types.Units.Sequence_number.t}, which already {e is} the
       [(epoch << 32) | round] packing the header nonce carries
       ([units.mli:76-88], [crates/types/src/primary/header.rs:163-166]); the

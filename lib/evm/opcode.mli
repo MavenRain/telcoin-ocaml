@@ -22,10 +22,13 @@
     delegation designator one hop (see {!Interpreter} and {!Call_target}), so
     their faithfulness no longer carries a non-delegated qualifier, and [0xEF]
     REMAINS an undefined byte on purpose, which is exactly what halts the
-    second hop of a delegation chain ([opcode.rs:637-638]). The fork level
-    this table models is stated once, in [env.mli:26-53]. Within this
-    subset the byte values, immediate sizes and semantics are those of the real
-    machine (revm's [revm-bytecode] opcode table).
+    second hop of a delegation chain ([opcode.rs:637-638]). This table is fork
+    INDEPENDENT: it is the union of the subset over every level of the port's
+    fork schedule, which is stated once in [env.mli:26-64]. An instruction a
+    block's own {!Spec.t} has not activated still decodes here and is halted by
+    the interpreter afterwards, so nothing below is gated by a fork. Within
+    this subset the byte values, immediate sizes and semantics are those of the
+    real machine (revm's [revm-bytecode] opcode table).
 
     Every operand a byte can carry is held in a type that admits only the legal
     range — {!Push_bytes} for the [1, 32] immediate width and {!Depth} for the
@@ -216,8 +219,17 @@ val decode : int -> t option
     byte decoded to [None] and halted the machine rather than silently doing
     the wrong thing. Being absent from a total decoder {e was} the whole
     mechanism: it needed no allow-list, no feature flag and no code. What
-    decodes to [None] now is exactly what a Prague machine leaves unassigned,
-    [0xEF] included.
+    decodes to [None] is exactly what the highest fork in the schedule, Prague,
+    leaves unassigned, [0xEF] included.
+
+    That answer does not move with the block's {!Spec.t}, and it must not.
+    Decode is total and spec-independent; an instruction the block's fork has
+    not activated decodes SUCCESSFULLY here and is refused by the interpreter,
+    as a halt distinct from the one an unassigned byte earns
+    ([Interpreter.Not_activated] against [Interpreter.Invalid_opcode], which is
+    revm's own split between [NotActivated] and [OpcodeNotFound]). Folding the
+    two together in this decoder would make a Shanghai [TLOAD] and a byte no
+    fork ever assigns indistinguishable.
 
     The asymmetry is deliberate. Adding a constructor to {!t} breaks compilation
     in {!to_byte}, in {!Gas.static_cost} and in the interpreter's dispatch, all

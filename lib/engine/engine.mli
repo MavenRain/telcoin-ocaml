@@ -235,7 +235,7 @@ type persisted = {
 }
 (** Everything an engine carries that MOVES. Deliberately [Engine.t] minus
     [config] (which never changes and is reconstructed by {!resume} from the
-    two facts that genuinely are configuration) and minus [tip] (which a
+    facts that genuinely are configuration) and minus [tip] (which a
     resumed engine legitimately lacks — the block behind {!anchor} was produced
     in a previous life, the exact symmetry of
     [Tn_execution.Consensus_chain.resume]'s [None] tip). Transparent, per the
@@ -254,6 +254,7 @@ val snapshot : t -> persisted
     instead of trusted; see its doc. *)
 
 val resume :
+  ?fork_schedule:Tn_evm.Fork_schedule.t ->
   chain_id:Tn_state.U256.t ->
   basefee_address:Tn_types.Units.Address.t ->
   persisted ->
@@ -277,10 +278,19 @@ val resume :
     divergence note); with the window derived, there is nothing left to
     validate.
 
-    [chain_id] and [basefee_address] are the only two facts that are genuinely
-    configuration rather than state, and they arrive the same way at cold start
-    and at resume, exactly as [Node.recover] repeats its config-class arguments
-    ([lib/consensus/node.mli:122-124]). No [Config.t] is taken:
+    [chain_id], [basefee_address] and [fork_schedule] are the only facts that
+    are genuinely configuration rather than state, and they arrive the same way
+    at cold start and at resume, exactly as [Node.recover] repeats its
+    config-class arguments ([lib/consensus/node.mli:122-124]).
+
+    [fork_schedule] defaults to [Tn_evm.Fork_schedule.testnet], the same
+    all-at-zero schedule {!Config.create} defaults to at cold start. The
+    schedule is not persisted, so a resumed chain MUST be given the same
+    schedule its [Tn_driver.Chain_spec.t] carries: a mainnet (Shanghai-only)
+    chain resumed on the default would silently build Cancun/Prague blocks.
+    [Tn_driver.Driver.resume] forwards [Chain_spec.fork_schedule] explicitly.
+
+    No [Config.t] is taken:
     [Tn_driver.Chain_spec.engine_config] hard-codes epoch 0's [first_boundary]
     and every later boundary is minted from a closing output's commit time
     ([lib/driver/chain_spec.mli:124-136]), so passing a spec-built config to a

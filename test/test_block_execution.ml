@@ -54,24 +54,34 @@ let block_error = function
   | Ok _ -> Alcotest.fail "expected the block to be refused"
   | Error e -> e
 
+(* The [before_cancun] and [before_prague] arms are the fork skips chunk 42
+   added. Every fixture in THIS suite runs at the default fork level, which is
+   Prague, so no case here can reach them; they are spelled out because the sums
+   are matched totally and a wildcard would hide a real skip. *)
 let root_written = function
   | Pre_block.Root_written outcome -> outcome
   | Pre_block.Root_skipped_at_genesis -> Alcotest.fail "expected Root_written, got the genesis skip"
   | Pre_block.Root_skipped_after_first_batch ->
       Alcotest.fail "expected Root_written, got the first-batch skip"
+  | Pre_block.Root_skipped_before_cancun ->
+      Alcotest.fail "expected Root_written, got the pre-Cancun skip"
 
 let hash_written = function
   | Pre_block.Hash_written outcome -> outcome
   | Pre_block.Hash_skipped_at_genesis -> Alcotest.fail "expected Hash_written, got the genesis skip"
+  | Pre_block.Hash_skipped_before_prague ->
+      Alcotest.fail "expected Hash_written, got the pre-Prague skip"
 
 let root_disposition = function
   | Pre_block.Root_written _ -> "written"
   | Pre_block.Root_skipped_at_genesis -> "skipped at genesis"
   | Pre_block.Root_skipped_after_first_batch -> "skipped after the first batch"
+  | Pre_block.Root_skipped_before_cancun -> "skipped before cancun"
 
 let hash_disposition = function
   | Pre_block.Hash_written _ -> "written"
   | Pre_block.Hash_skipped_at_genesis -> "skipped at genesis"
+  | Pre_block.Hash_skipped_before_prague -> "skipped before prague"
 
 let refund_of = function
   | Receipt.Success { gas_refunded; _ } -> gas_refunded

@@ -8,6 +8,7 @@ type error =
   | Stack_overflow
   | Invalid_jump
   | Invalid_opcode of int
+  | Not_activated of int
   | Offset_too_large
   | Reentrancy_sentry
   | Static_state_change
@@ -22,6 +23,7 @@ let error_to_string = function
   | Stack_overflow -> "stack overflow"
   | Invalid_jump -> "invalid jump destination"
   | Invalid_opcode byte -> Printf.sprintf "invalid opcode 0x%02x" byte
+  | Not_activated byte -> Printf.sprintf "instruction 0x%02x not activated" byte
   | Offset_too_large -> "memory offset or length too large"
   | Reentrancy_sentry -> "storage write refused on a call stipend"
   | Static_state_change -> "state change in a static frame"
@@ -860,7 +862,8 @@ let selfdestruct env m =
        (Option.fold
           ~none:(Halt (Failed Balance_overflow))
           ~some:(fun effects -> Halt (Stopped { gas_left = gas; effects }))
-          (Effects.commit_destruction plan permit)))
+          (Effects.commit_destruction plan permit
+             ~spec:(Env.Block.spec (Env.block env)))))
 
 let reach_window m ~offset_word ~length_word =
   let ( let* ) = Result.bind in
@@ -1009,6 +1012,36 @@ let merge_creation base ~created ~permit ~warmed ~outcome =
            (stack_result (Stack.push W.zero base.stack)))
   | Failed _ -> push_zero { base with effects = warmed } ~gas:base.gas
 
+(* The instructions this machine decodes that Shanghai does not have. All five
+   arrive at Cancun — EIP-1153's [TLOAD] and [TSTORE], EIP-5656's [MCOPY] and
+   EIP-4844's [BLOBHASH] and [BLOBBASEFEE] — and revm gates each of them with
+   [check!(interpreter, CANCUN)] as the FIRST statement of its body, ahead of
+   the [gas!] that follows ([instructions/host.rs:293, 308],
+   [instructions/memory.rs:60], [instructions/tx_info.rs:22, 39]).
+
+   Every other byte this machine decodes names an instruction the Shanghai set
+   already has, so this list IS the activation gate rather than one clause of
+   it. That makes it a standing obligation rather than a closed fact: an
+   instruction a later fork adds has to join the list when it lands, and nothing
+   in the type system will ask for it. The five are listed one per entry so that
+   deleting any single one is a mutation the suite kills on its own case. *)
+let cancun_instructions =
+  [
+    Opcode.Tload;
+    Opcode.Tstore;
+    Opcode.Mcopy;
+    Opcode.Blobhash;
+    Opcode.Blobbasefee;
+  ]
+
+(* Does [spec] refuse [op] for want of the fork that introduced it? The fork test
+   comes first so the list is scanned only on a chain still below Cancun; on a
+   Cancun-or-later block — every block of the testnet chain — the cost of the
+   gate is one comparison per instruction. *)
+let not_activated_at spec op =
+  (not (Spec.is_enabled spec ~from:Spec.Cancun))
+  && List.exists (Opcode.equal op) cancun_instructions
+
 let rec execute env code depth m = function
   | Opcode.Stop -> Halt (Stopped { gas_left = m.gas; effects = m.effects })
   | Opcode.Add -> binary Alu.add m
@@ -1151,10 +1184,19 @@ let rec execute env code depth m = function
   | Opcode.Selfdestruct -> selfdestruct env m
   | Opcode.Blockhash -> blockhash env m
 
-(* One instruction: decode the byte at the program counter, charge the fixed
-   price before running it — so an instruction that then fails on its operands
-   has still paid, as in revm — and dispatch. A byte naming no instruction halts
-   the machine; so does an allowance that cannot pay for one.
+(* One instruction: decode the byte at the program counter, refuse it if the
+   block's fork level has not activated it yet, charge the fixed price before
+   running it — so an instruction that then fails on its operands has still
+   paid, as in revm — and dispatch. A byte naming no instruction halts the
+   machine; so does one naming an instruction from a later fork, and so does an
+   allowance that cannot pay for one.
+
+   The activation gate sits BEFORE the charge because that is where revm puts
+   it: [check!] is the first statement of each gated instruction's body and
+   [gas!] the second, so a pre-Cancun frame too poor to pay for [TLOAD] is
+   refused for the fork and not for the price. Both are exceptional halts that
+   forfeit the whole allowance, so the order is a diagnostic rather than a
+   semantic, but a diagnostic should be true.
 
    0xEF must STAY among the bytes naming no instruction. A delegation
    designator's bytes are handed over as executable code whenever they end up
@@ -1171,9 +1213,12 @@ and step env code depth m =
   let byte = Code.byte_at code m.pc in
   Option.fold ~none:(Halt (Failed (Invalid_opcode byte)))
     ~some:(fun op ->
-      Option.fold ~none:(Halt (Failed Out_of_gas))
-        ~some:(fun gas -> execute env code depth { m with gas } op)
-        (Gas.charge (Gas.static_cost op) m.gas))
+      if not_activated_at (Env.Block.spec (Env.block env)) op then
+        Halt (Failed (Not_activated byte))
+      else
+        Option.fold ~none:(Halt (Failed Out_of_gas))
+          ~some:(fun gas -> execute env code depth { m with gas } op)
+          (Gas.charge (Gas.static_cost op) m.gas))
     (Opcode.decode byte)
 
 (* The dispatch loop. Every instruction that continues costs at least one unit of

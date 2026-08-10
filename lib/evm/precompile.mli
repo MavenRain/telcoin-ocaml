@@ -6,12 +6,24 @@ open Tn_types
     addresses and runs the built-in instead of entering a sub-frame, which is
     why the dispatch lives beside the interpreter rather than in the world state.
 
-    Ground truth is [revm-precompile 32.0.0] at the Prague spec (reth v1.11.3):
-    the four Frontier/Homestead builtins, Berlin's repriced [MODEXP] (EIP-2565)
-    and Istanbul's [BLAKE2F] (EIP-152). The result is reported abstractly so the
-    interpreter can turn it into an outcome without knowing which precompile ran:
-    a success carries its gas and output, a rejection carries neither because the
-    call then forfeits the whole forwarded allowance. *)
+    Ground truth is [revm-precompile] at reth v1.11.3: the four
+    Frontier/Homestead builtins, Berlin's repriced [MODEXP] (EIP-2565) and
+    Istanbul's [BLAKE2F] (EIP-152). Every body implemented here is in the
+    BERLIN set, and revm folds [SpecId::SHANGHAI] straight into
+    [PrecompileSpecId::BERLIN] ([src/lib.rs:441]), so Shanghai adds no
+    precompile over Berlin and {!invoke} is INVARIANT across the port's whole
+    fork subset: it takes no {!Spec.t} and needs none. What the later forks add
+    is deferred rather than gated — Cancun's [0x0a] KZG point evaluation and
+    Prague's [0x0b]-[0x11] BLS12-381 set are absent BODIES, missing at every
+    level equally. That is a different debt from an activation gate, and adding
+    a {!Spec.t} argument here would not pay any part of it. This comment long
+    cited the pin as [32.0.0]; only [32.1.0] is vendored, and the line above
+    was read from that (a patch bump, not diffed byte for byte).
+
+    The result is reported abstractly so the interpreter can turn it into an
+    outcome without knowing which precompile ran: a success carries its gas and
+    output, a rejection carries neither because the call then forfeits the
+    whole forwarded allowance. *)
 
 type response =
   | Not_a_precompile

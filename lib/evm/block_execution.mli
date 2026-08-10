@@ -75,25 +75,44 @@ val error_to_string : error -> string
 (** The phase token for "both pre-block system calls have run, in order",
     together with the two dispositions that say what each call decided. *)
 module Pre_block : sig
-  (** What the EIP-4788 consensus-root step did. Three constructors, because
-      "no call was made" has two different causes and a test that cannot tell
-      them apart is not testing the gate. *)
+  (** What the EIP-4788 consensus-root step did. Four constructors, because "no
+      call was made" has three different causes and a test that cannot tell them
+      apart is not testing the gate. They are listed in telcoin's evaluation
+      order, outermost first, which is the order a block tripping more than one
+      of them reports. *)
   type consensus_root =
-    | Root_skipped_at_genesis
-        (** Block zero: telcoin makes no call ([block.rs:643-665]). The genesis
-            rule itself, that the root be zero, is already discharged by
-            {!Block_context.make}. *)
     | Root_skipped_after_first_batch
         (** Not batch zero of this consensus output, so the digest is already
-            written ([block.rs:775-779]). *)
+            written. The outer gate, at the call site ([block.rs:743-745]). *)
+    | Root_skipped_before_cancun
+        (** The block's {!Spec.t} is below {!Spec.Cancun}, so EIP-4788 is not
+            active: telcoin returns [Ok(())] from the first statement of
+            [apply_consensus_root_contract_call] ([block.rs:610-612]) and writes
+            nothing. This is TN mainnet's disposition on every block, since its
+            committed genesis declares [shanghaiTime] alone. The consensus root
+            is still CARRIED by {!Block_context}; what the fork level skips is
+            the call, not the value. *)
+    | Root_skipped_at_genesis
+        (** Block zero: telcoin makes no call ([block.rs:623-632]). Innermost of
+            the three, so it is reported only by a first-batch block at Cancun or
+            above. The genesis rule itself, that the root be zero, is already
+            discharged by {!Block_context.make}. *)
     | Root_written of System_call.outcome
         (** The EIP-4788 call ran, and this is what it produced. *)
 
-  (** What the EIP-2935 blockhashes step did. Two constructors and not three:
-      genesis is its only skip, because it carries no [first_batch] gate. *)
+  (** What the EIP-2935 blockhashes step did. Three constructors and not four:
+      it carries no [first_batch] gate, so its fork level and block zero are its
+      only two skips. *)
   type blockhashes =
+    | Hash_skipped_before_prague
+        (** The block's {!Spec.t} is below {!Spec.Prague}, so EIP-2935 is not
+            active: telcoin returns [Ok(())] from the first statement of
+            [apply_blockhashes_contract_call] ([block.rs:665-667]). A Cancun
+            block therefore writes the beacon root and NOT the block-hash
+            history, which is the one disposition pair no single fork gate can
+            produce. *)
     | Hash_skipped_at_genesis
-        (** Block zero: telcoin makes no call ([block.rs:698-706]). *)
+        (** Block zero: telcoin makes no call ([block.rs:671-673]). *)
     | Hash_written of System_call.outcome
         (** The EIP-2935 call ran, and this is what it produced. It is NOT
             gated on {!Block_context.first_batch}, which is the whole point of
@@ -124,11 +143,12 @@ val apply_pre_block :
   Tn_state.World_state.t ->
   context:Block_context.t ->
   (Pre_block.t, error) result
-(** Telcoin's [apply_pre_execution_changes] ([block.rs:769-785]) in order: the
+(** Telcoin's [apply_pre_execution_changes] ([block.rs:736-752]) in order: the
     EIP-4788 consensus-root call ONLY when {!Block_context.first_batch}, then
-    the EIP-2935 blockhashes call UNCONDITIONALLY. The order is fixed and the
-    second call is not gated on [first_batch]; a port that gates both writes a
-    different state root on every non-first batch of every consensus output.
+    the EIP-2935 blockhashes call with no [first_batch] gate of its own. The
+    order is fixed and the second call is not gated on [first_batch]; a port that
+    gated both would write a different state root on every non-first batch of
+    every consensus output.
 
     The 4788 payload is the 32 bytes of {!Block_context.consensus_root} into
     {!System_contracts.beacon_roots_address}; the 2935 payload is the 32 bytes
@@ -136,13 +156,15 @@ val apply_pre_block :
     {!System_contracts.history_storage_address}. Both skip at block number zero.
     Neither reads {!Block_context.boundary}.
 
-    The two gates NEST the way telcoin nests them for every block this module
-    can be handed: [first_batch] is the outer gate ([block.rs:775]) and the
-    genesis check lives inside [apply_consensus_root_contract_call]
-    ([block.rs:643-665]). So a block that is both block zero and not the first
-    batch reports {!Pre_block.Root_skipped_after_first_batch}, because that is
-    the gate telcoin actually stops at, and both dispositions agree on the only
-    fact that reaches state, namely that no call was made.
+    The gates NEST the way telcoin nests them for every block this module can be
+    handed, and each step reports the OUTERMOST gate it stopped at:
+    [first_batch] is the outer gate, at the call site ([block.rs:743-745]); the
+    fork test is the first statement of each callee ([block.rs:610-612] for 4788,
+    [:665-667] for 2935); the genesis check follows it inside the same callee
+    ([block.rs:623-632], [:671-673]). So a block that is both block zero and not
+    the first batch reports {!Pre_block.Root_skipped_after_first_batch}, because
+    that is the gate telcoin actually stops at, and every skip disposition agrees
+    on the only fact that reaches state, namely that no call was made.
 
     One block telcoin executes cannot reach this module at all, and the
     asymmetry is worth stating rather than glossing. Because the genesis
@@ -158,50 +180,59 @@ val apply_pre_block :
     the refused block is one no TN consensus output can produce, since batch
     index zero is what makes a block number zero in the first place.
 
-    {2 Three upstream steps are deliberately absent}
+    {2 The two hardfork gates, and what is still ungated}
 
-    The two hardfork gates telcoin carries are ABSENT, not skipped. Telcoin
+    Both hardfork gates telcoin carries are PRESENT as of chunk 42. Telcoin
     gates 4788 on [is_cancun_active_at_timestamp] and 2935 on
-    [is_prague_active_at_timestamp] ([block.rs:643, 698]). This port has no
-    fork schedule: it models TN's TESTNET configuration ({!Env} states the
-    fork scope once, [env.mli:26-53]), whose genesis sets [shanghaiTime],
-    [cancunTime] and [pragueTime] all to [0]
-    ([chain-configs/testnet/genesis.yaml:15-17]), so both predicates are true
-    for every block that chain can produce. TN MAINNET's committed genesis
-    carries [shanghaiTime] alone ([chain-configs/mainnet/genesis.yaml:15]), so
-    on mainnet NEITHER predicate holds and this port would make TWO system
-    calls telcoin skips (4788/Cancun gated at [tn-reth/src/evm/block.rs:643-645],
-    2935/Prague at [:698-700]), and the state roots would diverge from the
-    first block. The check belongs with a fork schedule when one exists, not
-    here.
+    [is_prague_active_at_timestamp] ([block.rs:610, 665]); this module tests the
+    same two levels through {!Spec.is_enabled} on the block's own {!Spec.t},
+    read once as [Env.Block.spec (Block_context.block context)]. The level comes
+    from the chain's {!Fork_schedule.t} by way of {!Env.Block}, so the three
+    reachable dispositions are a fact about the chain rather than about this
+    module: TN mainnet's committed genesis carries [shanghaiTime] alone
+    ([chain-configs/mainnet/genesis.yaml:15]), so a mainnet block skips BOTH
+    calls; the testnet genesis sets [shanghaiTime], [cancunTime] and
+    [pragueTime] all to [0] ([chain-configs/testnet/genesis.yaml:15-17]), so a
+    testnet block makes both. A Cancun block makes the first and skips the
+    second. Before this gate landed, a mainnet block would have made two system
+    calls telcoin skips and diverged on the state root from block one.
 
-    That absence is wider than these two calls, and the inventory is the
-    worklist such a spec chunk would inherit. The port's unconditional
-    post-Shanghai behaviour spans four mechanically distinct activation
+    The rest of the activation inventory is gated at its own use site, and what
+    remains ungated is recorded here rather than left to be rediscovered. The
+    port's fork-varying behaviour spans four mechanically distinct activation
     layers:
 
-    - {e Opcode dispatch}, where decodability IS the activation mechanism:
-      [TLOAD]/[TSTORE]/[MCOPY] decode unconditionally ([opcode.ml:260-262])
-      and are priced flat ([gas.ml:89, 116]), and [SELFDESTRUCT] applies
-      EIP-6780's Cancun rule ([effects.ml:249-265]). There is nowhere to
-      deactivate them short of a spec parameter on the interpreter.
-    - {e Transaction validation}: the EIP-7623 floor ([intrinsic.ml:43],
-      checked at [executor.ml:283]), EIP-3651's warm coinbase
-      ([executor.ml:359]), and the 25000-per-authorization intrinsic term
-      ([intrinsic.ml:26-37]) with the type-4 envelope acceptance behind it.
-    - {e Block execution}: the two system calls above
-      ([block_execution.ml:82-111], [system_contracts.ml]), the 21-field
-      post-Prague header ([block_header.mli:230-235], which must NOT shrink;
-      the do-not-narrow note there says why), and the Prague precompile set
-      ([precompile.mli:9]).
-    - {e TN's own Rust}, where the gates are on ChainSpec TIMESTAMP
-      activation rather than on [SpecId] ([block.rs:643-645], [:698-700]), a
-      fourth mechanism a [SpecId] ladder alone would not even reach.
+    - {e Opcode dispatch}: [TLOAD]/[TSTORE]/[MCOPY] and [BLOBHASH]/[BLOBBASEFEE]
+      still DECODE at every level ([opcode.ml:266-268]) and are still priced flat
+      ([gas.ml:97, 126]) — decodability is not the activation mechanism here.
+      Activation is {!Interpreter.Not_activated}, a halt distinct from
+      {!Interpreter.Invalid_opcode}, so the priced sites are simply unreachable
+      below Cancun. [SELFDESTRUCT] applies EIP-6780's Cancun rule at Cancun and
+      above and the full pre-6780 destruction below it
+      ({!Effects.commit_destruction}).
+    - {e Transaction validation}: the EIP-7623 floor is installed at Prague and
+      is zero below it ([intrinsic.ml:43], {!Executor.execute}), and a type-4
+      envelope is refused below Prague with {!Executor.Eip7702_not_activated},
+      which is what makes the 25000-per-authorization intrinsic term
+      ([intrinsic.ml:26-37]) unreachable there rather than separately gated.
+      EIP-3651's warm coinbase needs no gate: it is Shanghai's, the floor of
+      {!Spec.t}.
+    - {e Block execution}: the two system calls above, the warm precompile set
+      ({!Executor}), and the 21-field post-Prague header
+      ([block_header.mli:287-342], which must NOT shrink; the do-not-narrow note
+      there says why, and says it is fork-INDEPENDENT upstream). The Prague
+      precompile BODIES ([precompile.mli:9-11]) are still absent, which is a
+      deferral rather than a gate.
+    - {e TN's own Rust}, where the gates are on ChainSpec TIMESTAMP activation
+      rather than on [SpecId] ([block.rs:610-612], [:665-667]). {!Fork_schedule}
+      is the port's image of that mechanism: activation timestamps, compared
+      against the block's own timestamp, rather than a level handed down.
 
-    Telcoin's [set_state_clear_flag] ([block.rs:771-773]) has no counterpart
-    either: EIP-161 pruning is unconditional here, because
+    Telcoin's [set_state_clear_flag] ([block.rs:738-740]) has no counterpart
+    either, and needs none: EIP-161 pruning is unconditional here, because
     {!Tn_state.World_state.set_account} prunes an {!Tn_state.Account.is_absent}
-    account ([world_state.ml:16-17]) and there is no flag to turn that off.
+    account ([world_state.ml:16-17]) and there is no flag to turn that off. The
+    flag is Spurious-Dragon-gated upstream, which every {!Spec.t} is above.
 
     {2 The fee accounting is telcoin's}
 

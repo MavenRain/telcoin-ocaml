@@ -41,12 +41,16 @@ let error_to_string = function
   | Epoch_close e -> "epoch close: " ^ Epoch_close.error_to_string e
 
 module Pre_block = struct
+  (* The three skips are declared in telcoin's own evaluation order, outermost
+     first, so the sum reads as the gate ladder it reports on. *)
   type consensus_root =
-    | Root_skipped_at_genesis
     | Root_skipped_after_first_batch
+    | Root_skipped_before_cancun
+    | Root_skipped_at_genesis
     | Root_written of System_call.outcome
 
   type blockhashes =
+    | Hash_skipped_before_prague
     | Hash_skipped_at_genesis
     | Hash_written of System_call.outcome
 
@@ -74,34 +78,57 @@ let ( let* ) = Result.bind
 let output_digest_bytes root =
   Digest.to_bytes (Digests.Output_digest.to_digest root)
 
-(* The EIP-4788 step. The pair scrutinee makes the nesting explicit and keeps
-   the match exhaustive over the product of two booleans with no wildcard:
-   [first_batch] is telcoin's OUTER gate ([block.rs:775]) and the genesis check
-   lives inside the call it guards ([block.rs:643-665]), so a block that is
-   both reports the outer reason. *)
+(* The block's fork level, read from the one environment the context carries, so
+   the two steps below and every frame of every transaction agree on it by
+   construction rather than by two lookups that could drift. *)
+let spec_of context = Env.Block.spec (Block_context.block context)
+
+(* The EIP-4788 step. Three gates in telcoin's own nesting order, each one
+   scrutinized as a boolean with no wildcard, so a block that trips more than one
+   reports the OUTERMOST reason:
+
+   1. [first_batch] is the outer gate, at the call site ([block.rs:742-746]);
+   2. the Cancun test is the first statement of the callee ([block.rs:610-612],
+      "return Ok(())" when it fails);
+   3. the genesis check follows it inside the same callee ([block.rs:623-632]).
+
+   The pair scrutinee carries the first two and the genesis check nests under
+   them, which is the order telcoin evaluates and therefore the order a
+   disposition must report. *)
 let consensus_root_step world ~context =
+  let spec = spec_of context in
   match
-    (Block_context.first_batch context, Block_context.is_genesis context)
+    (Block_context.first_batch context, Spec.is_enabled spec ~from:Spec.Cancun)
   with
   | false, false | false, true ->
       Ok (world, Pre_block.Root_skipped_after_first_batch)
-  | true, true -> Ok (world, Pre_block.Root_skipped_at_genesis)
-  | true, false ->
-      System_call.run world
-        ~block:(Block_context.block context)
-        ~contract:System_contracts.beacon_roots_address
-        ~data:(output_digest_bytes (Block_context.consensus_root context))
-      |> Result.map_error (fun e -> Consensus_root_call e)
-      |> Result.map (fun outcome ->
-             (System_call.world outcome, Pre_block.Root_written outcome))
+  | true, false -> Ok (world, Pre_block.Root_skipped_before_cancun)
+  | true, true -> (
+      match Block_context.is_genesis context with
+      | true -> Ok (world, Pre_block.Root_skipped_at_genesis)
+      | false ->
+          System_call.run world
+            ~block:(Block_context.block context)
+            ~contract:System_contracts.beacon_roots_address
+            ~data:(output_digest_bytes (Block_context.consensus_root context))
+          |> Result.map_error (fun e -> Consensus_root_call e)
+          |> Result.map (fun outcome ->
+                 (System_call.world outcome, Pre_block.Root_written outcome)))
 
-(* The EIP-2935 step. Genesis is its only gate: it is NOT gated on
-   [first_batch] ([block.rs:782-784]), and the calldata is the parent hash
-   rather than the consensus digest. *)
+(* The EIP-2935 step. Two gates and not three: it is NOT gated on [first_batch]
+   ([block.rs:749]), and the calldata is the parent hash rather than the
+   consensus digest. The Prague test comes first ([block.rs:665-667]) and the
+   genesis check second ([block.rs:671-673]), the same shape as the step above
+   with the outer gate removed. *)
 let blockhashes_step world ~context =
-  match Block_context.is_genesis context with
-  | true -> Ok (world, Pre_block.Hash_skipped_at_genesis)
-  | false ->
+  let spec = spec_of context in
+  match
+    (Spec.is_enabled spec ~from:Spec.Prague, Block_context.is_genesis context)
+  with
+  | false, false | false, true ->
+      Ok (world, Pre_block.Hash_skipped_before_prague)
+  | true, true -> Ok (world, Pre_block.Hash_skipped_at_genesis)
+  | true, false ->
       System_call.run world
         ~block:(Block_context.block context)
         ~contract:System_contracts.history_storage_address

@@ -712,11 +712,19 @@ let root_disposition b =
   | Block_execution.Pre_block.Root_skipped_at_genesis -> "skipped at genesis"
   | Block_execution.Pre_block.Root_skipped_after_first_batch ->
       "skipped after the first batch"
+  | Block_execution.Pre_block.Root_skipped_before_cancun ->
+      "skipped before cancun"
   | Block_execution.Pre_block.Root_written _ -> "written"
 
+(* The two [before_] arms are chunk 42's fork skips. This engine runs on the
+   default schedule, which activates every fork at zero, so no block here can
+   report one; they are named rather than wildcarded so a schedule change would
+   show up as a wrong string instead of as silence. *)
 let hash_disposition b =
   match Block_execution.Pre_block.blockhashes (Executed_block.pre_block b) with
   | Block_execution.Pre_block.Hash_skipped_at_genesis -> "skipped at genesis"
+  | Block_execution.Pre_block.Hash_skipped_before_prague ->
+      "skipped before prague"
   | Block_execution.Pre_block.Hash_written _ -> "written"
 
 let t12 () =

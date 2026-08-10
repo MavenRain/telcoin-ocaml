@@ -8,9 +8,16 @@
     step budget, no loop detection and no timeout is needed; the fuel {e is} the
     termination argument.
 
-    Costs are those of revm's schedule at Cancun and Prague (the named tiers
-    [ZERO], [BASE], [VERYLOW], [LOW], [MID], [HIGH] and [JUMPDEST] are 0, 2, 3,
-    5, 8, 10 and 1). Several instructions cost more than their fixed price:
+    Costs are those of revm's schedule across the port's whole fork subset,
+    Shanghai through Prague (the named tiers [ZERO], [BASE], [VERYLOW], [LOW],
+    [MID], [HIGH] and [JUMPDEST] are 0, 2, 3, 5, 8, 10 and 1). Nothing this
+    module prices moves with the block's {!Spec.t}, and no function below takes
+    a fork as an argument: the entries that DO vary over the subset are gated
+    at their use sites instead — the EIP-7623 calldata floor and the
+    Cancun-warm precompile addresses in {!Executor}, and the Cancun instruction
+    set by the interpreter's activation halt, which makes the prices of those
+    instructions unreachable below Cancun rather than different. Several
+    instructions cost more than their fixed price:
     [EXP] pays {!exp_cost} for the size of its exponent, every instruction that
     touches memory pays {!expansion_cost} for the words it makes the frame reach,
     the copying instructions pay {!copy_cost} per word moved, and the
@@ -288,8 +295,11 @@ val call_value_cost : word -> int
 val new_account_cost : value:word -> int
 (** The [NEWACCOUNT] surcharge for bringing an account into existence by sending
     it value: 25000 when the value is nonzero, nothing when it is zero
-    ([cfg/gas.rs:38]). At Prague [is_spurious_dragon] always holds, so EIP-161
-    collapses [new_account_cost] to this value gate ([gas_params.rs:595-603]).
+    ([cfg/gas.rs:38]). [is_spurious_dragon] holds at EVERY level of {!Spec.t},
+    not only at the highest one, because the subset's floor is Shanghai and
+    Spurious Dragon is far below it, so EIP-161 collapses [new_account_cost] to
+    this value gate on every chain this port can describe
+    ([gas_params.rs:595-603]).
 
     The interpreter adds it {e only} for [CALL], and only when the callee is
     {!Account.is_empty} ([call_helpers.rs:158], [contract.rs:145]); the gate on

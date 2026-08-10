@@ -59,6 +59,41 @@
     rejecting: a halt is a committed outcome that burns the whole gas limit, while
     a rejection changes nothing at all.
 
+    {2 What the fork level changes here}
+
+    {!execute} reads the block's {!Spec.t} through {!Env.Block.spec} and three of
+    its steps answer differently below Prague and below Cancun. Two are
+    activation gates over figures: no step is skipped, no step changes shape, and
+    the numbers they produce are the ones the corresponding revm table holds at
+    that fork. The third refuses a transaction type outright.
+
+    - The EIP-7623 calldata floor is installed at {!Spec.Prague}. Below it the
+      floor is zero, which makes {!Gas_floor_above_limit} unreachable (no
+      allowance is under zero) and makes the floor's own comparison in
+      post-execution false (the EIP-3529 cap keeps a refund at or under a fifth
+      of the spend, so the net spend is never negative). A transaction with more
+      calldata than execution therefore pays its intrinsic cost on a Shanghai or
+      Cancun block and the larger floor on a Prague one.
+    - The warm precompile set is [0x01..0x09] at {!Spec.Shanghai} and
+      [0x01..0x0a] at {!Spec.Cancun} and above, since EIP-4844's
+      point-evaluation precompile arrives with Cancun. So a first touch of
+      [0x0a] costs the 2600-unit cold account access on a mainnet block and 100
+      on a testnet one. Prague's EIP-2537 BLS addresses [0x0b..0x11] stay
+      unwarmed at every level while {!Precompile} has no body for them; that
+      approximation predates the fork schedule and is unobservable unless
+      executed code touches one.
+    - A type-4 (EIP-7702) set-code transaction is REFUSED below {!Spec.Prague}
+      with {!Eip7702_not_activated}, in validation and before any state moves,
+      so a mainnet block includes no delegation and a testnet block is unchanged.
+      This is the one gate here that changes which transactions a block can
+      contain rather than what one of them costs.
+
+    Everything else in this module is spec-invariant, including the intrinsic
+    charge, the EIP-3529 cap, EIP-3607, EIP-3860's initcode limit and the whole
+    telcoin fee split. The instruction-level gates belong to {!Interpreter}
+    ({!Interpreter.Not_activated}), and the pre-block system calls to
+    {!Block_execution}.
+
     {2 Scope and the deferred set}
 
     The scope is the shared path for Legacy, EIP-2930, EIP-1559 and, since
@@ -88,15 +123,15 @@
     [journal/inner.rs:466-484]) and are undone only by whole-transaction
     rejection ([journal/inner.rs:145-147]).
 
-    One error constructor is deliberately ABSENT. A [Set_code_not_supported]
-    (revm's [Eip7702NotSupported]) exists upstream only behind the [SpecId]
-    gate ([validation.rs:191-195]) that this port does not carry: it models
-    the testnet fork level, where the gate always passes ({!Env} states the
-    fork scope once, [env.mli:26-53]). A future spec chunk would put that
-    rejection at the head of {!execute}'s type-4 validation arm, before
-    {!Empty_authorization_list}, because the error order is observable
-    upstream: pre-Prague plus an empty list is [Eip7702NotSupported], never
-    [EmptyAuthorizationList] ([validation.rs:191-204]).
+    The rejection that guards all of this is {!Eip7702_not_activated}, revm's
+    [Eip7702NotSupported] behind the [SpecId] gate at [validation.rs:191-195].
+    It sits at the head of {!execute}'s type-4 validation arm, before
+    {!Priority_fee_above_max_fee} and before {!Empty_authorization_list},
+    because the error order is observable upstream: pre-Prague plus an empty
+    list is [Eip7702NotSupported], never [EmptyAuthorizationList]
+    ([validation.rs:191-204]). Below Prague the whole authorization apparatus
+    above is therefore unreachable rather than separately disabled, which is why
+    the 25000-per-entry intrinsic term carries no fork test of its own.
 
     EIP-161 touched-empty-account pruning is honored by construction: every credit
     and every transfer goes through {!Tn_state.World_state.set_account}, which
@@ -119,6 +154,15 @@ type error =
   | Priority_fee_above_max_fee
       (** An EIP-1559 or EIP-7702 transaction's priority fee exceeds its max
           fee. *)
+  | Eip7702_not_activated
+      (** A type-4 (EIP-7702) set-code transaction on a block below
+          {!Spec.Prague} ([Eip7702NotSupported], [validation.rs:191-195]). It
+          gates the transaction TYPE, not the authorization list: revm selects
+          the arm on [TransactionType::Eip7702] and tests the spec as the arm's
+          first statement, so this wins over {!Priority_fee_above_max_fee} and
+          over {!Empty_authorization_list} for the same transaction. Unreachable
+          on a Prague block, and the only rejection TN mainnet has that TN
+          testnet does not. *)
   | Empty_authorization_list
       (** An EIP-7702 set-code transaction carries no authorizations
           ([EmptyAuthorizationList], [validation.rs:191-204]). The one
@@ -136,7 +180,9 @@ type error =
           ([CallGasCostMoreThanGasLimit]). *)
   | Gas_floor_above_limit
       (** The EIP-7623 floor exceeds the gas limit
-          ([GasFloorMoreThanGasLimit]). *)
+          ([GasFloorMoreThanGasLimit]). Reachable only on a {!Spec.Prague}
+          block: below Prague the floor is zero and no allowance is under
+          zero. *)
   | Sender_has_code
       (** EIP-3607: the sender holds code that is neither empty nor an EIP-7702
           delegation designator ([pre_execution.rs:92-102]). A delegated sender
