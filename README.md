@@ -351,11 +351,20 @@ are noted.
     deploy code at last
 25. ✅ the Prague precompile set (`tn_evm.Precompile`): `ECRECOVER` (`0x01`),
     `SHA256` (`0x02`), `RIPEMD160` (`0x03`), `IDENTITY` (`0x04`), `MODEXP` (`0x05`,
-    EIP-2565 repricing) and `BLAKE2F` (`0x09`), dispatched on the callee address
+    EIP-2565 repricing), the bn254 curve builtins ecAdd (`0x06`), ecMul (`0x07`)
+    and ecPairing (`0x08`, chunk 43, on the `Bn254_field` tower, the
+    `Bn254_curve` groups and the `Bn254_pairing` optimal ate pairing, at the
+    Istanbul prices of EIP-1108 with no fork gate, because the port's fork floor
+    is Shanghai), and `BLAKE2F` (`0x09`), dispatched on the callee address
     from the `CALL` family and reported abstractly (`Succeeded`/`Rejected`/
     `Not_a_precompile`) so the interpreter turns a builtin into an outcome without
-    knowing which ran. The bn254 pair (`0x06`-`0x08`), KZG point evaluation
-    (`0x0a`) and the BLS12-381 range are deferred to their own chunks and answer
+    knowing which ran. Every bn254 failure, a coordinate at or above the field
+    modulus, a point off its curve, a `G2` point outside the `r`-order subgroup
+    and a pairing input that is not a whole number of 192-byte elements alike, is
+    the one `Rejected`, which forfeits the whole forwarded allowance; 28 golden
+    rows captured from `revm-precompile` pin the accept/reject set, the gas and
+    the output bytes. The KZG point evaluation (`0x0a`) and the BLS12-381 range
+    are deferred to their own chunks and answer
     `Not_a_precompile`, running the (empty) account code exactly as before
 26. ✅ the transaction executor (`tn_evm`: `Transaction`, `Intrinsic`, `Receipt`,
     `Executor`): the Prague single-transaction state transition of revm's

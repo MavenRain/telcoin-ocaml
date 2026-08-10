@@ -24,7 +24,7 @@ let slice_padded s off len =
       if j >= 0 && j < String.length s then s.[j] else '\000')
 
 (* [s] fitted to exactly [len] bytes: zero-padded on the right when short, and
-   truncated when long — revm's variable [right_pad_vec] ([data.get(..len)]),
+   truncated when long: revm's variable [right_pad_vec] ([data.get(..len)]),
    which discards any trailing calldata past the declared header lengths. *)
 let right_pad s len =
   if String.length s >= len then String.sub s 0 len
@@ -38,7 +38,7 @@ let z_of_be s =
     Z.zero s
 
 (* The minimal big-endian encoding of [z] (no leading zero bytes; empty for
-   zero), left-padded with zero bytes to at least [len] — revm's [left_pad_vec]
+   zero), left-padded with zero bytes to at least [len]: revm's [left_pad_vec]
    over the modexp result, which keeps a result wider than the declared length. *)
 let left_pad_be z len =
   let minimal_len = (Z.numbits z + 7) / 8 in
@@ -82,7 +82,7 @@ let ripemd160 ~input ~gas_limit =
 
 (* Flat 3000 gas. The 128-byte input is [msg | v | r | s]; [v] must be a 32-byte
    integer equal to 27 or 28. Malformed [v], or a signature that recovers no
-   key, is a genuine success with empty output — only insufficient gas rejects.
+   key, is a genuine success with empty output: only insufficient gas rejects.
    The recovered address is [keccak256(pubkey)[12..]] widened to a 32-byte word. *)
 let ecrecover ~input ~gas_limit =
   let gas_used = 3000 in
@@ -194,6 +194,106 @@ let modexp ~input ~gas_limit =
         Succeeded { gas_used; output = left_pad_be result ml }
 
 (* ------------------------------------------------------------------ *)
+(* 0x06 BN254 ADD, 0x07 BN254 MUL, 0x08 BN254 PAIRING                  *)
+(* (Istanbul prices, EIP-1108)                                         *)
+(* ------------------------------------------------------------------ *)
+
+module G1 = Bn254_curve.G1
+module G2 = Bn254_curve.G2
+
+(* EIP-1108 repriced all three builtins at Istanbul, down from 500, 40_000 and
+   100_000 + 80_000 per element. Every fork this port can express is Istanbul or
+   later, because the floor is Shanghai, so the prices are constants here and
+   take no spec argument. *)
+let bn254_add_gas = 150
+let bn254_mul_gas = 6_000
+let bn254_pair_base_gas = 45_000
+let bn254_pair_per_point_gas = 34_000
+
+(* One ecPairing element is a G1 point then a G2 point: 64 + 128 bytes. *)
+let bn254_pair_element_len = 192
+
+(* The 64-byte point at a fixed offset of the shaped input. [slice_padded] is
+   revm's fixed-width [right_pad::<LEN>]: a short input zero-extends on the
+   right, and a long one truncates, because no byte past the declared length
+   (128 on add, 96 on mul) is ever read. *)
+let g1_at input off = G1.decode (slice_padded input off 64)
+
+(* The gas gate fires BEFORE any input is inspected, so an under-funded call is
+   rejected whatever its bytes hold (bn254.rs:156-158). Past the gate every way
+   the decode can fail, a coordinate at or above the modulus and a point off the
+   curve alike, is the one [Rejected], which forfeits the whole forwarded
+   allowance at the call seam. The sum of two points is always defined, so the
+   only [None] the fold sees comes from the two decodes. *)
+let ecadd ~input ~gas_limit =
+  if bn254_add_gas > gas_limit then Rejected
+  else
+    Option.fold ~none:Rejected
+      ~some:(fun output -> Succeeded { gas_used = bn254_add_gas; output })
+      (Option.bind (g1_at input 0) (fun p ->
+           Option.map (fun q -> G1.encode (G1.add p q)) (g1_at input 64)))
+
+(* The scalar is the raw third word reduced modulo r, and it is never rejected:
+   arkworks reads it with [Fr::from_be_bytes_mod_order] (arkworks.rs:165-180).
+   [Z.erem] answers a non-negative residue, so [G1.mul] cannot report [None]
+   here; the fold maps that dead arm onto the same rejection regardless. *)
+let ecmul ~input ~gas_limit =
+  if bn254_mul_gas > gas_limit then Rejected
+  else
+    let k = Z.erem (z_of_be (slice_padded input 64 32)) Bn254_curve.r in
+    Option.fold ~none:Rejected
+      ~some:(fun output -> Succeeded { gas_used = bn254_mul_gas; output })
+      (Option.map G1.encode (Option.bind (g1_at input 0) (G1.mul k)))
+
+(* The 128-byte G2 point at a fixed offset. As with [g1_at], the read is total:
+   a short input zero-extends, and the length check below has already fixed how
+   many elements exist. *)
+let g2_at input off = G2.decode (slice_padded input off 128)
+
+(* Every element decoded, or [None] as soon as one of them is malformed. Both
+   points of an element are parsed before either is inspected, which is the
+   arkworks order (arkworks.rs:224-225): a decode error rejects the whole call
+   even when that element would have been dropped as a point at infinity. The
+   accumulated list is in reverse wire order, which the check cannot see: it
+   folds a product in a commutative field. *)
+let bn254_pairs input elements =
+  List.fold_left
+    (fun acc i ->
+      Option.bind acc (fun decoded ->
+          let off = i * bn254_pair_element_len in
+          Option.bind (g1_at input off) (fun p ->
+              Option.map
+                (fun q -> (p, q) :: decoded)
+                (g2_at input (off + 64)))))
+    (Some []) (List.init elements Fun.id)
+
+(* The 32-byte answer word: 31 zero bytes then the bit. revm writes the boolean
+   through its 32-byte word encoder (utilities.rs:106-114), never as a bare
+   byte. *)
+let bn254_pair_output ok = String.make 31 '\000' ^ if ok then "\001" else "\000"
+
+(* The element count is the FLOOR of the length over 192, and the gas gate reads
+   it BEFORE the length is validated (bn254.rs:191-198), so a trailing partial
+   element is charged as if it were absent and only then refused. Both orders
+   surface as one [Rejected] here, but the count is what the successful rows
+   price, so it is computed the way revm computes it. The divisor is a positive
+   literal, so the division is total. *)
+let ecpairing ~input ~gas_limit =
+  let elements = String.length input / bn254_pair_element_len (* @total-accessor *) in
+  let gas_used = bn254_pair_base_gas + (bn254_pair_per_point_gas * elements) in
+  if gas_used > gas_limit then Rejected
+  else if String.length input <> elements * bn254_pair_element_len then Rejected
+  else
+    Option.fold ~none:Rejected
+      ~some:(fun pairs ->
+        Succeeded
+          {
+            gas_used;
+            output = bn254_pair_output (Bn254_pairing.pairing_check pairs);
+          })
+      (bn254_pairs input elements)
+
+(* ------------------------------------------------------------------ *)
 (* 0x09 BLAKE2F (EIP-152)                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -268,6 +368,9 @@ let invoke address ~input ~gas_limit =
       | 3 -> ripemd160 ~input ~gas_limit
       | 4 -> identity ~input ~gas_limit
       | 5 -> modexp ~input ~gas_limit
+      | 6 -> ecadd ~input ~gas_limit
+      | 7 -> ecmul ~input ~gas_limit
+      | 8 -> ecpairing ~input ~gas_limit
       | 9 -> blake2f ~input ~gas_limit
       | _ -> Not_a_precompile)
     (W.to_int (Address_word.to_word address))
