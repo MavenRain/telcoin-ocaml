@@ -1,0 +1,18 @@
+; The pure slice of telcoin-network's p2p layer: wire framing, message
+; codecs and the pure state machines that sit behind them. Placement follows
+; the chunk-44 ground truth's layering recommendation (GT:1017, dune
+; convention GT:977): this library sits ABOVE tn_consensus the way tn_sim
+; does, so Node.command and Node.event are consumed here and never modified
+; there. Nothing below this library names it, so the graph stays acyclic.
+(library
+ (name tn_network)
+ (public_name telcoin_ocaml.network)
+ ; tn_crypto is DIRECT here because the wire leaf codecs rebuild the port's
+ ; digest newtypes out of 32 wire bytes (Digests.*.of_digest takes a
+ ; Tn_crypto.Digest.t), exactly as lib/vertex/header.ml does. The BLS key and
+ ; signature FIELDS deliberately do not go through the seam: their wire widths
+ ; are 96 and 48 bytes, a property of the Rust wire rather than of whichever
+ ; crypto seam is linked, so they are opaque byte newtypes here and convert at
+ ; the ingress boundary only.
+ (libraries tn_std tn_codec tn_snappy tn_types tn_crypto tn_vertex
+   tn_consensus))

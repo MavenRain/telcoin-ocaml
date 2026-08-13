@@ -12,6 +12,25 @@ type t
 val sign : Tn_crypto.Secret_key.t -> voter:Authority_id.t -> Header.t -> t
 (** Produce [voter]'s vote on a header, signing the intent-wrapped digest. *)
 
+val claim :
+  header_digest:Digests.Header_digest.t ->
+  round:Round.t ->
+  epoch:Units.Epoch.t ->
+  origin:Authority_id.t ->
+  author:Authority_id.t ->
+  signature:string ->
+  t option
+(** Wire ingress: assemble a vote out of fields that arrived from a peer,
+    WITHOUT verifying anything, the way [Batch.Sealed.claim] (batch.mli:106)
+    pairs a batch with a claimed digest. Chunk 44's [Vote_wire] decoder is the
+    only intended caller.
+
+    [signature] is the crypto seam's own signature encoding, and the result is
+    [None] when the seam refuses it, so no [Vote.t] can hold a signature field
+    that is not a signature. That is the ONLY check: whether the signature is
+    [author]'s over this digest stays with {!verify}, and a caller that skips
+    {!verify} is holding an unverified claim by construction. *)
+
 val signing_message : Digests.Header_digest.t -> string
 (** The exact byte string a vote signs for a given header digest:
     [Intent.wrap Consensus_vote (0x20 :: digest bytes)], the BCS

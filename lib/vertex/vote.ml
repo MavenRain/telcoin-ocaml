@@ -25,6 +25,11 @@ let sign sk ~voter header =
     signature = Tn_crypto.sign sk (signing_message hd);
   }
 
+let claim ~header_digest ~round ~epoch ~origin ~author ~signature =
+  Option.map
+    (fun signature -> { header_digest; round; epoch; origin; author; signature })
+    (Tn_crypto.Signature.of_bytes signature)
+
 let header_digest t = t.header_digest
 let round t = t.round
 let epoch t = t.epoch

@@ -526,7 +526,23 @@ Research done up front, since the full-node path depends on what exists:
 - **libp2p** — no mature native OCaml implementation. The Rust node's 18.7k-line
   `network-libp2p` is the single hardest piece to replace; options are a native
   implementation or a C/Go wrapper. The slice sidesteps this behind the
-  simulator.
+  simulator. **Chunk 44 closes the part of it that is not libp2p at all.**
+  `tn_network` now holds the pure slice: the
+  `[u32 LE len][u32 LE compressed_len][snappy(bcs)]` wire envelope, a
+  from-scratch roaring-bitmap codec, wire codecs for every primary, worker and
+  bulk-sync message (including `Certificate` and `Vote`, which had none), the
+  protocol-id and gossip-topic strings, the gossipsub message-id rule and
+  acceptance/penalty decisions, the sync chunking constants and folds, and the
+  three reassembly validators, plus `tn_snappy`, a hand-rolled pure OCaml
+  Snappy (raw block, stream framing and CRC-32C), the same call the `blake3`
+  kernel got and still zero new opam dependencies. Everything is checked
+  byte-for-byte against a Rust oracle in both directions. What is left is the
+  genuinely libp2p-shaped part, and `PORTING.md`'s `Tn_network` row names it:
+  transport/swarm/negotiation, the gossip mesh runtime, the peer manager and
+  banning, the kad runtime, req-res correlation, every timer, the
+  admission-control runtime, and the storage-backed sources. `Tn_consensus.Node`
+  is untouched; `Tn_network.Wire` is the translation table onto it, and every
+  wire surface with no `Node` counterpart is named rather than dropped.
 - **EVM** — no production OCaml EVM. Precedent exists (a Lem/Why3-derived EVM in
   OCaml passed the standard VM test suite), but a production interpreter is a
   large sub-project.

@@ -20,6 +20,7 @@ type error =
   | Duplicate_voter
   | Bad_signature
   | Not_enough_stake
+  | Not_genesis
 
 let error_to_string = function
   | Empty -> "no votes supplied"
@@ -28,6 +29,7 @@ let error_to_string = function
   | Duplicate_voter -> "duplicate vote from one authority"
   | Bad_signature -> "vote signature does not verify"
   | Not_enough_stake -> "signers do not reach the quorum threshold"
+  | Not_genesis -> "genesis state on a certificate that is not genesis"
 
 let ( let* ) = Result.bind
 
@@ -98,9 +100,20 @@ let public_keys committee signers =
       | Some a -> Ok (Authority.protocol_key a :: keys))
     signers (Ok [])
 
+(* certificate.rs:236 takes the genesis fast path only when the certificate IS
+   one of [Certificate::genesis(committee)], compared by certified header
+   (round 0, the committee's epoch, one of its authorities as origin). A wire
+   certificate may carry the unit state [Genesis] over ANY header, so the
+   containment is what separates a real genesis certificate from an unsigned
+   claim, and it subsumes the round and epoch tests Rust states separately. *)
+let is_genesis_of committee t =
+  List.exists
+    (fun g -> Digests.Header_digest.equal (Header.digest g.header) (Header.digest t.header))
+    (genesis committee)
+
 let check committee t =
   match t.verification with
-  | Genesis -> Ok ()
+  | Genesis -> if is_genesis_of committee t then Ok () else Error Not_genesis
   | Aggregated agg ->
       let* pks = public_keys committee t.signers in
       if not (Committee.reaches_quorum committee (Committee.stake_of committee t.signers))
@@ -108,6 +121,20 @@ let check committee t =
       else
         let msg = Vote.signing_message (Header.digest t.header) in
         if Tn_crypto.verify_aggregate pks msg agg then Ok () else Error Bad_signature
+
+(* Wire ingress. The four Rust states that carry a signature
+   (Unsigned/Unverified/VerifiedDirectly/VerifiedIndirectly) all land in
+   [Aggregated], because this type keeps only the distinction the protocol
+   needs downstream (the note at the top of this file); the unit state
+   [Genesis] lands in [Genesis]. *)
+let claim ~header ~signers ~aggregate =
+  Option.fold
+    ~none:(Some { header; signers; verification = Genesis })
+    ~some:(fun bytes ->
+      Option.map
+        (fun agg -> { header; signers; verification = Aggregated agg })
+        (Tn_crypto.Aggregate.of_bytes bytes))
+    aggregate
 
 let header t = t.header
 let digest t = Header.digest t.header

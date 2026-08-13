@@ -1,0 +1,8 @@
+; Snappy is generic compression, not network-specific, so it is a leaf
+; library of its own the way tn_keccak and tn_hash32 are: tn_network (chunk
+; 44) sits above it and keeps its own dependency list minimal, and nothing
+; here needs anything above tn_std.
+(library
+ (name tn_snappy)
+ (public_name telcoin_ocaml.snappy)
+ (libraries tn_std))

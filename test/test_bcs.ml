@@ -40,6 +40,24 @@ let check_reject name codec bytes =
       incr failures;
       Printf.printf "FAIL %s: accepted a non-canonical encoding\n" name
 
+(* Rejection with the EXACT message, for the rows where "some error" would be
+   vacuous: a length prefix the port merely fails to have bytes for is refused
+   too, just at a different offset and for a different reason. *)
+let check_error name codec bytes expected =
+  Result.fold
+    ~ok:(fun _ ->
+      incr failures;
+      Printf.printf "FAIL %s: accepted\n" name)
+    ~error:(fun e ->
+      let got = Tn_codec.Bcs.error_to_string e in
+      if String.equal got expected then Printf.printf "ok   %s\n" name
+      else begin
+        incr failures;
+        Printf.printf "FAIL %s\n     got      %s\n     expected %s\n" name got
+          expected
+      end)
+    (Tn_codec.Bcs.decode codec bytes)
+
 let b = Bytes.of_string
 let s = Bytes.to_string
 
@@ -93,6 +111,125 @@ let () =
   check_reject "reject trailing bytes" u8 "\x01\x02";
   check_reject "reject invalid bool" bool "\x02";
   check_reject "reject truncated u32" u32 "\x01\x02";
+
+  (* ---------------------------------------------------------------------
+     Chunk-44 additions: map canonicality, set permissiveness, and the
+     comparator bcs itself sorts map keys by.
+
+     The byte strings below are the chunk-44 oracle harness's own probe rows
+     (`chunk44-oracle bcs-probes`, kept output bcs-probes.txt), run against
+     bcs 0.1.6, the version telcoin-network @ 31cc4e90 pins. They settle a
+     question the ground truth got wrong (GT:26, GT:176): maps are canonical
+     BOTH ways, and sequences are canonical NEITHER way.
+
+       BCSPROBE map_sorted            OK {1: 10, 2: 11}
+       BCSPROBE map_swapped           ERR ... unique and in increasing order
+       BCSPROBE map_duplicate_key     ERR ... unique and in increasing order
+       BCSPROBE hashmap_*             identical verdicts (serde erases the
+                                      HashMap/BTreeMap distinction)
+       BCSPROBE set_unsorted          OK [1, 2]      (accepted and RESORTED)
+       BCSPROBE set_duplicate         OK [1]         (silently collapsed)
+       BCSPROBE map_serializer_sorts  0302bb05cc09aa (ascending by key bytes)
+
+     A strict set decoder would refuse byte strings every Rust node accepts,
+     so the permissive decode is the parity-preserving choice, not laxity. *)
+  let new_cases = ref 0 in
+  let nc f = incr new_cases; f in
+  let byte_map = sorted_map u8 u8 ~compare:Int.compare in
+  let digest_set = btree_set u8 ~compare:Int.compare in
+
+  nc check_decode "map: sorted keys accepted" byte_map "\x02\x01\x0a\x02\x0b"
+    [ (1, 10); (2, 11) ];
+  nc check_reject "map: swapped key order rejected" byte_map
+    "\x02\x02\x0b\x01\x0a";
+  nc check_reject "map: duplicate key rejected" byte_map "\x02\x01\x0a\x01\x0b";
+  nc check "map: encoding sorts by key"
+    (encode byte_map [ (9, 0xaa); (2, 0xbb); (5, 0xcc) ])
+    "\x03\x02\xbb\x05\xcc\x09\xaa";
+
+  nc check_decode "set: ascending elements accepted" digest_set "\x02\x01\x02"
+    [ 1; 2 ];
+  nc check_decode "set: descending elements accepted and resorted" digest_set
+    "\x02\x02\x01" [ 1; 2 ];
+  nc check_decode "set: duplicate elements collapsed" digest_set "\x02\x01\x01"
+    [ 1 ];
+  nc check "set: encoding sorts and dedups"
+    (encode digest_set [ 2; 1; 2 ])
+    "\x02\x01\x02";
+
+  (* HashSet and Vec share the sequence layout, order and all. *)
+  nc check "unordered_list keeps the wire order"
+    (encode (unordered_list u8) [ 2; 1 ])
+    "\x02\x02\x01";
+  nc check "string_utf8 is the bytes layout" (encode string_utf8 "tn") "\x02tn";
+
+  (* The comparator bcs sorts map keys by: encoded bytes, not element order.
+     For a uniform sized_bytes 96 key (a BLS public key) the two orders
+     coincide, which is what lets a BlsPublicKey-keyed map be sorted by the
+     OCaml value; for a variable-length key they DIVERGE, and the second row
+     is the discriminating one. *)
+  let key96 = sized_bytes 96 in
+  let a96 = String.make 96 '\x01' and b96 = String.make 96 '\x02' in
+  nc check "encoded_compare agrees with element order at sized_bytes 96"
+    (Printf.sprintf "%d %d %d"
+       (compare (encoded_compare key96 a96 b96) 0)
+       (compare (encoded_compare key96 b96 a96) 0)
+       (encoded_compare key96 a96 a96))
+    "-1 1 0";
+  nc check "encoded_compare differs from element order for variable lengths"
+    (Printf.sprintf "%d %d"
+       (compare (encoded_compare bytes "b" "aa") 0)
+       (compare (String.compare "b" "aa") 0))
+    "-1 1";
+
+  (* Every SEQUENCE, map and byte-string length prefix is bounded by bcs's
+     MAX_SEQUENCE_LENGTH = 2^31 - 1, one step stricter than the u32 ceiling the
+     ULEB128 reader enforces on its own: [parse_length] refuses anything above
+     it with [ExceededMaxLen] BEFORE a single element is read
+     (bcs-0.1.6 lib.rs:312, de.rs:283-290). Both polarities, straight off the
+     oracle probe against bcs 0.1.6:
+
+       F5 bcs Vec<u8> len=2^31   -> ERR exceeded max sequence length: 2147483648
+       F5 bcs Vec<u8> len=2^31-1 -> ERR unexpected end of input
+
+     The exact message is asserted because the u32 ceiling alone also fails
+     these rows, just later and for the missing bytes, and for a zero-width
+     element type it would not fail at all. [btree_set], [unordered_list] and
+     [string_utf8] are [list] and [bytes], so they inherit the bound. *)
+  let over_max = "\x80\x80\x80\x80\x08" (* ULEB128 of 2^31 *)
+  and at_max = "\xff\xff\xff\xff\x07" (* ULEB128 of 2^31 - 1 *) in
+  nc check_error "bytes: a length past MAX_SEQUENCE_LENGTH" bytes over_max
+    "length 2147483648 out of range at offset 0";
+  nc check_error "bytes: MAX_SEQUENCE_LENGTH itself is still a length" bytes
+    at_max "unexpected end of input at offset 5 (wanted 2147483647 bytes)";
+  nc check_error "list: a length past MAX_SEQUENCE_LENGTH" (list u8) over_max
+    "length 2147483648 out of range at offset 0";
+  nc check_error "map: a length past MAX_SEQUENCE_LENGTH" byte_map over_max
+    "length 2147483648 out of range at offset 0";
+  (* [sized_bytes] reads its prefix with the plain u32 reader and then
+     demands [len = n]. bcs routes every serialize_bytes field through
+     [parse_length] (de.rs:283-289, 404-409), so it refuses a prefix past
+     MAX_SEQUENCE_LENGTH there; the port's [len = n] comparison refuses the
+     same prefix at the same offset, and no width the port can declare tells
+     the two apart. This row pins that refusal. *)
+  nc check_error "sized_bytes: a length past MAX_SEQUENCE_LENGTH"
+    (sized_bytes 32) over_max "length 2147483648 out of range at offset 0";
+  (* And the ENUM tag keeps the plain u32 ceiling: bcs reads variant indices
+     with [parse_u32_from_uleb128], never [parse_length] (de.rs:262-292), so
+     the generic reader must still hand back this very value. *)
+  nc check_decode "uleb128: the generic reader keeps the u32 ceiling" uleb128
+    over_max 2147483648;
+
+  (* Vacuous-green guard for the chunk-44 additions (design section 4, line
+     198): the count is asserted against a literal floor, so dropping a case
+     turns this program red instead of silently shrinking it. *)
+  if !new_cases >= 18 then
+    Printf.printf "ok   chunk-44 case floor (%d new cases >= 18)\n" !new_cases
+  else begin
+    incr failures;
+    Printf.printf "FAIL chunk-44 case floor: %d new cases, expected >= 18\n"
+      !new_cases
+  end;
 
   ignore b;
   ignore s;

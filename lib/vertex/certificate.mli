@@ -19,6 +19,9 @@ type error =
   | Duplicate_voter  (** Two votes from the same authority. *)
   | Bad_signature  (** A vote's signature does not verify. *)
   | Not_enough_stake  (** Signers fall short of the quorum threshold. *)
+  | Not_genesis
+      (** {!check} was handed a certificate in the genesis verification state
+          whose header is not one of {!genesis}'s. *)
 
 val error_to_string : error -> string
 
@@ -34,7 +37,26 @@ val genesis : Committee.t -> t list
 
 val check : Committee.t -> t -> (unit, error) result
 (** Re-verify a certificate against a committee, as would be done for one
-    received over the wire. Genesis certificates always pass. *)
+    received over the wire. A certificate in the genesis state passes only if
+    it IS one of {!genesis}'s, the containment [Certificate::genesis(committee)
+    .contains(self)] of certificate.rs:236; the genesis state alone is no proof
+    of anything, because the wire carries it as a bare tag. *)
+
+val claim :
+  header:Header.t -> signers:Authority_id.Set.t -> aggregate:string option -> t option
+(** Wire ingress: assemble a certificate out of fields that arrived from a
+    peer, WITHOUT re-verifying the quorum, the way [Batch.Sealed.claim]
+    (batch.mli:106) pairs a batch with a claimed digest. Chunk 44's
+    [Certificate_wire.to_checked] is the only intended caller, and it runs
+    {!check} on the result before handing it out, so no unchecked certificate
+    escapes the network layer.
+
+    [aggregate] is [None] for a genesis certificate, whose Rust wire state is
+    the unit variant [SignatureVerificationState::Genesis], and [Some bytes]
+    otherwise, where the bytes are the crypto seam's own aggregate encoding.
+    The result is [None] when the seam refuses those bytes, so the aggregate
+    field can never hold a non-aggregate. Everything else, the quorum and the
+    aggregate itself, is {!check}'s business. *)
 
 val header : t -> Header.t
 val digest : t -> Digests.Header_digest.t  (** The certified header's digest. *)

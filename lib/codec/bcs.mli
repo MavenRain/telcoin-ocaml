@@ -138,6 +138,49 @@ val sorted_map : 'k t -> 'v t -> compare:('k -> 'k -> int) -> ('k * 'v) list t
     Encoding sorts by [compare]; decoding checks that order was respected, so a
     non-canonical ordering is rejected rather than silently accepted. *)
 
+val encoded_compare : 'a t -> 'a -> 'a -> int
+(** [encoded_compare c] orders values the way bcs itself orders map keys:
+    lexicographically over their ENCODED bytes, which is what the Rust
+    serializer sorts a map by before writing it (bcs-0.1.6 ser.rs:545-546).
+    Pass it to {!sorted_map} as [~compare:(encoded_compare key_codec)]
+    whenever the key's OCaml order is not already its encoded-byte order.
+
+    The two orders agree when every key encodes to the same number of bytes,
+    as they do for a uniform {!sized_bytes} key, and they DISAGREE in general:
+    ["b"] is above ["aa"] as a string but below it as {!bytes}, because the
+    ULEB128 length is compared first. *)
+
+val btree_set : 'a t -> compare:('a -> 'a -> int) -> 'a list t
+(** A Rust [BTreeSet]: the plain sequence layout of {!list}, with the set
+    discipline placed where Rust places it.
+
+    Encoding sorts by [compare] and drops duplicates, which is what iterating
+    a [BTreeSet] yields. Decoding accepts ANY order and any duplicates, then
+    sorts and dedups, which is what Rust's decoder does: bcs reads a sequence
+    as a count followed by elements with no order or uniqueness check
+    (de.rs:611-617), and [BTreeSet::deserialize] collects the visited
+    elements into the set. Rejecting an unsorted sequence here would refuse
+    byte strings every Rust node accepts, so the permissive decode is the
+    parity-preserving one, not a laxity. Maps are the opposite case and stay
+    order-checked: see {!sorted_map}. *)
+
+val unordered_list : 'a t -> 'a list t
+(** A Rust [HashSet] or a [Vec] whose element order carries no meaning: the
+    layout is exactly {!list}'s, and the separate name records that a reader
+    must not read anything into the order. Decoding preserves the wire order,
+    since no canonical order exists to restore. *)
+
+val string_utf8 : string t
+(** A Rust [String]: bcs reaches it through [serialize_bytes], so the layout
+    is {!bytes}, a ULEB128 length then the raw bytes (GT:52, 136). The
+    separate name marks a field as text rather than an opaque blob.
+
+    The bytes are NOT validated as UTF-8 here. The chunk-44 ground truth does
+    not pin whether the Rust decoder rejects invalid UTF-8, and the design
+    (section 2, line 183) specifies the [bytes] layout with no check, so the
+    permissive form is deliberate; a text field whose content matters should
+    wrap this in {!refine}. *)
+
 (** {2 Sum types} *)
 
 type 'a case

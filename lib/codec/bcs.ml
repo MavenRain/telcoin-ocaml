@@ -128,6 +128,21 @@ module Reader = struct
       else ok acc
     in
     go 0 0
+
+  (* bcs bounds every SEQUENCE, map and byte-string length prefix by
+     MAX_SEQUENCE_LENGTH = 2^31 - 1 (bcs-0.1.6 lib.rs:312), one step stricter
+     than the u32 ceiling [uleb128] enforces: [parse_length] refuses anything
+     above it with [ExceededMaxLen] before a single element is read
+     (de.rs:283-290). Enum variant indices do NOT go through it, so they keep
+     the plain reader. *)
+  let max_sequence_length = 0x7fff_ffff
+
+  let length t =
+    let start = t.pos in
+    let* n = uleb128 t in
+    if n > max_sequence_length then
+      Error (Length_out_of_range { offset = start; length = n })
+    else ok n
 end
 
 type 'a t = {
@@ -184,7 +199,7 @@ let bytes =
       Writer.uleb128 w (String.length s);
       Writer.raw w s)
     ~read:(fun r ->
-      let* n = Reader.uleb128 r in
+      let* n = Reader.length r in
       Reader.raw r n)
 
 let fixed_bytes n =
@@ -196,7 +211,11 @@ let fixed_bytes n =
    [serialize_bytes], so bcs length-prefixes it (bcs-0.1.6/src/ser.rs:273-278).
    The write is exactly [bytes]; only the read pins the width, so a prefix of
    any other length is REFUSED at that offset rather than re-framed as a
-   shorter field followed by a shifted remainder. *)
+   shorter field followed by a shifted remainder. The prefix deliberately
+   stays on [Reader.uleb128], not [Reader.length]: bcs routes this length
+   through parse_length too (de.rs:404-409), but the [len = n] comparison
+   below already refuses everything past MAX_SEQUENCE_LENGTH at the same
+   offset, and no width the port can declare tells the two refusals apart. *)
 let sized_bytes n =
   make
     ~write:(fun w s ->
@@ -231,7 +250,7 @@ let list c =
       Writer.uleb128 w (List.length xs);
       List.iter (c.write w) xs)
     ~read:(fun r ->
-      let* n = Reader.uleb128 r in
+      let* n = Reader.length r in
       (* Fold the count into a growing accumulator; reversed once at the end so
          no element is ever re-appended in place. *)
       let rec go i acc =
@@ -291,7 +310,7 @@ let sorted_map k v ~compare =
       Writer.uleb128 w (List.length sorted);
       List.iter (entry.write w) sorted)
     ~read:(fun r ->
-      let* n = Reader.uleb128 r in
+      let* n = Reader.length r in
       let rec go i prev acc =
         if i = 0 then ok (List.rev acc)
         else
@@ -303,6 +322,38 @@ let sorted_map k v ~compare =
           | _ -> go (i - 1) (Some key) (e :: acc)
       in
       go n None [])
+
+(* The order bcs itself imposes on map keys: lexicographic over the ENCODED
+   bytes, which is what MapSerializer::end sorts by (bcs-0.1.6 ser.rs:545-546)
+   before it writes the entries out. String.compare on OCaml strings is byte
+   order, so encoding both sides and comparing the results is that order
+   exactly. *)
+let encoded_compare c x y = String.compare (encode c x) (encode c y)
+
+(* A Rust BTreeSet or HashSet. The layout is a plain sequence, so the encoder
+   owns canonicality: sort and dedup here. The decoder must NOT: bcs's
+   deserialize_seq reads a count and visits elements with no order or
+   uniqueness check (de.rs:611-617), and BTreeSet::deserialize collects into
+   the set, silently resorting and collapsing duplicates. Rejecting an
+   unsorted sequence would refuse byte strings every Rust node accepts, a
+   differential-acceptance divergence; so decode accepts any order and
+   normalizes, exactly as Rust does. *)
+let btree_set c ~compare =
+  let seq = list c in
+  make
+    ~write:(fun w xs -> seq.write w (List.sort_uniq compare xs))
+    ~read:(fun r -> Result.map (List.sort_uniq compare) (seq.read r))
+
+(* A Rust HashSet or Vec whose element order carries no meaning. The layout
+   is [list]'s; the separate name is the intent, so a reader of a message
+   codec can tell "sequence whose order is incidental" from "sequence whose
+   order is the message". *)
+let unordered_list = list
+
+(* A Rust String. bcs reaches it through serialize_bytes, so the layout is
+   [bytes]: a ULEB128 length then the raw bytes (GT:52, 136). The name marks
+   the field as text rather than an opaque blob. *)
+let string_utf8 = bytes
 
 type 'a case = {
   index : int;
